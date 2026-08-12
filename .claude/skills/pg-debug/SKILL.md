@@ -48,12 +48,21 @@ pg-debug explain --analyze "SELECT * FROM orders WHERE user_id = 42"
 # 3. Would an index help? Nothing is created — HypoPG simulates it.
 pg-debug explain "SELECT * FROM orders WHERE user_id = 42" -i 'orders(user_id)'
 
+# Expressions work too, exactly as CREATE INDEX would take them.
+pg-debug explain "SELECT * FROM users WHERE lower(email) = 'a@b.c'" -i 'users(lower(email))'
+
 # 4. Or let the advisor search for candidates itself.
 pg-debug tune-queries "SELECT * FROM orders WHERE user_id = 42 AND status = 'paid'"
 ```
 
 `--analyze` executes the query, so do not use it for `UPDATE`/`DELETE` unless
 you mean it. It also cannot be combined with `-i`.
+
+An index only helps a predicate it matches: to speed up `WHERE lower(email) =
+...` the index has to be on `lower(email)`, not on `email`. PostgreSQL will
+only accept an expression built from IMMUTABLE functions, so `date_trunc('day',
+created_at)` on a `timestamptz` is rejected — that is the server's rule, not a
+parsing failure.
 
 Read the plan for the shape of the problem: a `Seq Scan` with a selective
 `Filter` wants an index; a huge row-estimate error (`Plan Rows` far from

@@ -104,7 +104,11 @@ Health checks are `index`, `connection`, `vacuum`, `sequence`, `replication`,
 
 A hypothetical index `SPEC` is `table(column, ...)` with an optional method —
 `orders(user_id)`, `orders(user_id, created_at):btree`,
-`reporting.orders(status):hash`.
+`reporting.orders(status):hash`. Columns may be expressions, as in
+`CREATE INDEX`: `users(lower(email))`,
+`orders(date_trunc('day', created_at))`,
+`users((first_name || ' ' || last_name))`. Commas inside a function call or a
+quoted string belong to that expression, not to the column list.
 
 SQL arguments accept `-` to read the statement from stdin:
 

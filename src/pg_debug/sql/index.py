@@ -1,9 +1,21 @@
+import re
 from dataclasses import dataclass
+from hashlib import sha1
 from typing import Any
 from typing import Optional
 from typing import Tuple
 
 from psycopg.sql import Identifier
+
+#: PostgreSQL truncates identifiers longer than NAMEDATALEN - 1 bytes.
+MAX_IDENTIFIER_BYTES = 63
+
+_IDENTIFIER_UNSAFE = re.compile(r"[^A-Za-z0-9_]+")
+
+
+def _identifier_part(text: str) -> str:
+    """Reduce arbitrary SQL text to something usable inside an identifier."""
+    return _IDENTIFIER_UNSAFE.sub("_", text).strip("_")
 
 
 def table_identifier(table: str) -> Identifier:
@@ -53,29 +65,27 @@ class IndexDefinition:
 
     @property
     def name(self) -> str:
-        # Clean column names for use in index naming
-        # Replace special characters with underscores to avoid issues with
-        # functional expressions
-        cleaned_columns = []
-        for col in self.columns:
-            # Replace parentheses and other special characters with underscores
-            # This ensures expressions like LOWER(column_name) work in
-            # index names
-            cleaned_col = col.replace("(", "_").replace(")", "_").replace(" ", "_").replace(",", "_")
-            # Remove consecutive underscores
-            while "__" in cleaned_col:
-                cleaned_col = cleaned_col.replace("__", "_")
-            # Remove trailing underscores
-            cleaned_col = cleaned_col.rstrip("_")
-            cleaned_columns.append(cleaned_col)
+        # An index column may be an expression such as lower(email) or
+        # date_trunc('day', created_at), so everything that is not valid in an
+        # unquoted identifier becomes an underscore.
+        cleaned_columns = [_identifier_part(col) for col in self.columns]
 
         column_part = "_".join(cleaned_columns)
         suffix = "" if self.using == "btree" else f"_{self.using}"
         # A schema-qualified table would otherwise put a dot in the index name,
         # which is not a valid identifier.
-        table_part = self.table.replace(".", "_").replace('"', "")
-        base = f"pg_debug_idx_{table_part}_{column_part}_{len(self.columns)}"
-        return f"{base}{suffix}"
+        table_part = _identifier_part(self.table)
+        base = f"pg_debug_idx_{table_part}_{column_part}_{len(self.columns)}{suffix}"
+
+        if len(base.encode()) <= MAX_IDENTIFIER_BYTES:
+            return base
+
+        # PostgreSQL truncates identifiers past NAMEDATALEN, which would let two
+        # long expressions collapse onto one name. Keep the readable prefix and
+        # end with a digest of the full name so they stay distinct.
+        digest = sha1(base.encode(), usedforsecurity=False).hexdigest()[:8]
+        keep = MAX_IDENTIFIER_BYTES - len(digest) - 1
+        return f"{base.encode()[:keep].decode(errors='ignore')}_{digest}"
 
     def __str__(self) -> str:
         return self.definition

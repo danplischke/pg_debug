@@ -32,6 +32,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The CLI rejected expression indexes: `-i 'users(lower(email))'` and anything
+  with a comma inside a function call or quoted string failed to parse. The
+  spec parser is now parenthesis- and quote-aware, so index columns accept the
+  same expressions `CREATE INDEX` does.
+- Generated index names could be invalid identifiers. An expression such as
+  `date_trunc('day', created_at)` produced a name containing quotes, which the
+  server rejected outright; names are now reduced to identifier characters and
+  kept within PostgreSQL's 63-byte limit, with a digest suffix so two long
+  expressions cannot collapse onto the same truncated name.
 - Index candidate sizes were measured in a separate statement from the
   hypothetical index creation. Hypothetical indexes are session-scoped and the
   connection pool does not promise the next statement the same connection, so

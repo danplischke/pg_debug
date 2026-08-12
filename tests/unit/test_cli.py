@@ -426,3 +426,68 @@ def test_llm_model_defaults_to_unset(pg_client):
         assert run(["schemas"])[0] == 0
 
     assert client_cls.call_args.kwargs["llm_model"] is None
+
+
+# -- Expression index specs -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "spec,columns",
+    [
+        ("users(lower(email))", ["lower(email)"]),
+        ("users( lower(email) )", ["lower(email)"]),
+        ("users(substr(email, 1, 3))", ["substr(email, 1, 3)"]),
+        ("orders(date_trunc('day', created_at))", ["date_trunc('day', created_at)"]),
+        ("users((first_name || ' ' || last_name))", ["(first_name || ' ' || last_name)"]),
+        ("users(coalesce(nickname, email), status)", ["coalesce(nickname, email)", "status"]),
+        ("users(status, lower(email))", ["status", "lower(email)"]),
+        ("users(upper(lower(trim(email))))", ["upper(lower(trim(email)))"]),
+    ],
+)
+def test_parse_index_spec_accepts_expressions(spec, columns):
+    assert cli.parse_index_spec(spec)["columns"] == columns
+
+
+def test_parse_index_spec_keeps_commas_inside_quotes():
+    assert cli.parse_index_spec("t(replace(name, ',', ';'))")["columns"] == ["replace(name, ',', ';')"]
+
+
+def test_parse_index_spec_handles_doubled_quotes():
+    assert cli.parse_index_spec("t(replace(name, '''', ''))")["columns"] == ["replace(name, '''', '')"]
+
+
+def test_parse_index_spec_accepts_a_quoted_table():
+    parsed = cli.parse_index_spec('"My Table"(col)')
+    assert parsed["table"] == '"My Table"'
+
+
+def test_parse_index_spec_accepts_a_quoted_column():
+    assert cli.parse_index_spec('t("Mixed Case")')["columns"] == ['"Mixed Case"']
+
+
+def test_parse_index_spec_method_after_an_expression():
+    parsed = cli.parse_index_spec("users(lower(email)):hash")
+    assert parsed == {"table": "users", "columns": ["lower(email)"], "using": "hash"}
+
+
+@pytest.mark.parametrize(
+    "spec,reason",
+    [
+        ("users(lower(email)", "Unbalanced"),
+        ("(email)", "No table name"),
+        ("users()", "At least one column"),
+        ("users(email) extra", "Unexpected text"),
+        ("users(email):not a method", "Invalid index method"),
+    ],
+)
+def test_parse_index_spec_rejects_malformed_expressions(spec, reason):
+    with pytest.raises(argparse.ArgumentTypeError, match=reason):
+        cli.parse_index_spec(spec)
+
+
+def test_split_index_columns_splits_only_at_the_top_level():
+    assert cli.split_index_columns("a, f(b, c), (d || ',' || e)") == ["a", "f(b, c)", "(d || ',' || e)"]
+
+
+def test_split_index_columns_ignores_blank_entries():
+    assert cli.split_index_columns(" a , , b ") == ["a", "b"]

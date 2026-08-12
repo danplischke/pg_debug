@@ -17,6 +17,7 @@ import pytest_asyncio
 
 from pg_debug import AccessMode
 from pg_debug import PgDebug
+from pg_debug import SyncPgDebug
 from pg_debug import cli
 from pg_debug.artifacts import ExplainPlanArtifact
 from pg_debug.errors import ExtensionRequiredError
@@ -147,6 +148,65 @@ async def test_explain_with_hypothetical_index(pg):
     with_index = await pg.explain_query(f"SELECT * FROM {SCHEMA}.orders WHERE customer_id = 42", hypothetical_indexes=indexes)
 
     assert with_index.plan_tree.total_cost < without.plan_tree.total_cost
+
+
+@pytest.mark.asyncio
+async def test_explain_with_an_expression_index(pg):
+    """An expression index has to survive parsing, naming and the server."""
+    if not await has_extension(pg, "hypopg"):
+        pytest.skip("hypopg is not installed")
+
+    query = f"SELECT * FROM {SCHEMA}.customers WHERE lower(email) = 'c42'"
+    indexes = [{"table": f"{SCHEMA}.customers", "columns": ["lower(email)"]}]
+
+    without = await pg.explain_query(query)
+    with_index = await pg.explain_query(query, hypothetical_indexes=indexes)
+
+    assert "Seq Scan" in without.to_text()
+    assert with_index.plan_tree.total_cost < without.plan_tree.total_cost
+
+
+@pytest.mark.asyncio
+async def test_explain_with_a_multi_argument_expression_index(pg):
+    """The commas inside the call must not be read as column separators."""
+    if not await has_extension(pg, "hypopg"):
+        pytest.skip("hypopg is not installed")
+
+    query = f"SELECT * FROM {SCHEMA}.customers WHERE substr(email, 1, 3) = 'c42'"
+    indexes = [{"table": f"{SCHEMA}.customers", "columns": ["substr(email, 1, 3)"]}]
+
+    without = await pg.explain_query(query)
+    with_index = await pg.explain_query(query, hypothetical_indexes=indexes)
+
+    assert with_index.plan_tree.total_cost < without.plan_tree.total_cost
+
+
+def test_cli_explain_with_an_expression_index(capsys, monkeypatch):
+    """The whole path: CLI spec parsing, index naming, then the server.
+
+    cli.main() runs its own event loop, so this stays synchronous and sets up
+    through SyncPgDebug rather than the async fixture.
+    """
+    monkeypatch.setenv("DATABASE_URI", DATABASE_URI or "")
+    table = "pgdebug_expression_test"
+
+    with SyncPgDebug(DATABASE_URI) as pg:
+        if not pg.execute_sql("SELECT 1 FROM pg_extension WHERE extname = 'hypopg'"):
+            pytest.skip("hypopg is not installed")
+
+        pg.execute_sql(f"DROP TABLE IF EXISTS {table}")
+        pg.execute_sql(f"CREATE TABLE {table} (id serial PRIMARY KEY, email text)")
+        pg.execute_sql(f"INSERT INTO {table} (email) SELECT 'C' || i FROM generate_series(1, 5000) i")
+        pg.execute_sql(f"ANALYZE {table}")
+
+        try:
+            code = cli.main(["explain", f"SELECT * FROM {table} WHERE lower(email) = 'c42'", "-i", f"{table}(lower(email))"])
+
+            captured = capsys.readouterr()
+            assert code == 0, captured.err
+            assert "Index Scan" in captured.out
+        finally:
+            pg.execute_sql(f"DROP TABLE IF EXISTS {table}")
 
 
 @pytest.mark.asyncio

@@ -10,9 +10,11 @@ import re
 import sys
 from typing import Any
 from typing import Dict
+from typing import Iterator
 from typing import List
 from typing import Optional
 from typing import Sequence
+from typing import Tuple
 
 from . import __version__
 from .client import DATABASE_URL_ENV_VARS
@@ -41,12 +43,77 @@ PROG = "pg-debug"
 #: distinct from 1 (error) and 2 (argparse usage error).
 UNHEALTHY_EXIT_CODE = 3
 
-# table(col1, col2) with an optional index method, e.g. users(email):hash
-INDEX_SPEC_RE = re.compile(r"^\s*(?P<table>[^\s(]+)\s*\(\s*(?P<columns>[^)]+?)\s*\)\s*(?::\s*(?P<using>\w+)\s*)?$")
+INDEX_METHOD_RE = re.compile(r"^\w+$")
+
+INDEX_SPEC_HELP = (
+    "Expected 'table(column, ...)' with an optional ':method', for example "
+    "'users(email)', 'orders(user_id, created_at):brin' or 'users(lower(email))'."
+)
+
+
+def _scan_sql(text: str) -> Iterator[Tuple[int, str, int, bool]]:
+    """Walk SQL text, tracking parenthesis depth and quoting.
+
+    Yields ``(position, character, depth, quoted)``, where depth counts
+    unquoted parentheses opened before this character and quoted says whether
+    the character sits inside a '...' literal or a "..." identifier. Doubled
+    quotes are the SQL escape and stay inside the quoted run.
+    """
+    depth = 0
+    quote = ""
+    index = 0
+
+    while index < len(text):
+        char = text[index]
+
+        if quote:
+            if char == quote:
+                if text[index + 1 : index + 2] == quote:  # '' or "" escape
+                    yield index, char, depth, True
+                    index += 1
+                    yield index, text[index], depth, True
+                    index += 1
+                    continue
+                quote = ""
+            yield index, char, depth, True
+        elif char in "'\"":
+            quote = char
+            yield index, char, depth, True
+        elif char == "(":
+            yield index, char, depth, False
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            yield index, char, depth, False
+        else:
+            yield index, char, depth, False
+
+        index += 1
+
+
+def split_index_columns(text: str) -> List[str]:
+    """Split an index column list on the commas that separate its entries.
+
+    Commas inside a function call or a quoted string belong to that entry, so
+    ``date_trunc('day', created_at), status`` is two columns, not three.
+    """
+    columns: List[str] = []
+    start = 0
+
+    for position, char, depth, quoted in _scan_sql(text):
+        if char == "," and depth == 0 and not quoted:
+            columns.append(text[start:position])
+            start = position + 1
+
+    columns.append(text[start:])
+    return [column.strip() for column in columns if column.strip()]
 
 
 def parse_index_spec(spec: str) -> Dict[str, Any]:
-    """Parse a hypothetical index spec such as ``users(email, name):btree``.
+    """Parse a hypothetical index spec such as ``users(lower(email)):btree``.
+
+    Columns may be plain names or expressions, matching what PostgreSQL accepts
+    in a CREATE INDEX column list.
 
     Returns:
         A dict with ``table``, ``columns`` and ``using`` keys.
@@ -54,15 +121,43 @@ def parse_index_spec(spec: str) -> Dict[str, Any]:
     Raises:
         argparse.ArgumentTypeError: If the spec is malformed.
     """
-    match = INDEX_SPEC_RE.match(spec)
-    if not match:
-        raise argparse.ArgumentTypeError(f"Invalid index spec: {spec!r}. Expected the form 'table(column, ...)' or 'table(column, ...):method'.")
 
-    columns = [c.strip() for c in match.group("columns").split(",") if c.strip()]
+    def invalid(reason: str) -> argparse.ArgumentTypeError:
+        return argparse.ArgumentTypeError(f"Invalid index spec: {spec!r}. {reason}")
+
+    text = spec.strip()
+    opened_at = closed_at = None
+
+    for position, char, depth, quoted in _scan_sql(text):
+        if quoted:
+            continue
+        if char == "(" and depth == 0:
+            opened_at = position
+        elif char == ")" and depth == 0:
+            closed_at = position
+            break
+
+    if opened_at is None or closed_at is None:
+        raise invalid(f"Unbalanced parentheses. {INDEX_SPEC_HELP}")
+
+    table = text[:opened_at].strip()
+    if not table:
+        raise invalid(f"No table name before the column list. {INDEX_SPEC_HELP}")
+
+    columns = split_index_columns(text[opened_at + 1 : closed_at])
     if not columns:
-        raise argparse.ArgumentTypeError(f"Invalid index spec: {spec!r}. At least one column is required.")
+        raise invalid("At least one column is required.")
 
-    return {"table": match.group("table"), "columns": columns, "using": match.group("using") or "btree"}
+    using = "btree"
+    trailing = text[closed_at + 1 :].strip()
+    if trailing:
+        if not trailing.startswith(":"):
+            raise invalid(f"Unexpected text after the column list: {trailing!r}. {INDEX_SPEC_HELP}")
+        using = trailing[1:].strip()
+        if not INDEX_METHOD_RE.match(using):
+            raise invalid(f"Invalid index method: {using!r}.")
+
+    return {"table": table, "columns": columns, "using": using}
 
 
 def read_sql(value: str) -> str:

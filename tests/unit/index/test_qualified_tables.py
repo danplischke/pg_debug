@@ -16,6 +16,7 @@ from pg_debug.sql import TableAliasVisitor
 from pg_debug.sql import resolve_table_reference
 from pg_debug.sql import split_table_reference
 from pg_debug.sql import table_identifier
+from pg_debug.sql.index import MAX_IDENTIFIER_BYTES
 
 
 def parse(sql):
@@ -175,3 +176,50 @@ def test_hypopg_function_is_allowed_in_restricted_mode():
     from pg_debug.sql.safe_sql import SafeSqlDriver
 
     assert "hypopg" in SafeSqlDriver.ALLOWED_FUNCTIONS
+
+
+# -- Expression index names -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "columns,expected",
+    [
+        (("lower(email)",), "pg_debug_idx_users_lower_email_1"),
+        (("date_trunc('day', created_at)",), "pg_debug_idx_users_date_trunc_day_created_at_1"),
+        (("(first_name || ' ' || last_name)",), "pg_debug_idx_users_first_name_last_name_1"),
+        (("status", "lower(email)"), "pg_debug_idx_users_status_lower_email_2"),
+    ],
+)
+def test_expression_indexes_get_a_valid_identifier(columns, expected):
+    """An index name has to be a bare identifier, whatever the expression was."""
+    name = IndexDefinition(table="users", columns=columns).name
+
+    assert name == expected
+    assert name.isidentifier(), f"{name!r} is not a valid unquoted identifier"
+
+
+def test_expression_index_definition_keeps_the_expression_intact():
+    index = IndexDefinition(table="users", columns=("date_trunc('day', created_at)",))
+
+    assert index.definition.endswith("ON users USING btree (date_trunc('day', created_at))")
+
+
+def test_long_names_stay_within_the_identifier_limit():
+    columns = ("lower(coalesce(some_very_long_column_name, another_very_long_column_name))",)
+
+    name = IndexDefinition(table="a_table_with_a_long_name", columns=columns).name
+
+    assert len(name.encode()) <= MAX_IDENTIFIER_BYTES
+    assert name.isidentifier()
+
+
+def test_long_names_that_share_a_prefix_stay_distinct():
+    """PostgreSQL truncates past NAMEDATALEN, which would collide silently."""
+    prefix = "lower(coalesce(a_very_long_column_name_that_keeps_going_and_going"
+
+    first = IndexDefinition(table="t", columns=(f"{prefix}, first_alternative))",)).name
+    second = IndexDefinition(table="t", columns=(f"{prefix}, second_alternative))",)).name
+
+    assert first != second
+    assert len(first.encode()) <= MAX_IDENTIFIER_BYTES
+    assert len(second.encode()) <= MAX_IDENTIFIER_BYTES
