@@ -2,6 +2,8 @@ import logging
 import time
 from itertools import combinations
 from typing import Any
+from typing import LiteralString
+from typing import cast
 from typing import override
 
 import humanize
@@ -14,6 +16,8 @@ from ..sql import ColumnCollector
 from ..sql import SafeSqlDriver
 from ..sql import SqlDriver
 from ..sql import TableAliasVisitor
+from ..sql import resolve_table_reference
+from ..sql import split_table_reference
 from .index_opt_base import IndexRecommendation
 from .index_opt_base import IndexTuningBase
 from .index_opt_base import candidate_str
@@ -381,6 +385,19 @@ class DatabaseTuningAdvisor(IndexTuningBase):
 
         return filtered_candidates
 
+    @staticmethod
+    def _matching_references(references: dict[str, tuple[str | None, str]], schema: str, table_name: str) -> list[str]:
+        """Return the table references a catalog row answers for.
+
+        An unqualified reference matches any schema, since the search_path
+        decides which one it resolves to.
+        """
+        return [
+            reference
+            for reference, (ref_schema, ref_name) in references.items()
+            if ref_name == table_name and (ref_schema is None or ref_schema == schema)
+        ]
+
     async def _filter_long_text_columns(self, candidates: list[IndexRecommendation], max_text_length: int = 100) -> list[IndexRecommendation]:
         """Filter out indexes that contain long text columns based on catalog information.
 
@@ -400,13 +417,19 @@ class DatabaseTuningAdvisor(IndexTuningBase):
             for column in candidate.columns:
                 table_columns.add((candidate.table, column))
 
-        # Create a list of table names for the query
-        tables_array = ",".join(f"'{table}'" for table, _ in table_columns)
-        columns_array = ",".join(f"'{col}'" for _, col in table_columns)
+        # Table references may be schema-qualified; match on the schema too
+        # when they are, and keep the reference as written so results map back
+        # onto the candidates.
+        references = {table: split_table_reference(table) for table, _ in table_columns}
+        table_names = sorted({name for _, name in references.values()})
+        column_names = sorted({col for _, col in table_columns})
+
+        params: list[Any] = [table_names, column_names]
 
         # Query to get column types and their length limits from catalog
         type_query = f"""
             SELECT
+                c.table_schema,
                 c.table_name,
                 c.column_name,
                 c.data_type,
@@ -422,13 +445,21 @@ class DatabaseTuningAdvisor(IndexTuningBase):
                 END as potential_long_text
             FROM information_schema.columns c
             LEFT JOIN pg_stats ON
+                pg_stats.schemaname = c.table_schema AND
                 pg_stats.tablename = c.table_name AND
                 pg_stats.attname = c.column_name
-            WHERE c.table_name IN ({tables_array})
-            AND c.column_name IN ({columns_array})
+            WHERE c.table_name = ANY({{}})
+            AND c.column_name = ANY({{}})
         """
 
-        result = await self.sql_driver.execute_query(type_query)  # type: ignore
+        schemas = sorted({schema for schema, _ in references.values() if schema})
+        if schemas:
+            type_query += " AND (c.table_schema = ANY({}) OR c.table_name = ANY({}))"
+            params.append(schemas)
+            params.append(sorted({name for table, (schema, name) in references.items() if not schema}))
+
+        # The query text is assembled from literals; only bound parameters vary.
+        result = await SafeSqlDriver.execute_param_query(self.sql_driver, cast(LiteralString, type_query), params)
 
         logger.debug(f"Column types and length limits: {result}")
 
@@ -441,17 +472,19 @@ class DatabaseTuningAdvisor(IndexTuningBase):
         potential_problematic_columns = set()
 
         for row in result:
-            table = row.cells["table_name"]
             column = row.cells["column_name"]
             potential_long = row.cells["potential_long_text"]
             avg_width = row.cells.get("avg_width")
 
-            # Use avg_width from pg_stats as a heuristic - if it's high, likely contains long text
-            if potential_long and (avg_width is None or avg_width > max_text_length * 0.4):
-                problematic_columns.add((table, column))
-                logger.debug(f"Identified potentially long text column: {table}.{column} (avg_width: {avg_width})")
-            elif potential_long:
-                potential_problematic_columns.add((table, column))
+            # A row can answer for more than one candidate table reference, for
+            # example when a query mentions both "orders" and "public.orders".
+            for table in self._matching_references(references, row.cells["table_schema"], row.cells["table_name"]):
+                # Use avg_width from pg_stats as a heuristic - if it's high, likely contains long text
+                if potential_long and (avg_width is None or avg_width > max_text_length * 0.4):
+                    problematic_columns.add((table, column))
+                    logger.debug(f"Identified potentially long text column: {table}.{column} (avg_width: {avg_width})")
+                elif potential_long:
+                    potential_problematic_columns.add((table, column))
 
         # Filter candidates based on column information
         filtered_candidates = []
@@ -800,8 +833,8 @@ class ConditionColumnCollector(ColumnCollector):
 
         if len(fields) == 2:  # Table.column format
             table_or_alias, column = fields
-            # Resolve alias to actual table
-            table = aliases.get(table_or_alias, table_or_alias)
+            # Resolve alias or bare name to the table as written in FROM
+            table = resolve_table_reference(table_or_alias, aliases, tables)
 
             # Add to condition columns
             if table not in self.condition_columns:
@@ -811,13 +844,11 @@ class ConditionColumnCollector(ColumnCollector):
         elif len(fields) == 1:  # Unqualified column
             column = fields[0]
 
-            # For unqualified columns, check all tables in context
+            # For unqualified columns, check all tables in context. Table
+            # references keep any schema qualifier so they match the keys the
+            # rest of the pipeline uses.
             found_match = False
             for table in tables:
-                # Skip schema qualification if present
-                if "." in table:
-                    _, table = table.split(".", 1)
-
                 # Add column to all tables that have it
                 if self._column_exists(table, column):
                     if table not in self.condition_columns:

@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 
 from ..sql import SqlDriver
+from .result import HealthCheckResult
+
+CONNECTION_HEALTH = "Connection health"
 
 
 @dataclass
@@ -44,17 +47,29 @@ class ConnectionHealthCalc:
             return f"Idle connections healthy: {idle}"
         return f"High number of idle connections: {idle} (max: {self.max_idle_connections})"
 
-    async def connection_health_check(self) -> str:
+    async def connection_health_check(self) -> HealthCheckResult:
         """Run all connection health checks and return combined results."""
         total = await self._get_total_connections()
         idle = await self._get_idle_connections()
 
         if total > self.max_total_connections:
-            return f"High number of connections: {total}"
+            healthy, summary = False, f"High number of connections: {total}"
         elif idle > self.max_idle_connections:
-            return f"High number of connections idle in transaction: {idle}"
+            healthy, summary = False, f"High number of connections idle in transaction: {idle}"
         else:
-            return f"Connections healthy: {total} total, {idle} idle"
+            healthy, summary = True, f"Connections healthy: {total} total, {idle} idle"
+
+        return HealthCheckResult(
+            name=CONNECTION_HEALTH,
+            healthy=healthy,
+            summary=summary,
+            metrics={
+                "total_connections": total,
+                "idle_connections": idle,
+                "max_total_connections": self.max_total_connections,
+                "max_idle_connections": self.max_idle_connections,
+            },
+        )
 
     async def _get_total_connections(self) -> int:
         """Get the total number of database connections."""

@@ -20,8 +20,8 @@ from .client import AccessMode
 from .client import PgDebug
 from .database_health import HealthType
 from .errors import PgDebugError
+from .formatting import render_health_checks
 from .formatting import render_index_recommendations
-from .formatting import render_mapping
 from .formatting import render_object_details
 from .formatting import render_rows
 from .formatting import to_json
@@ -32,6 +32,10 @@ from .sql import obfuscate_password
 logger = logging.getLogger(__name__)
 
 PROG = "pg-debug"
+
+#: Exit status for `health --exit-code` when a check reports a problem. Kept
+#: distinct from 1 (error) and 2 (argparse usage error).
+UNHEALTHY_EXIT_CODE = 3
 
 # table(col1, col2) with an optional index method, e.g. users(email):hash
 INDEX_SPEC_RE = re.compile(r"^\s*(?P<table>[^\s(]+)\s*\(\s*(?P<columns>[^)]+?)\s*\)\s*(?::\s*(?P<using>\w+)\s*)?$")
@@ -82,7 +86,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=AccessMode.UNRESTRICTED.value,
         help="unrestricted (default) runs any statement; restricted allows read-only statements only.",
     )
-    parser.add_argument("--timeout", type=int, default=30, help="Statement timeout in seconds, applied in restricted mode (default: 30).")
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        help="Statement timeout in seconds. Defaults to no timeout in unrestricted mode and 30 in restricted mode.",
+    )
+    parser.add_argument(
+        "--search-path",
+        help="Schema search path to set on the connection, e.g. 'reporting,public'. Index tuning resolves table names through it.",
+    )
     parser.add_argument("--json", action="store_true", help="Print raw JSON instead of formatted text.")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="Log at INFO level, or DEBUG when repeated.")
 
@@ -141,6 +153,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="health_type",
         default=HealthType.ALL.value,
         help="Comma-separated checks to run: " + ", ".join(sorted(t.value for t in HealthType)) + " (default: all).",
+    )
+    health.add_argument(
+        "--exit-code",
+        action="store_true",
+        help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any check reports a problem, for use in CI.",
     )
     health.set_defaults(func=cmd_health)
 
@@ -252,12 +269,14 @@ def format_result(command: str, result: Any, as_json: bool) -> str:
             return to_json(result.value)
 
     if as_json:
+        if command == "health":
+            return to_json({name: check.to_dict() for name, check in result.items()})
         return to_json(result)
 
     if command == "describe":
         return render_object_details(result)
     if command == "health":
-        return render_mapping(result, empty="No health checks were performed.")
+        return render_health_checks(result)
     if command in ("tune-workload", "tune-queries"):
         return render_index_recommendations(result)
     return render_rows(result)
@@ -279,10 +298,14 @@ async def run(args: argparse.Namespace) -> int:
         database_url=args.database_url,
         access_mode=AccessMode(args.access_mode),
         timeout=args.timeout,
+        search_path=args.search_path,
     ) as pg:
         result = await args.func(pg, args)
 
     print(format_result(args.command, result, args.json))
+
+    if args.command == "health" and getattr(args, "exit_code", False):
+        return UNHEALTHY_EXIT_CODE if any(not check.healthy for check in result.values()) else 0
 
     # Index tuning reports a failure in its payload rather than raising, so the
     # exit status has to be derived from the result.

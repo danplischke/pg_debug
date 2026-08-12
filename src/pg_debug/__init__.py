@@ -28,6 +28,7 @@ from .client import AccessMode
 from .client import PgDebug
 from .client import resolve_database_url
 from .database_health import DatabaseHealthTool
+from .database_health import HealthCheckResult
 from .database_health import HealthType
 from .errors import ConnectionFailedError
 from .errors import ExplainPlanError
@@ -48,6 +49,7 @@ from .sql import DbConnPool
 from .sql import IndexDefinition
 from .sql import SafeSqlDriver
 from .sql import SqlDriver
+from .sync import SyncPgDebug
 from .top_queries import TopQueriesCalc
 
 __version__ = "0.1.0"
@@ -65,6 +67,7 @@ __all__ = [
     "ExplainPlanError",
     "ExplainPlanTool",
     "ExtensionRequiredError",
+    "HealthCheckResult",
     "HealthType",
     "IndexDefinition",
     "IndexRecommendation",
@@ -80,6 +83,7 @@ __all__ = [
     "SafeSqlDriver",
     "SchemaInspector",
     "SqlDriver",
+    "SyncPgDebug",
     "TopQueriesCalc",
     "__version__",
     "resolve_database_url",

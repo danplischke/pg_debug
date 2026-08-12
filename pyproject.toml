@@ -99,3 +99,8 @@ reportUntypedFunctionDecorator = true
 reportMissingTypeArgument = true
 reportInvalidTypeVarUse = true
 reportUnnecessaryCast = true
+
+# Tests legitimately reach into internals to exercise them directly.
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+reportPrivateUsage = false

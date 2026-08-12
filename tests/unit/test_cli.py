@@ -8,6 +8,7 @@ import pytest
 from pg_debug import cli
 from pg_debug.artifacts import ExplainPlanArtifact
 from pg_debug.artifacts import PlanNode
+from pg_debug.database_health import HealthCheckResult
 from pg_debug.errors import ExtensionRequiredError
 
 
@@ -63,7 +64,8 @@ def test_defaults():
     args = cli.build_parser().parse_args(["schemas"])
     assert args.access_mode == "unrestricted"
     assert args.json is False
-    assert args.timeout == 30
+    assert args.timeout is None
+    assert args.search_path is None
 
 
 # -- Commands ---------------------------------------------------------------
@@ -162,14 +164,73 @@ def test_explain_passes_hypothetical_indexes(pg_client):
     ]
 
 
+def health_results(*checks):
+    """Build the mapping analyze_db_health returns."""
+    return {name: HealthCheckResult(name=name, healthy=healthy, summary=summary, **extra) for name, healthy, summary, extra in checks}
+
+
 def test_health_renders_one_line_per_check(pg_client):
-    pg_client.analyze_db_health = AsyncMock(return_value={"Connection health": "ok", "Vacuum health": "ok"})
+    pg_client.analyze_db_health = AsyncMock(
+        return_value=health_results(
+            ("Connection health", True, "ok", {}),
+            ("Vacuum health", True, "ok", {}),
+        )
+    )
 
     code, out, _ = run(["health", "--type", "connection,vacuum"])
 
     assert code == 0
     assert out.splitlines()[:2] == ["Connection health: ok", "Vacuum health: ok"]
     pg_client.analyze_db_health.assert_awaited_once_with("connection,vacuum")
+
+
+def test_health_json_includes_findings_and_metrics(pg_client):
+    pg_client.analyze_db_health = AsyncMock(
+        return_value=health_results(
+            (
+                "Unused index check",
+                False,
+                "Rarely used indexes found:",
+                {"findings": [{"index": "orders_status_idx", "index_scans": 0}], "metrics": {"max_scans": 50}},
+            ),
+        )
+    )
+
+    code, out, _ = run(["--json", "health", "--type", "index"])
+
+    assert code == 0
+    assert json.loads(out) == {
+        "Unused index check": {
+            "name": "Unused index check",
+            "healthy": False,
+            "summary": "Rarely used indexes found:",
+            "findings": [{"index": "orders_status_idx", "index_scans": 0}],
+            "metrics": {"max_scans": 50},
+        }
+    }
+
+
+def test_health_exit_code_flags_problems(pg_client):
+    pg_client.analyze_db_health = AsyncMock(
+        return_value=health_results(
+            ("Connection health", True, "ok", {}),
+            ("Vacuum health", False, "Tables approaching transaction ID wraparound:", {}),
+        )
+    )
+
+    assert run(["health", "--exit-code"])[0] == cli.UNHEALTHY_EXIT_CODE
+
+
+def test_health_exit_code_is_zero_when_healthy(pg_client):
+    pg_client.analyze_db_health = AsyncMock(return_value=health_results(("Connection health", True, "ok", {})))
+
+    assert run(["health", "--exit-code"])[0] == 0
+
+
+def test_health_without_exit_code_flag_always_succeeds(pg_client):
+    pg_client.analyze_db_health = AsyncMock(return_value=health_results(("Connection health", False, "too many connections", {})))
+
+    assert run(["health"])[0] == 0
 
 
 def test_top_queries_passes_options(pg_client):

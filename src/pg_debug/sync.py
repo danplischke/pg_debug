@@ -1,0 +1,199 @@
+"""A blocking wrapper around :class:`~pg_debug.client.PgDebug`.
+
+The library is async underneath. This module is for callers that are not —
+scripts, notebooks, test suites and synchronous web apps — and do not want to
+manage an event loop themselves.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+from concurrent.futures import Future
+from typing import Any
+from typing import Awaitable
+from typing import Callable
+from typing import Dict
+from typing import Iterable
+from typing import List
+from typing import Optional
+from typing import TypeVar
+
+from .artifacts import ExplainPlanArtifact
+from .client import AccessMode
+from .client import PgDebug
+from .client import SortBy
+from .client import TuningMethod
+from .database_health import HealthCheckResult
+from .database_health import HealthType
+from .schema import ObjectType
+from .sql import DbConnPool
+
+T = TypeVar("T")
+
+
+class _LoopThread:
+    """A dedicated event loop running on its own thread.
+
+    The connection pool binds to the loop that created it, so every call has to
+    run on the same one; a fresh ``asyncio.run()`` per call would strand the
+    pool on a closed loop.
+    """
+
+    def __init__(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run, name="pg-debug-loop", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+    def run(self, coro: Awaitable[T]) -> T:
+        """Run a coroutine on the loop and block until it finishes."""
+        future: Future[T] = asyncio.run_coroutine_threadsafe(coro, self._loop)  # type: ignore[arg-type]
+        return future.result()
+
+    def close(self) -> None:
+        """Stop the loop and join its thread."""
+        if self._loop.is_closed():
+            return
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join()
+        self._loop.close()
+
+
+class SyncPgDebug:
+    """The :class:`~pg_debug.client.PgDebug` API, without the ``await``.
+
+    Every method mirrors its async counterpart's arguments, return value and
+    exceptions. Close it when you are done — or use it as a context manager —
+    so the connection pool and its event loop are released.
+
+    Example:
+        ```python
+        from pg_debug import SyncPgDebug
+
+        with SyncPgDebug("postgresql://localhost/mydb") as pg:
+            for schema in pg.list_schemas():
+                print(schema["schema_name"])
+        ```
+    """
+
+    def __init__(
+        self,
+        database_url: Optional[str] = None,
+        access_mode: AccessMode | str = AccessMode.UNRESTRICTED,
+        timeout: Optional[int] = None,
+        search_path: Optional[str] = None,
+        pool: Optional[DbConnPool] = None,
+    ):
+        """Takes the same arguments as :class:`~pg_debug.client.PgDebug`."""
+        self._closed = False
+        self._loop = _LoopThread()
+        self._client = PgDebug(
+            database_url=database_url,
+            access_mode=access_mode,
+            timeout=timeout,
+            search_path=search_path,
+            pool=pool,
+        )
+
+    @property
+    def client(self) -> PgDebug:
+        """The wrapped async client."""
+        return self._client
+
+    def _call(self, coroutine_function: Callable[..., Awaitable[T]], /, *args: Any, **kwargs: Any) -> T:
+        # Positional-only, so a wrapped method's own keyword arguments (such as
+        # `method=`) cannot collide with this signature.
+        return self._loop.run(coroutine_function(*args, **kwargs))
+
+    def connect(self) -> SyncPgDebug:
+        """Open the connection pool and verify the database is reachable."""
+        self._call(self._client.connect)
+        return self
+
+    def close(self) -> None:
+        """Close the connection pool and stop the background event loop.
+
+        Calling it more than once is a no-op.
+        """
+        if self._closed:
+            return
+        try:
+            self._call(self._client.close)
+        finally:
+            self._closed = True
+            self._loop.close()
+
+    def __enter__(self) -> SyncPgDebug:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    # -- Schema introspection ------------------------------------------------
+
+    def list_schemas(self) -> List[Dict[str, Any]]:
+        """List all schemas in the database."""
+        return self._call(self._client.list_schemas)
+
+    def list_objects(self, schema_name: str, object_type: str | ObjectType = ObjectType.TABLE) -> List[Dict[str, Any]]:
+        """List objects of a given type (table, view, sequence, extension)."""
+        return self._call(self._client.list_objects, schema_name, object_type)
+
+    def get_object_details(
+        self,
+        schema_name: str,
+        object_name: str,
+        object_type: str | ObjectType = ObjectType.TABLE,
+    ) -> Dict[str, Any]:
+        """Describe a single database object, including columns and indexes."""
+        return self._call(self._client.get_object_details, schema_name, object_name, object_type)
+
+    # -- Query execution -----------------------------------------------------
+
+    def execute_sql(self, sql: str) -> List[Dict[str, Any]]:
+        """Run a SQL statement and return its rows."""
+        return self._call(self._client.execute_sql, sql)
+
+    def explain_query(
+        self,
+        sql: str,
+        analyze: bool = False,
+        hypothetical_indexes: Optional[List[Dict[str, Any]]] = None,
+    ) -> ExplainPlanArtifact:
+        """Return the execution plan for a query."""
+        return self._call(self._client.explain_query, sql, analyze=analyze, hypothetical_indexes=hypothetical_indexes)
+
+    # -- Diagnostics ---------------------------------------------------------
+
+    def analyze_db_health(
+        self,
+        health_type: str | HealthType | Iterable[str | HealthType] = HealthType.ALL,
+    ) -> Dict[str, HealthCheckResult]:
+        """Run database health checks."""
+        return self._call(self._client.analyze_db_health, health_type)
+
+    def get_top_queries(self, sort_by: SortBy = "resources", limit: int = 10) -> List[Dict[str, Any]]:
+        """Report the most expensive queries recorded by pg_stat_statements."""
+        return self._call(self._client.get_top_queries, sort_by=sort_by, limit=limit)
+
+    # -- Index tuning --------------------------------------------------------
+
+    def analyze_workload_indexes(self, max_index_size_mb: int = 10000, method: TuningMethod = "dta") -> Dict[str, Any]:
+        """Recommend indexes for the workload recorded by pg_stat_statements."""
+        return self._call(self._client.analyze_workload_indexes, max_index_size_mb=max_index_size_mb, method=method)
+
+    def analyze_query_indexes(
+        self,
+        queries: List[str],
+        max_index_size_mb: int = 10000,
+        method: TuningMethod = "dta",
+    ) -> Dict[str, Any]:
+        """Recommend indexes for a specific list of queries."""
+        return self._call(self._client.analyze_query_indexes, queries, max_index_size_mb=max_index_size_mb, method=method)
+
+
+__all__ = ["SyncPgDebug"]

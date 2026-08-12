@@ -19,6 +19,8 @@ from ..sql import SqlBindParams
 from ..sql import SqlDriver
 from ..sql import TableAliasVisitor
 from ..sql import check_hypopg_installation_status
+from ..sql import split_table_reference
+from ..sql import table_identifier
 
 logger = logging.getLogger(__name__)
 
@@ -511,16 +513,22 @@ class IndexTuningBase(ABC):
 
         try:
             # Use parameterized query instead of f-string for security
+            schema, table_name = split_table_reference(table)
             stats_query = """
             SELECT COALESCE(SUM(avg_width), 0) AS total_width,
                    COALESCE(SUM(n_distinct), 0) AS total_distinct
             FROM pg_stats
             WHERE tablename = {} AND attname = ANY({})
             """
+            params: list[Any] = [table_name, columns]
+            if schema:
+                stats_query += " AND schemaname = {}"
+                params.append(schema)
+
             result = await SafeSqlDriver.execute_param_query(
                 self.sql_driver,
                 stats_query,
-                [table, columns],
+                params,
             )
             if result and result[0].cells:
                 size_estimate = self._estimate_index_size_internal(dict(result[0].cells))
@@ -629,11 +637,12 @@ class IndexTuningBase(ABC):
 
         # Try to get table size from the database using proper quoting
         try:
-            # Use the proper way to calculate table size with quoted identifiers
-            query = "SELECT pg_total_relation_size(quote_ident({})) as rel_size"
-            result = await SafeSqlDriver.execute_param_query(self.sql_driver, query, [table])
+            # to_regclass resolves a possibly schema-qualified name and returns
+            # NULL rather than raising when the table does not exist.
+            query = "SELECT pg_total_relation_size(to_regclass({})) as rel_size"
+            result = await SafeSqlDriver.execute_param_query(self.sql_driver, query, [table_identifier(table).as_string(None)])
 
-            if result and len(result) > 0 and len(result[0].cells) > 0:
+            if result and len(result) > 0 and result[0].cells.get("rel_size") is not None:
                 size = int(result[0].cells["rel_size"])
                 # Cache the result
                 self._table_size_cache[table] = size
@@ -653,8 +662,10 @@ class IndexTuningBase(ABC):
     async def _estimate_table_size(self, table: str) -> int:
         """Estimate the size of a table if we can't get it from the database."""
         try:
-            # Try a simple query to get row count and then estimate size
-            result = await SafeSqlDriver.execute_param_query(self.sql_driver, "SELECT count(*) as row_count FROM {}", [table])
+            # Try a simple query to get row count and then estimate size. The
+            # table name is an identifier, not a literal, so it is passed as a
+            # composed identifier rather than a bound parameter.
+            result = await SafeSqlDriver.execute_param_query(self.sql_driver, "SELECT count(*) as row_count FROM {}", [table_identifier(table)])
             if result and len(result) > 0 and len(result[0].cells) > 0:
                 row_count = int(result[0].cells["row_count"])
                 # Rough estimate: assume 1KB per row

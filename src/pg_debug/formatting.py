@@ -63,6 +63,13 @@ def render_mapping(mapping: Mapping[str, Any], empty: str = "(nothing to report)
     return "\n".join(f"{name}: {value}" for name, value in mapping.items())
 
 
+def render_health_checks(results: Mapping[str, Any], empty: str = "No health checks were performed.") -> str:
+    """Render health check results as one ``name: summary`` line per check."""
+    if not results:
+        return empty
+    return "\n".join(f"{name}: {result.summary}" for name, result in results.items())
+
+
 def render_object_details(details: Mapping[str, Any]) -> str:
     """Render the output of ``get_object_details`` as a readable description."""
     if not details:
@@ -127,6 +134,7 @@ def render_index_recommendations(result: Mapping[str, Any]) -> str:
 
 
 __all__ = [
+    "render_health_checks",
     "render_index_recommendations",
     "render_mapping",
     "render_object_details",

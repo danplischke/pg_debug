@@ -125,6 +125,7 @@ async def test_generate_candidates(async_sql_driver, create_dta):
         [
             MockCell(
                 {
+                    "table_schema": "public",
                     "table_name": "users",
                     "column_name": "name",
                     "data_type": "character varying",
@@ -192,6 +193,7 @@ async def test_analyze_workload(async_sql_driver, create_dta):
             return [
                 MockCell(
                     {
+                        "table_schema": "public",
                         "table_name": "users",
                         "column_name": "id",
                         "data_type": "integer",
@@ -375,6 +377,7 @@ async def test_filter_long_text_columns(async_sql_driver, create_dta):
     type_query_results = [
         MockCell(
             {
+                "table_schema": "public",
                 "table_name": "users",
                 "column_name": "name",
                 "data_type": "character varying",
@@ -385,6 +388,7 @@ async def test_filter_long_text_columns(async_sql_driver, create_dta):
         ),
         MockCell(
             {
+                "table_schema": "public",
                 "table_name": "users",
                 "column_name": "bio",
                 "data_type": "text",  # Text type - needs length check
@@ -395,6 +399,7 @@ async def test_filter_long_text_columns(async_sql_driver, create_dta):
         ),
         MockCell(
             {
+                "table_schema": "public",
                 "table_name": "users",
                 "column_name": "description",
                 "data_type": "character varying",
@@ -405,6 +410,7 @@ async def test_filter_long_text_columns(async_sql_driver, create_dta):
         ),
         MockCell(
             {
+                "table_schema": "public",
                 "table_name": "users",
                 "column_name": "status",
                 "data_type": "character varying",
@@ -504,6 +510,7 @@ async def test_basic_workload_analysis(async_sql_driver):
         [
             MockCell(
                 {
+                    "table_schema": "public",
                     "table_name": "users",
                     "column_name": "name",
                     "data_type": "character varying",
@@ -514,6 +521,7 @@ async def test_basic_workload_analysis(async_sql_driver):
             ),
             MockCell(
                 {
+                    "table_schema": "public",
                     "table_name": "orders",
                     "column_name": "user_id",
                     "data_type": "integer",

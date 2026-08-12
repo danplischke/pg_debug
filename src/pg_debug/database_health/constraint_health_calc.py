@@ -1,6 +1,10 @@
+from dataclasses import asdict
 from dataclasses import dataclass
 
 from ..sql import SqlDriver
+from .result import HealthCheckResult
+
+CONSTRAINT_HEALTH = "Constraint health"
 
 
 @dataclass
@@ -16,16 +20,16 @@ class ConstraintHealthCalc:
     def __init__(self, sql_driver: SqlDriver):
         self.sql_driver = sql_driver
 
-    async def invalid_constraints_check(self) -> str:
+    async def invalid_constraints_check(self) -> HealthCheckResult:
         """Check for any invalid constraints in the database.
 
         Returns:
-            String describing any invalid constraints found
+            The invalid constraints found, one finding each.
         """
         metrics = await self._get_invalid_constraints()
 
         if not metrics:
-            return "No invalid constraints found."
+            return HealthCheckResult(name=CONSTRAINT_HEALTH, healthy=True, summary="No invalid constraints found.")
 
         result = ["Invalid constraints found:"]
         for metric in metrics:
@@ -36,7 +40,13 @@ class ConstraintHealthCalc:
                 )
             else:
                 result.append(f"Constraint '{metric.name}' on table '{metric.schema}.{metric.table}' is invalid")
-        return "\n".join(result)
+
+        return HealthCheckResult(
+            name=CONSTRAINT_HEALTH,
+            healthy=False,
+            summary="\n".join(result),
+            findings=[asdict(metric) for metric in metrics],
+        )
 
     async def _get_invalid_constraints(self) -> list[ConstraintMetrics]:
         """Get all invalid constraints in the database."""

@@ -1,7 +1,11 @@
+from dataclasses import asdict
 from dataclasses import dataclass
 
 from ..sql import SafeSqlDriver
 from ..sql import SqlDriver
+from .result import HealthCheckResult
+
+VACUUM_HEALTH = "Vacuum health"
 
 
 @dataclass
@@ -23,19 +27,30 @@ class VacuumHealthCalc:
         self.threshold = threshold
         self.max_value = max_value
 
-    async def transaction_id_danger_check(self) -> str:
+    async def transaction_id_danger_check(self) -> HealthCheckResult:
         """Check if any tables are approaching transaction ID wraparound."""
         metrics = await self._get_transaction_id_metrics()
+        thresholds = {"threshold": self.threshold, "max_value": self.max_value}
 
         if not metrics:
-            return "No tables found with transaction ID wraparound danger."
+            return HealthCheckResult(
+                name=VACUUM_HEALTH,
+                healthy=True,
+                summary="No tables found with transaction ID wraparound danger.",
+                metrics=thresholds,
+            )
 
         # Sort by transactions left ascending to show most critical first
         metrics.sort(key=lambda x: x.transactions_left)
 
         unhealthy = [m for m in metrics if not m.is_healthy]
         if not unhealthy:
-            return "All tables have healthy transaction ID age."
+            return HealthCheckResult(
+                name=VACUUM_HEALTH,
+                healthy=True,
+                summary="All tables have healthy transaction ID age.",
+                metrics=thresholds,
+            )
 
         result = ["Tables approaching transaction ID wraparound:"]
         for metric in unhealthy:
@@ -43,7 +58,14 @@ class VacuumHealthCalc:
                 f"Table '{metric.schema}.{metric.table}' has {metric.transactions_left:,} transactions "
                 f"remaining before wraparound (threshold: {self.threshold:,})"
             )
-        return "\n".join(result)
+
+        return HealthCheckResult(
+            name=VACUUM_HEALTH,
+            healthy=False,
+            summary="\n".join(result),
+            findings=[asdict(metric) for metric in unhealthy],
+            metrics=thresholds,
+        )
 
     async def _get_transaction_id_metrics(self) -> list[TransactionIdMetrics]:
         """Get transaction ID metrics for all tables."""

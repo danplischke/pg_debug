@@ -15,6 +15,7 @@ from typing import Optional
 from .artifacts import ErrorResult
 from .artifacts import ExplainPlanArtifact
 from .database_health import DatabaseHealthTool
+from .database_health import HealthCheckResult
 from .database_health import HealthType
 from .errors import ConnectionFailedError
 from .errors import ExplainPlanError
@@ -106,7 +107,8 @@ class PgDebug:
         self,
         database_url: Optional[str] = None,
         access_mode: AccessMode | str = AccessMode.UNRESTRICTED,
-        timeout: int = DEFAULT_RESTRICTED_TIMEOUT,
+        timeout: Optional[int] = None,
+        search_path: Optional[str] = None,
         pool: Optional[DbConnPool] = None,
     ):
         """
@@ -115,15 +117,42 @@ class PgDebug:
                 ``DATABASE_URI`` or ``DATABASE_URL`` environment variable.
             access_mode: ``unrestricted`` (default) allows any statement;
                 ``restricted`` allows only read-only statements.
-            timeout: Statement timeout in seconds, applied in restricted mode.
+            timeout: Statement timeout in seconds, applied in both access
+                modes. Defaults to none in unrestricted mode and to
+                ``DEFAULT_RESTRICTED_TIMEOUT`` in restricted mode.
+            search_path: Schema search path to set on every connection, e.g.
+                ``"reporting, public"``. Index tuning resolves table names
+                through it.
             pool: An existing connection pool to use. When given, the client
-                does not close it on exit; its owner stays responsible for it.
+                does not close it on exit and does not reconfigure it, so
+                ``search_path`` and the server-side timeout are its owner's
+                responsibility.
         """
         self._database_url = database_url
         self.access_mode = AccessMode(access_mode)
         self.timeout = timeout
-        self._pool = pool if pool is not None else DbConnPool()
+        self.search_path = search_path
+        self._pool = (
+            pool
+            if pool is not None
+            else DbConnPool(
+                search_path=search_path,
+                statement_timeout=self.effective_timeout,
+            )
+        )
         self._owns_pool = pool is None
+
+    @property
+    def effective_timeout(self) -> Optional[int]:
+        """The statement timeout actually applied, in seconds.
+
+        Restricted mode defaults to :data:`DEFAULT_RESTRICTED_TIMEOUT` because
+        it is meant to be safe by default; unrestricted mode leaves queries
+        unbounded unless a timeout is asked for.
+        """
+        if self.timeout is not None:
+            return self.timeout
+        return DEFAULT_RESTRICTED_TIMEOUT if self.access_mode == AccessMode.RESTRICTED else None
 
     @property
     def database_url(self) -> str:
@@ -175,7 +204,7 @@ class PgDebug:
         base_driver = SqlDriver(conn=self._pool)
         if self.access_mode == AccessMode.RESTRICTED:
             logger.debug("Using SafeSqlDriver with restrictions (RESTRICTED mode)")
-            return SafeSqlDriver(sql_driver=base_driver, timeout=self.timeout)
+            return SafeSqlDriver(sql_driver=base_driver, timeout=self.effective_timeout)
 
         logger.debug("Using unrestricted SqlDriver (UNRESTRICTED mode)")
         return base_driver
@@ -272,7 +301,7 @@ class PgDebug:
     async def analyze_db_health(
         self,
         health_type: str | HealthType | Iterable[str | HealthType] = HealthType.ALL,
-    ) -> Dict[str, str]:
+    ) -> Dict[str, HealthCheckResult]:
         """Run database health checks.
 
         Args:
@@ -282,7 +311,9 @@ class PgDebug:
                 string or an iterable.
 
         Returns:
-            A mapping of check name to its finding.
+            A mapping of check name to its :class:`HealthCheckResult`, each
+            carrying a ``healthy`` flag, a text ``summary``, the flagged
+            ``findings`` and the ``metrics`` behind the verdict.
 
         Raises:
             InvalidArgumentError: If an unknown health type is requested.

@@ -24,6 +24,22 @@ logger = logging.getLogger(__name__)
 # --- Visitor Classes ---
 
 
+def resolve_table_reference(name: str, aliases: dict[str, str], tables: Any) -> str:
+    """Resolve a table alias or bare name to the reference used in FROM.
+
+    A query may qualify a column with the bare table name even when the FROM
+    clause is schema-qualified (``FROM reporting.events WHERE events.id = 1``),
+    so fall back to the unique schema-qualified table with that name.
+    """
+    if name in aliases:
+        return aliases[name]
+    if name in tables:
+        return name
+
+    matches = [table for table in tables if table.rpartition(".")[2] == name]
+    return matches[0] if len(matches) == 1 else name
+
+
 class TableAliasVisitor(Visitor):
     """Extracts table aliases and names from the SQL AST."""
 
@@ -40,9 +56,12 @@ class TableAliasVisitor(Visitor):
         """Visit table references, including those in FROM clause."""
         if isinstance(node, RangeVar):  # Type narrowing for RangeVar
             if node.relname is not None:
-                self.tables.add(node.relname)
-            if node.alias and node.alias.aliasname is not None:
-                self.aliases[node.alias.aliasname] = str(node.relname)
+                # Keep the schema qualifier when the query gives one, so the
+                # table can be resolved without relying on the search_path.
+                name = f"{node.schemaname}.{node.relname}" if node.schemaname else str(node.relname)
+                self.tables.add(name)
+                if node.alias and node.alias.aliasname is not None:
+                    self.aliases[node.alias.aliasname] = name
 
     def visit_JoinExpr(self, ancestors: list[Node], node: Node) -> None:  # noqa: N802
         """Visit both sides of JOIN expressions."""
@@ -192,7 +211,7 @@ class ColumnCollector(Visitor):
 
             if len(fields) == 2:  # Qualified column (e.g., u.name)
                 table_or_alias, column = fields
-                table = current_aliases.get(table_or_alias, table_or_alias)
+                table = resolve_table_reference(table_or_alias, current_aliases, current_tables)
                 if table not in self.columns:
                     self.columns[table] = set()
                 self.columns[table].add(column)

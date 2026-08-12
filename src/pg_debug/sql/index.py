@@ -1,5 +1,34 @@
 from dataclasses import dataclass
 from typing import Any
+from typing import Optional
+from typing import Tuple
+
+from psycopg.sql import Identifier
+
+
+def table_identifier(table: str) -> Identifier:
+    """Return a table reference as a quoted SQL identifier.
+
+    ``"reporting.orders"`` becomes ``"reporting"."orders"``, so the name can be
+    interpolated into a statement without risking injection.
+    """
+    schema, name = split_table_reference(table)
+    return Identifier(schema, name) if schema else Identifier(name)
+
+
+def split_table_reference(table: str) -> Tuple[Optional[str], str]:
+    """Split a table reference into its schema and table name.
+
+    Args:
+        table: Either ``"orders"`` or ``"reporting.orders"``.
+
+    Returns:
+        ``(schema, table)``, with schema None for an unqualified reference. An
+        unquoted identifier that itself contains a dot cannot be represented
+        and is treated as schema-qualified.
+    """
+    schema, _, name = table.rpartition(".")
+    return (schema or None), name
 
 
 @dataclass(frozen=True)

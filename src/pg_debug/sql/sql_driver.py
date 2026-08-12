@@ -11,6 +11,10 @@ from urllib.parse import urlparse
 from urllib.parse import urlunparse
 
 from psycopg.rows import dict_row
+from psycopg.sql import SQL
+from psycopg.sql import Composed
+from psycopg.sql import Identifier
+from psycopg.sql import Literal
 from psycopg_pool import AsyncConnectionPool
 from typing_extensions import LiteralString
 
@@ -59,14 +63,65 @@ def obfuscate_password(text: str | None) -> str | None:
     return text
 
 
+def build_session_setup(
+    search_path: Optional[str] = None,
+    statement_timeout: Optional[int] = None,
+) -> Optional[List[Composed]]:
+    """Build the SET statements to run on every pooled connection.
+
+    Args:
+        search_path: Comma-separated schema names, e.g. ``"reporting, public"``.
+        statement_timeout: Statement timeout in seconds. 0 disables it.
+
+    Returns:
+        The statements to run, or None when there is nothing to configure.
+    """
+    statements: List[Composed] = []
+
+    if search_path:
+        schemas = [s.strip() for s in search_path.split(",") if s.strip()]
+        if schemas:
+            # Identifier quotes each schema, which is also correct for the
+            # special "$user" entry.
+            statements.append(SQL("SET search_path TO {}").format(SQL(", ").join(Identifier(s) for s in schemas)))
+
+    if statement_timeout is not None:
+        statements.append(SQL("SET statement_timeout = {}").format(Literal(f"{int(statement_timeout)}s")))
+
+    return statements or None
+
+
 class DbConnPool:
     """Database connection manager using psycopg's connection pool."""
 
-    def __init__(self, connection_url: Optional[str] = None):
+    def __init__(
+        self,
+        connection_url: Optional[str] = None,
+        search_path: Optional[str] = None,
+        statement_timeout: Optional[int] = None,
+    ):
+        """
+        Args:
+            connection_url: PostgreSQL connection URL.
+            search_path: Schema search path to set on every connection.
+            statement_timeout: Statement timeout in seconds to set on every
+                connection. None leaves the server default in place.
+        """
         self.connection_url = connection_url
+        self.search_path = search_path
+        self.statement_timeout = statement_timeout
         self.pool: AsyncConnectionPool | None = None
         self._is_valid = False
         self._last_error = None
+
+    async def _configure_connection(self, conn: Any) -> None:
+        """Apply the session settings to a connection as the pool hands it out."""
+        statements = build_session_setup(self.search_path, self.statement_timeout)
+        if not statements:
+            return
+        for statement in statements:
+            await conn.execute(statement)
+        await conn.commit()
 
     async def pool_connect(self, connection_url: Optional[str] = None) -> AsyncConnectionPool:
         """Initialize connection pool with retry logic."""
@@ -91,6 +146,7 @@ class DbConnPool:
                 min_size=1,
                 max_size=5,
                 open=False,  # Don't connect immediately, let's do it explicitly
+                configure=self._configure_connection,
             )
 
             # Open the pool explicitly

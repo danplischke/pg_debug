@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from pg_debug.database_health import DatabaseHealthTool
+from pg_debug.database_health import HealthCheckResult
 from pg_debug.database_health import HealthType
 from pg_debug.errors import InvalidArgumentError
 from pg_debug.sql import SqlDriver
@@ -50,20 +51,26 @@ async def test_run_checks_only_runs_requested_checks():
         patch("pg_debug.database_health.database_health.BufferHealthCalc") as buffer_cls,
         patch("pg_debug.database_health.database_health.IndexHealthCalc") as index_cls,
     ):
-        buffer_cls.return_value.index_hit_rate = AsyncMock(return_value="99.0%")
-        buffer_cls.return_value.table_hit_rate = AsyncMock(return_value="98.0%")
+        buffer_cls.return_value.index_hit_rate = AsyncMock(
+            return_value=HealthCheckResult(name="Buffer health for indexes", healthy=True, summary="99.0%")
+        )
+        buffer_cls.return_value.table_hit_rate = AsyncMock(
+            return_value=HealthCheckResult(name="Buffer health for tables", healthy=True, summary="98.0%")
+        )
 
         result = await tool.run_checks("buffer")
 
-    assert result == {"Buffer health for indexes": "99.0%", "Buffer health for tables": "98.0%"}
+    assert list(result) == ["Buffer health for indexes", "Buffer health for tables"]
+    assert result["Buffer health for indexes"].summary == "99.0%"
     index_cls.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_health_renders_checks_as_text():
     tool = DatabaseHealthTool(MagicMock(spec=SqlDriver))
+    results = {"Vacuum health": HealthCheckResult(name="Vacuum health", healthy=True, summary="ok")}
 
-    with patch.object(DatabaseHealthTool, "run_checks", AsyncMock(return_value={"Vacuum health": "ok"})):
+    with patch.object(DatabaseHealthTool, "run_checks", AsyncMock(return_value=results)):
         assert await tool.health("vacuum") == "Vacuum health: ok\n"
 
 

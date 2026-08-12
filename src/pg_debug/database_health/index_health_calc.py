@@ -2,6 +2,12 @@ from typing import Any
 
 from ..sql import SafeSqlDriver
 from ..sql import SqlDriver
+from .result import HealthCheckResult
+
+INVALID_INDEXES = "Invalid index check"
+DUPLICATE_INDEXES = "Duplicate index check"
+INDEX_BLOAT = "Index bloat"
+UNUSED_INDEXES = "Unused index check"
 
 
 class IndexHealthCalc:
@@ -10,16 +16,29 @@ class IndexHealthCalc:
     def __init__(self, sql_driver: SqlDriver):
         self.sql_driver = sql_driver
 
-    async def invalid_index_check(self) -> str:
+    async def invalid_index_check(self) -> HealthCheckResult:
         indexes = await self._indexes()
         # Check for invalid indexes being created
         invalid_indexes = [idx for idx in indexes if not idx["valid"]]
         if not invalid_indexes:
-            return "No invalid indexes found."
+            return HealthCheckResult(name=INVALID_INDEXES, healthy=True, summary="No invalid indexes found.")
 
-        return "Invalid indexes found: " + "\n".join([f"{idx['name']} on {idx['table']} is invalid." for idx in invalid_indexes])
+        return HealthCheckResult(
+            name=INVALID_INDEXES,
+            healthy=False,
+            summary="Invalid indexes found: " + "\n".join([f"{idx['name']} on {idx['table']} is invalid." for idx in invalid_indexes]),
+            findings=[
+                {
+                    "schema": idx["schema"],
+                    "table": idx["table"],
+                    "index": idx["name"],
+                    "definition": idx["definition"],
+                }
+                for idx in invalid_indexes
+            ],
+        )
 
-    async def duplicate_index_check(self) -> str:
+    async def duplicate_index_check(self) -> HealthCheckResult:
         indexes = await self._indexes()
         dup_indexes = []
 
@@ -56,7 +75,7 @@ class IndexHealthCalc:
                         break
 
         if not dup_indexes:
-            return "No duplicate indexes found."
+            return HealthCheckResult(name=DUPLICATE_INDEXES, healthy=True, summary="No duplicate indexes found.")
 
         # Sort by table and columns and format the output
         sorted_dups = sorted(
@@ -74,16 +93,30 @@ class IndexHealthCalc:
                 f"is covered by index '{dup['covering_index']['name']}'"
             )
 
-        return "\n".join(result)
+        return HealthCheckResult(
+            name=DUPLICATE_INDEXES,
+            healthy=False,
+            summary="\n".join(result),
+            findings=[
+                {
+                    "schema": dup["unneeded_index"]["schema"],
+                    "table": dup["unneeded_index"]["table"],
+                    "index": dup["unneeded_index"]["name"],
+                    "definition": dup["unneeded_index"]["definition"],
+                    "covered_by": dup["covering_index"]["name"],
+                }
+                for dup in sorted_dups
+            ],
+        )
 
-    async def index_bloat(self, min_size: int = 104857600) -> str:
+    async def index_bloat(self, min_size: int = 104857600) -> HealthCheckResult:
         """Check for bloated indexes that are larger than min_size bytes.
 
         Args:
             min_size: Minimum size in bytes to consider an index as bloated (default 100MB)
 
         Returns:
-            String describing any bloated indexes found
+            The bloated indexes found, one finding each.
         """
         bloated_indexes = await SafeSqlDriver.execute_param_query(
             self.sql_driver,
@@ -222,7 +255,12 @@ class IndexHealthCalc:
         )
 
         if not bloated_indexes:
-            return "No bloated indexes found."
+            return HealthCheckResult(
+                name=INDEX_BLOAT,
+                healthy=True,
+                summary="No bloated indexes found.",
+                metrics={"min_bloat_bytes": min_size},
+            )
 
         result = ["Bloated indexes found:"]
         # Convert RowResults to dicts first
@@ -232,7 +270,13 @@ class IndexHealthCalc:
             total_mb = int(idx["index_bytes"]) / (1024 * 1024)
             result.append(f"Index '{idx['index']}' on table '{idx['table']}' has {bloat_mb:.1f}MB bloat out of {total_mb:.1f}MB total size")
 
-        return "\n".join(result)
+        return HealthCheckResult(
+            name=INDEX_BLOAT,
+            healthy=False,
+            summary="\n".join(result),
+            findings=bloated_indexes_dicts,
+            metrics={"min_bloat_bytes": min_size},
+        )
 
     async def _indexes(self) -> list[dict[str, Any]]:
         if self._cached_indexes:
@@ -294,14 +338,14 @@ class IndexHealthCalc:
         """
         return indexed_columns[: len(columns)] == columns
 
-    async def unused_indexes(self, max_scans: int = 50) -> str:
+    async def unused_indexes(self, max_scans: int = 50) -> HealthCheckResult:
         """Check for unused or rarely used indexes.
 
         Args:
             max_scans: Maximum number of scans to consider an index as unused (default 50)
 
         Returns:
-            String describing any unused indexes found
+            The rarely used indexes found, one finding each.
         """
         unused = await SafeSqlDriver.execute_param_query(
             self.sql_driver,
@@ -328,18 +372,29 @@ class IndexHealthCalc:
             [max_scans],
         )
 
-        if not unused:
-            return "No unused indexes found."
+        # Primary key indexes are unique, so the query above already excludes
+        # them; the filter guards against a future change to that query.
+        indexes = [dict(idx.cells) for idx in unused if not idx.cells["primary"]] if unused else []
 
-        indexes = [dict(idx.cells) for idx in unused]
+        if not indexes:
+            return HealthCheckResult(
+                name=UNUSED_INDEXES,
+                healthy=True,
+                summary="No unused indexes found.",
+                metrics={"max_scans": max_scans},
+            )
 
         result = ["Rarely used indexes found:"]
         for idx in indexes:
-            if idx["primary"]:
-                continue
             size_mb = int(idx["size_bytes"]) / (1024 * 1024)
             result.append(
                 f"Index '{idx['index']}' on table '{idx['table']}' has only been scanned {idx['index_scans']} times and uses {size_mb:.1f}MB of space"
             )
 
-        return "\n".join(result)
+        return HealthCheckResult(
+            name=UNUSED_INDEXES,
+            healthy=False,
+            summary="\n".join(result),
+            findings=indexes,
+            metrics={"max_scans": max_scans},
+        )

@@ -58,7 +58,8 @@ Global options:
 | --- | --- |
 | `-d, --database-url` | Connection URL. Defaults to `$DATABASE_URI`, then `$DATABASE_URL`. |
 | `--access-mode` | `unrestricted` (default) or `restricted` (read-only statements only). |
-| `--timeout` | Statement timeout in seconds, applied in restricted mode (default 30). |
+| `--timeout` | Statement timeout in seconds. Defaults to none in unrestricted mode and 30 in restricted mode. |
+| `--search-path` | Schema search path for the connection, e.g. `reporting,public`. |
 | `--json` | Emit raw JSON instead of formatted text. |
 | `-v, --verbose` | Log at INFO, or DEBUG when repeated. |
 
@@ -68,7 +69,16 @@ SQL arguments accept `-` to read the statement from stdin:
 pg-debug --json explain - < slow_query.sql | jq '.Plan."Total Cost"'
 ```
 
-Exit status is `0` on success, `1` on error, `2` on a usage error.
+`health` can gate a CI job on the result:
+
+```bash
+pg-debug health --type index,vacuum --exit-code
+```
+
+Exit status is `0` on success, `1` on error, `2` on a usage error, and `3` for
+`health --exit-code` when a check reports a problem.
+
+`python -m pg_debug` works the same as the `pg-debug` command.
 
 ## Library
 
@@ -90,8 +100,10 @@ async def main():
         print(plan.to_text())          # readable summary
         print(plan.plan_tree.total_cost)  # parsed plan nodes
 
-        for check, finding in (await pg.analyze_db_health("index,vacuum")).items():
-            print(f"{check}: {finding}")
+        for name, check in (await pg.analyze_db_health("index,vacuum")).items():
+            print(f"{name}: {check.summary}")
+            for finding in check.findings:      # the objects it flagged
+                print("   ", finding)
 
         result = await pg.analyze_query_indexes(["SELECT * FROM orders WHERE user_id = 42"])
         for rec in result["recommendations"]:
@@ -112,14 +124,32 @@ bad URL instead.
 | `get_object_details(schema, name, object_type="table")` | `dict` with `basic`, `columns`, `constraints`, `indexes` |
 | `execute_sql(sql)` | `list[dict]` — one per row, empty for statements with no result set |
 | `explain_query(sql, analyze=False, hypothetical_indexes=None)` | `ExplainPlanArtifact` |
-| `analyze_db_health(health_type="all")` | `dict[str, str]` — check name to finding |
+| `analyze_db_health(health_type="all")` | `dict[str, HealthCheckResult]` — check name to result |
 | `get_top_queries(sort_by="resources", limit=10)` | `list[dict]` — one per query |
 | `analyze_workload_indexes(...)` / `analyze_query_indexes(queries, ...)` | `dict` with `summary`, `recommendations`, `query_impact` |
+
+Each `HealthCheckResult` carries `healthy`, a text `summary`, the flagged
+`findings` (one dict per object) and the `metrics` behind the verdict, and has
+`to_dict()` for serialization.
 
 Failures raise instead of returning error strings. All exceptions derive from
 `PgDebugError`: `ConnectionFailedError`, `InvalidArgumentError`,
 `ExtensionRequiredError` (carries the missing `extension` name),
 `ExplainPlanError`, `QueryError`, `MissingDependencyError`.
+
+### Without async
+
+`SyncPgDebug` mirrors the same API, blocking instead of awaiting. It runs the
+client on its own event loop, so close it (or use it as a context manager) when
+you are done:
+
+```python
+from pg_debug import SyncPgDebug
+
+with SyncPgDebug("postgresql://localhost/mydb") as pg:
+    for row in pg.execute_sql("SELECT count(*) FROM orders"):
+        print(row)
+```
 
 ### Using the tools directly
 
@@ -137,11 +167,9 @@ checks = await DatabaseHealthTool(driver).run_checks("buffer")
 
 ### Known limitations
 
-- Index tuning resolves table names through the connection's `search_path`. To
-  tune queries against tables in another schema, put that schema on the
-  `search_path` (for example
-  `postgresql://host/db?options=-csearch_path%3Dreporting,public`) — a
-  schema-qualified name alone yields no candidates.
+- Index tuning resolves schema-qualified table names directly. Unqualified
+  names resolve through the connection's `search_path`, which `--search-path` /
+  the `search_path` option sets.
 - `analyze_query_indexes` (and `tune-queries`) accepts at most
   `MAX_NUM_INDEX_TUNING_QUERIES` (10) queries. `analyze_workload_indexes`
   (`tune-workload`) selects from `pg_stat_statements` instead: up to 100
@@ -179,12 +207,15 @@ during extraction:
   `pg-debug` command take their place.
 - Tools return structured data instead of MCP text content, and raise exceptions
   instead of returning `"Error: ..."` strings.
-- `TopQueriesCalc` returns rows rather than a stringified list; `DatabaseHealthTool`
-  gained `run_checks()`, which returns one entry per check (`health()` still renders
-  the same text report).
+- `TopQueriesCalc` returns rows rather than a stringified list; health checks return
+  `HealthCheckResult` objects through `run_checks()` (`health()` still renders the
+  same text report).
 - The LLM tuning method's dependencies moved to the optional `llm` extra.
 - `POSTGRES_MCP_INCLUDE_LANGFUSE_TRACE` became `PG_DEBUG_INCLUDE_TRACE`, and now
   defaults to off.
+- The index advisor handles schema-qualified tables, and table size estimation
+  no longer falls back to a fixed default for every table. See
+  [CHANGELOG.md](CHANGELOG.md) for the full list.
 
 ## License
 

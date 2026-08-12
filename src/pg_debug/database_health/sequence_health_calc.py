@@ -1,10 +1,14 @@
 import re
+from dataclasses import asdict
 from dataclasses import dataclass
 
 from psycopg.sql import Identifier
 
 from ..sql import SafeSqlDriver
 from ..sql import SqlDriver
+from .result import HealthCheckResult
+
+SEQUENCE_HEALTH = "Sequence health"
 
 
 @dataclass
@@ -36,19 +40,30 @@ class SequenceHealthCalc:
         self.sql_driver = sql_driver
         self.threshold = threshold
 
-    async def sequence_danger_check(self) -> str:
+    async def sequence_danger_check(self) -> HealthCheckResult:
         """Check if any sequences are approaching their maximum values."""
         metrics = await self._get_sequence_metrics()
+        thresholds = {"threshold_percent": self.threshold * 100, "sequences_checked": len(metrics)}
 
         if not metrics:
-            return "No sequences found in the database."
+            return HealthCheckResult(
+                name=SEQUENCE_HEALTH,
+                healthy=True,
+                summary="No sequences found in the database.",
+                metrics=thresholds,
+            )
 
         # Sort by remaining values ascending to show most critical first
         metrics.sort(key=lambda x: x.max_value - x.last_value)
 
         unhealthy = [m for m in metrics if not m.is_healthy]
         if not unhealthy:
-            return "All sequences have healthy usage levels."
+            return HealthCheckResult(
+                name=SEQUENCE_HEALTH,
+                healthy=True,
+                summary="All sequences have healthy usage levels.",
+                metrics=thresholds,
+            )
 
         result = ["Sequences approaching maximum value:"]
         for metric in unhealthy:
@@ -58,7 +73,14 @@ class SequenceHealthCalc:
                 f"has used {metric.percent_used:.1f}% of available values "
                 f"({metric.last_value:,} of {metric.max_value:,}, {remaining:,} remaining)"
             )
-        return "\n".join(result)
+
+        return HealthCheckResult(
+            name=SEQUENCE_HEALTH,
+            healthy=False,
+            summary="\n".join(result),
+            findings=[{**asdict(metric), "percent_used": metric.percent_used} for metric in unhealthy],
+            metrics=thresholds,
+        )
 
     async def _get_sequence_metrics(self) -> list[SequenceMetrics]:
         """Get metrics for sequences in the database."""

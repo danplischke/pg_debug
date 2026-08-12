@@ -1,7 +1,11 @@
+from dataclasses import asdict
 from dataclasses import dataclass
 from typing import Optional
 
 from ..sql import SqlDriver
+from .result import HealthCheckResult
+
+REPLICATION_HEALTH = "Replication health"
 
 
 @dataclass
@@ -25,15 +29,22 @@ class ReplicationCalc:
         self._server_version: Optional[int] = None
         self._feature_support: dict[str, bool] = {}
 
-    async def replication_health_check(self) -> str:
-        """Check replication health including lag and slots."""
+    async def replication_health_check(self) -> HealthCheckResult:
+        """Check replication health including lag and slots.
+
+        A replica that is not receiving from its primary is the only condition
+        reported as unhealthy; lag and inactive slots are reported as-is for
+        the caller to judge against its own expectations.
+        """
         metrics = await self._get_replication_metrics()
         result = []
+        healthy = True
 
         if metrics.is_replica:
             result.append("This is a replica database.")
             # Check replication status
             if not metrics.is_replicating:
+                healthy = False
                 result.append("WARNING: Replica is not actively replicating from primary!")
             else:
                 result.append("Replica is actively replicating from primary.")
@@ -68,7 +79,17 @@ class ReplicationCalc:
         else:
             result.append("\nNo replication slots found.")
 
-        return "\n".join(result)
+        return HealthCheckResult(
+            name=REPLICATION_HEALTH,
+            healthy=healthy,
+            summary="\n".join(result),
+            findings=[asdict(slot) for slot in metrics.replication_slots],
+            metrics={
+                "is_replica": metrics.is_replica,
+                "is_replicating": metrics.is_replicating,
+                "replication_lag_seconds": metrics.replication_lag_seconds,
+            },
+        )
 
     async def _get_replication_metrics(self) -> ReplicationMetrics:
         """Get comprehensive replication metrics."""

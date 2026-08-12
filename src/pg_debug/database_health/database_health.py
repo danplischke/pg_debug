@@ -4,6 +4,7 @@ import logging
 from enum import Enum
 from typing import Dict
 from typing import Iterable
+from typing import List
 from typing import Set
 
 from ..errors import InvalidArgumentError
@@ -12,6 +13,7 @@ from .connection_health_calc import ConnectionHealthCalc
 from .constraint_health_calc import ConstraintHealthCalc
 from .index_health_calc import IndexHealthCalc
 from .replication_calc import ReplicationCalc
+from .result import HealthCheckResult
 from .sequence_health_calc import SequenceHealthCalc
 from .vacuum_health_calc import VacuumHealthCalc
 
@@ -63,8 +65,8 @@ class DatabaseHealthTool:
     async def run_checks(
         self,
         health_type: str | HealthType | Iterable[str | HealthType] = HealthType.ALL,
-    ) -> Dict[str, str]:
-        """Run database health checks and return one finding per check.
+    ) -> Dict[str, HealthCheckResult]:
+        """Run database health checks and return one result per check.
 
         Args:
             health_type: A single health type, a comma-separated string, or an
@@ -72,48 +74,45 @@ class DatabaseHealthTool:
                 vacuum, sequence, replication, buffer, constraint, all.
 
         Returns:
-            An ordered mapping of check name to its finding, e.g.
-            ``{"Invalid index check": "No invalid indexes found."}``.
+            An ordered mapping of check name to its
+            :class:`~pg_debug.database_health.result.HealthCheckResult`, which
+            carries a ``healthy`` flag, a text ``summary``, the flagged
+            ``findings`` and the ``metrics`` behind the verdict.
 
         Raises:
             InvalidArgumentError: If an unknown health type is requested.
         """
         health_types = HealthType.parse(health_type)
-        results: Dict[str, str] = {}
+        results: List[HealthCheckResult] = []
 
         if HealthType.INDEX in health_types:
             index_health = IndexHealthCalc(self.sql_driver)
-            results["Invalid index check"] = await index_health.invalid_index_check()
-            results["Duplicate index check"] = await index_health.duplicate_index_check()
-            results["Index bloat"] = await index_health.index_bloat()
-            results["Unused index check"] = await index_health.unused_indexes()
+            results.append(await index_health.invalid_index_check())
+            results.append(await index_health.duplicate_index_check())
+            results.append(await index_health.index_bloat())
+            results.append(await index_health.unused_indexes())
 
         if HealthType.CONNECTION in health_types:
-            connection_health = ConnectionHealthCalc(self.sql_driver)
-            results["Connection health"] = await connection_health.connection_health_check()
+            results.append(await ConnectionHealthCalc(self.sql_driver).connection_health_check())
 
         if HealthType.VACUUM in health_types:
-            vacuum_health = VacuumHealthCalc(self.sql_driver)
-            results["Vacuum health"] = await vacuum_health.transaction_id_danger_check()
+            results.append(await VacuumHealthCalc(self.sql_driver).transaction_id_danger_check())
 
         if HealthType.SEQUENCE in health_types:
-            sequence_health = SequenceHealthCalc(self.sql_driver)
-            results["Sequence health"] = await sequence_health.sequence_danger_check()
+            results.append(await SequenceHealthCalc(self.sql_driver).sequence_danger_check())
 
         if HealthType.REPLICATION in health_types:
-            replication_health = ReplicationCalc(self.sql_driver)
-            results["Replication health"] = await replication_health.replication_health_check()
+            results.append(await ReplicationCalc(self.sql_driver).replication_health_check())
 
         if HealthType.BUFFER in health_types:
             buffer_health = BufferHealthCalc(self.sql_driver)
-            results["Buffer health for indexes"] = await buffer_health.index_hit_rate()
-            results["Buffer health for tables"] = await buffer_health.table_hit_rate()
+            results.append(await buffer_health.index_hit_rate())
+            results.append(await buffer_health.table_hit_rate())
 
         if HealthType.CONSTRAINT in health_types:
-            constraint_health = ConstraintHealthCalc(self.sql_driver)
-            results["Constraint health"] = await constraint_health.invalid_constraints_check()
+            results.append(await ConstraintHealthCalc(self.sql_driver).invalid_constraints_check())
 
-        return results
+        return {result.name: result for result in results}
 
     async def health(
         self,
@@ -126,4 +125,4 @@ class DatabaseHealthTool:
         results = await self.run_checks(health_type)
         if not results:
             return "No health checks were performed."
-        return "".join(f"{name}: {finding}\n" for name, finding in results.items())
+        return "".join(f"{name}: {result.summary}\n" for name, result in results.items())

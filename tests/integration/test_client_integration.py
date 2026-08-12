@@ -169,7 +169,41 @@ async def test_analyze_db_health(pg):
         "Buffer health for tables",
         "Constraint health",
     }
-    assert all(isinstance(finding, str) and finding for finding in results.values())
+    assert all(check.name == name and check.summary for name, check in results.items())
+    assert results["Connection health"].metrics["total_connections"] >= 1
+    # A healthy check reports nothing to act on.
+    assert all(not check.findings for check in results.values() if check.healthy)
+
+
+@pytest.mark.asyncio
+async def test_analyze_db_health_flags_a_duplicate_index(pg, tuning_table):
+    await pg.execute_sql(f"CREATE INDEX {tuning_table}_status_idx ON {tuning_table} (status)")
+    await pg.execute_sql(f"CREATE INDEX {tuning_table}_status_dup_idx ON {tuning_table} (status)")
+
+    results = await pg.analyze_db_health("index")
+
+    pair = {f"{tuning_table}_status_idx", f"{tuning_table}_status_dup_idx"}
+
+    # The check is database-wide, so look only at the pair this test created.
+    # Either one may be reported as redundant; the other is its covering index.
+    duplicates = results["Duplicate index check"]
+    assert duplicates.healthy is False
+    ours = [f for f in duplicates.findings if f["table"] == tuning_table]
+    assert len(ours) == 1
+    assert pair == {ours[0]["index"], ours[0]["covered_by"]}
+
+    unused = results["Unused index check"]
+    assert unused.healthy is False
+    assert {f["index"] for f in unused.findings} >= pair
+    assert all(f["index_scans"] == 0 for f in unused.findings if f["index"] in pair)
+
+
+def test_cli_health_exit_code_against_a_real_database(capsys, monkeypatch):
+    monkeypatch.setenv("DATABASE_URI", DATABASE_URI or "")
+
+    # Connection health on an idle test database is healthy.
+    assert cli.main(["health", "--type", "connection", "--exit-code"]) == 0
+    assert "Connection health:" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
@@ -228,6 +262,33 @@ async def test_analyze_query_indexes(pg, tuning_table):
 async def test_analyze_query_indexes_rejects_too_many_queries(pg):
     with pytest.raises(InvalidArgumentError):
         await pg.analyze_query_indexes([f"SELECT {i}" for i in range(11)])
+
+
+@pytest.mark.asyncio
+async def test_analyze_query_indexes_for_a_schema_qualified_table(pg):
+    """The advisor resolves a qualified table without help from the search_path."""
+    if not await has_extension(pg, "hypopg"):
+        pytest.skip("hypopg is not installed")
+
+    result = await pg.analyze_query_indexes([f"SELECT * FROM {SCHEMA}.orders WHERE customer_id = 42 AND status = 'paid'"])
+
+    assert result["summary"]["total_recommendations"] >= 1
+    assert all(rec["index_target_table"] == f"{SCHEMA}.orders" for rec in result["recommendations"])
+    assert all(f" ON {SCHEMA}.orders " in rec["index_definition"] for rec in result["recommendations"])
+
+
+@pytest.mark.asyncio
+async def test_explain_with_a_hypothetical_index_on_a_qualified_table(pg):
+    """The generated index name stays a valid identifier for a qualified table."""
+    if not await has_extension(pg, "hypopg"):
+        pytest.skip("hypopg is not installed")
+
+    plan = await pg.explain_query(
+        f"SELECT * FROM {SCHEMA}.orders WHERE customer_id = 42",
+        hypothetical_indexes=[{"table": f"{SCHEMA}.orders", "columns": ["customer_id"]}],
+    )
+
+    assert "Index Scan" in plan.to_text()
 
 
 def test_cli_against_a_real_database(capsys, monkeypatch):
