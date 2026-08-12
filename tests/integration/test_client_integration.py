@@ -23,6 +23,7 @@ from pg_debug import PgDebug
 from pg_debug import SyncPgDebug
 from pg_debug import cli
 from pg_debug.artifacts import ExplainPlanArtifact
+from pg_debug.database_health.autovacuum_calc import AutovacuumCalc
 from pg_debug.database_health.table_bloat_calc import TableBloatCalc
 from pg_debug.errors import ExtensionRequiredError
 from pg_debug.errors import InvalidArgumentError
@@ -1211,3 +1212,66 @@ def test_cli_check_migration_against_a_real_database(capsys, monkeypatch, pg):
     payload = json.loads(capsys.readouterr().out)
     assert payload[0]["kind"] == "create_index"
     assert payload[0]["table_bytes"] > 0
+
+
+# -- Autovacuum -------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_table_with_autovacuum_disabled_is_reported_as_that(pg):
+    """Not as "behind": the fix for a switched-off table is not the fix for a
+    late one, so the two must not read the same."""
+    await pg.execute_sql(f"CREATE TABLE {SCHEMA}.frozen (id int, pad text) WITH (autovacuum_enabled = false)")
+    await pg.execute_sql(f"INSERT INTO {SCHEMA}.frozen SELECT i, 'x' FROM generate_series(1, 40000) i")
+    await pg.execute_sql(f"DELETE FROM {SCHEMA}.frozen WHERE id % 2 = 0")
+    await pg.execute_sql(f"ANALYZE {SCHEMA}.frozen")
+
+    calc = AutovacuumCalc(await pg.sql_driver())
+    check = await calc.autovacuum_backlog_check()
+
+    flagged = [f for f in check.findings if f["table"] == "frozen"]
+    assert flagged, "a table with 20,000 dead rows and autovacuum off should be reported"
+    assert flagged[0]["reason"] == "disabled"
+    assert flagged[0]["autovacuum_enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_read_only_idle_transaction_does_not_hold_the_horizon(pg):
+    """The advice to hunt "idle in transaction" is too broad. A READ COMMITTED
+    transaction that has only read holds neither a snapshot nor a transaction
+    id between statements, and blocks no cleanup at all."""
+    calc = AutovacuumCalc(await pg.sql_driver(), min_transaction_seconds=0)
+
+    async with await psycopg.AsyncConnection.connect(DATABASE_URI or "") as idle:
+        await idle.execute(f"SELECT count(*) FROM {SCHEMA}.orders")
+        check = await calc.vacuum_horizon_check()
+        await idle.rollback()
+
+    assert check.healthy, f"nothing should be reported, got {check.summary}"
+
+
+@pytest.mark.asyncio
+async def test_a_transaction_holding_a_snapshot_is_reported(pg):
+    calc = AutovacuumCalc(await pg.sql_driver(), min_transaction_seconds=0)
+
+    async with await psycopg.AsyncConnection.connect(DATABASE_URI or "") as holder:
+        await holder.execute("BEGIN ISOLATION LEVEL REPEATABLE READ")
+        await holder.execute(f"SELECT count(*) FROM {SCHEMA}.orders")
+        check = await calc.vacuum_horizon_check()
+        await holder.rollback()
+
+    assert not check.healthy
+    assert any(f["kind"] == "transaction" and f["holds"] == "a snapshot" for f in check.findings)
+
+
+@pytest.mark.asyncio
+async def test_a_write_transaction_holds_a_transaction_id(pg):
+    calc = AutovacuumCalc(await pg.sql_driver(), min_transaction_seconds=0)
+
+    async with await psycopg.AsyncConnection.connect(DATABASE_URI or "") as holder:
+        await holder.execute(f"INSERT INTO {SCHEMA}.customers (email) VALUES ('holder@example.com')")
+        check = await calc.vacuum_horizon_check()
+        await holder.rollback()
+
+    assert not check.healthy
+    assert any(f["holds"] == "a transaction id" for f in check.findings)

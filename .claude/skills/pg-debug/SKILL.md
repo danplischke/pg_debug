@@ -166,7 +166,8 @@ pg-debug health --exit-code              # exit 3 if anything is unhealthy (CI)
 ```
 
 Checks: `index` (invalid, duplicate, bloated, unused), `table` (heap bloat),
-`connection`, `vacuum` (transaction ID wraparound), `sequence` (approaching
+`connection`, `vacuum` (transaction ID wraparound, autovacuum backlog, and what
+is holding the vacuum horizon), `sequence` (approaching
 maximum), `replication`, `buffer` (cache hit rates), `constraint` (invalid
 constraints), `statistics` (never analyzed or drifted), `all`.
 
@@ -187,6 +188,18 @@ an average width. `bloat_percent` in the 20-30% range on a busy table is
 usually normal churn, not a reason to `VACUUM FULL`. Confirm with `pgstattuple`
 before recommending a rewrite, and check the vacuum settings first — bloat that
 keeps coming back is an autovacuum problem, not a one-off cleanup.
+
+`health --type vacuum` is what diagnoses that. **Read "Vacuum horizon" before
+"Autovacuum backlog"**: if something is holding the horizon, no amount of
+vacuuming or autovacuum tuning reclaims anything, and the backlog is a
+consequence rather than the problem. The horizon check is deliberately narrower
+than the usual "find idle in transaction" advice — a READ COMMITTED transaction
+that has only read holds nothing and is not reported — so when it does report a
+backend, that backend really is the cause. "Autovacuum backlog" separates three
+different problems that look alike: a table past its threshold and waiting, a
+table with autovacuum switched off, and a large table whose default scale
+factor means it waits for a fifth of itself to die first. The fixes differ, so
+relay which one it is.
 
 Interpret before relaying. "Unused index" on a database that restarted
 yesterday means the counters are young, not that the index is dead — check

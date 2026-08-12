@@ -39,6 +39,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   six-column table used in testing. A table is reported only when it wastes at
   least 100 MB *and* at least 20% of its size, so ordinary free space in a large
   table is not flagged.
+- Two `vacuum` health checks beyond wraparound. "Autovacuum backlog" reports
+  tables autovacuum is not keeping clean and separates the three reasons that
+  look alike: past its threshold and waiting, autovacuum switched off for it,
+  or a table large enough that the default scale factor makes it wait for a
+  fifth of itself to die. "Vacuum horizon" reports what is stopping VACUUM
+  reclaiming anything at all — a transaction holding a snapshot or a
+  transaction id, a replication slot nobody consumes, a prepared transaction
+  left behind — which is what explains bloat that keeps coming back.
+
+  The horizon check is narrower than the usual advice to hunt "idle in
+  transaction". Measured on PostgreSQL 16: a READ COMMITTED transaction that
+  has only read holds neither a snapshot nor a transaction id between
+  statements and blocks no cleanup, so it is not reported. One that has written
+  holds a transaction id, and one at REPEATABLE READ or above holds a snapshot;
+  those are reported, and the finding says which.
 - `pg-debug check-migration` and `PgDebug.check_migration()`, which review a
   migration before it runs: per statement, the lock it takes, how long it holds
   it, whether it rewrites the table, and a safer rewrite where one exists. The

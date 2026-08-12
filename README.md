@@ -17,7 +17,7 @@ without an MCP client in the loop.
 - **Planner statistics** — the per-column numbers behind a plan's row estimates, the extended statistics defined on a table, and which tables the planner is reasoning about with stale numbers.
 - **Migration review** — read a migration before running it and see, per statement, the lock it takes, how long it holds it, whether it rewrites the table, and a safer rewrite where one exists. Connected, it reports how big the tables actually are, which is what decides whether a rewrite is a pause or an outage.
 - **Data model review** — foreign keys with no index behind them, keys whose two sides are different types, tables with no primary key, columns ordered so alignment padding costs bytes on every row, and types that do not mean what they look like. Each finding says whether it is proven from the catalog or inferred from statistics, and carries the DDL that fixes it.
-- **Health checks** — invalid/duplicate/bloated/unused indexes, table bloat, connection utilization, transaction ID wraparound risk, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints, statistics freshness.
+- **Health checks** — invalid/duplicate/bloated/unused indexes, table bloat, connection utilization, transaction ID wraparound risk, autovacuum backlog and what is holding the vacuum horizon, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints, statistics freshness.
 - **Top queries** — the most expensive queries recorded by `pg_stat_statements`, ranked by resource blend or by execution time, cumulatively or sampled over an interval.
 - **Index tuning** — recommend indexes for your recorded workload or for a specific set of queries, with before/after planner costs and the size HypoPG measures for each candidate.
 - **Access modes** — run unrestricted, or in a `restricted` mode that parses each statement, rejects anything that is not read-only, and runs it in a read-only transaction with a statement timeout.
@@ -145,6 +145,18 @@ than believed.
 is small on the database you are pointed at, which is right for production and
 misleading for a staging copy; in CI, prefer `--offline` unless the database
 you can reach is representative.
+
+The `vacuum` checks cover three things: transaction ID wraparound, tables
+autovacuum is not keeping clean, and what is stopping vacuum from reclaiming
+anything. The last is the one that explains bloat which keeps coming back — a
+row deleted after the oldest transaction that might still need to see it cannot
+be removed by any amount of vacuuming, so one forgotten transaction, one
+replication slot nobody consumes or one prepared transaction pins the whole
+database. It is narrower than the usual advice to hunt "idle in transaction":
+measured on PostgreSQL 16, a READ COMMITTED transaction that has only *read*
+holds neither a snapshot nor a transaction id between statements and blocks
+nothing, so it is not reported. What is reported is a backend holding a
+snapshot, or holding a transaction id because it has written.
 
 `model` reviews the data model rather than the running server, and needs no
 extension. Its rules are `unindexed_foreign_key`, `foreign_key_type_mismatch`,

@@ -8,6 +8,7 @@ from typing import List
 from typing import Set
 
 from ..errors import InvalidArgumentError
+from .autovacuum_calc import AutovacuumCalc
 from .buffer_health_calc import BufferHealthCalc
 from .connection_health_calc import ConnectionHealthCalc
 from .constraint_health_calc import ConstraintHealthCalc
@@ -102,6 +103,9 @@ class DatabaseHealthTool:
 
         if HealthType.VACUUM in health_types:
             results.append(await VacuumHealthCalc(self.sql_driver).transaction_id_danger_check())
+            autovacuum = AutovacuumCalc(self.sql_driver)
+            results.append(await autovacuum.autovacuum_backlog_check())
+            results.append(await autovacuum.vacuum_horizon_check())
 
         if HealthType.SEQUENCE in health_types:
             results.append(await SequenceHealthCalc(self.sql_driver).sequence_danger_check())
