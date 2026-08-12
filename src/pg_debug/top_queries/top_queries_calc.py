@@ -11,31 +11,16 @@ from typing import cast
 from ..errors import ExtensionRequiredError
 from ..errors import InvalidArgumentError
 from ..sql import QUERY_MARKER
+from ..sql import TRANSACTION_CONTROL as _TRANSACTION_CONTROL
 from ..sql import SafeSqlDriver
 from ..sql import SqlDriver
+from ..sql import workload_only as _workload_only
 from ..sql.extension_utils import check_extension
 from ..sql.extension_utils import get_postgres_version
 
 logger = logging.getLogger(__name__)
 
 PG_STAT_STATEMENTS = "pg_stat_statements"
-
-#: Statement keywords that only ever describe transaction bookkeeping.
-_TRANSACTION_CONTROL = frozenset({"BEGIN", "COMMIT", "ROLLBACK", "END", "START", "SAVEPOINT", "RELEASE"})
-
-
-def _workload_only() -> str:
-    """SQL for "this row is the workload, not pg_debug's own bookkeeping".
-
-    Applied in the statement rather than after it, so that pg_debug's own
-    queries cannot take up half of a ``LIMIT 10``. The marker covers everything
-    the driver runs; transaction control has to be matched by keyword, because
-    a bare BEGIN issued by the driver carries no comment of its own.
-    """
-    # An underscore is a LIKE wildcard, and the marker contains one.
-    marker = QUERY_MARKER.replace("_", r"\_")
-    keywords = ", ".join(f"'{keyword}'" for keyword in sorted(_TRANSACTION_CONTROL))
-    return f"query NOT LIKE '{marker}%' AND upper(split_part(btrim(query), ' ', 1)) NOT IN ({keywords})"
 
 
 install_pg_stat_statements_message = (

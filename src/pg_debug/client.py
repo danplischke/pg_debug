@@ -35,6 +35,10 @@ from .model import DEFAULT_MIN_ROWS
 from .model import ModelFinding
 from .model import ModelReviewer
 from .model import RuleId
+from .partition import DEFAULT_MIN_PRUNING_SHARE
+from .partition import DEFAULT_MIN_TABLE_BYTES
+from .partition import PartitionAdvisor
+from .partition import PartitionCandidate
 from .schema import ObjectType
 from .schema import SchemaInspector
 from .sql import DbConnPool
@@ -411,6 +415,48 @@ class PgDebug:
             same as optimal.
         """
         return await ConfigurationReviewer(await self.sql_driver()).review()
+
+    # -- Partitioning --------------------------------------------------------
+
+    async def suggest_partitions(
+        self,
+        sql: Optional[str | List[str]] = None,
+        min_table_bytes: int = DEFAULT_MIN_TABLE_BYTES,
+        min_pruning_share: float = DEFAULT_MIN_PRUNING_SHARE,
+        limit: int = 200,
+    ) -> List[PartitionCandidate]:
+        """Decide whether a table is worth partitioning, from what the workload does.
+
+        The number that decides it is not the table's size but the share of
+        recorded query time that restricts on a candidate key, because those are
+        the queries that would still read one partition instead of all of them.
+        A verdict is returned for every table examined, including the ones this
+        advises against: "31% of the time against this table would prune" is a
+        more useful answer than silence, and it is the answer more often.
+
+        Args:
+            sql: Queries to judge by. Defaults to the workload recorded in
+                ``pg_stat_statements``, weighted by total execution time.
+            min_table_bytes: Ignore tables smaller than this. Below a gigabyte
+                the complexity costs more than the pruning returns.
+            min_pruning_share: The share of query time that has to keep pruning
+                for a table to be recommended.
+            limit: How many recorded queries to read.
+
+        Returns:
+            :class:`~pg_debug.partition.PartitionCandidate` objects, the
+            recommended ones first and then by size. Each carries the share it
+            was judged on, the unique constraints that would have to change, and
+            for a recommended table the shape of the target — not a migration,
+            which is a separate operation with its own risks.
+        """
+        queries = [sql] if isinstance(sql, str) else sql
+        advisor = PartitionAdvisor(
+            await self.sql_driver(),
+            min_table_bytes=min_table_bytes,
+            min_pruning_share=min_pruning_share,
+        )
+        return await advisor.analyze(query_list=queries, limit=limit)
 
     # -- Live activity -------------------------------------------------------
 

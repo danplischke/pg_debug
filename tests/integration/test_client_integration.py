@@ -30,6 +30,7 @@ from pg_debug.errors import InvalidArgumentError
 from pg_debug.index.dta_calc import HYPOTHETICAL_INDEX_SIZES_SQL
 from pg_debug.index.dta_calc import DatabaseTuningAdvisor
 from pg_debug.index.index_opt_base import HIDDEN_QUERY_TEXT
+from pg_debug.partition import Strategy
 from pg_debug.sql import SafeSqlDriver
 
 DATABASE_URI = os.environ.get("PG_DEBUG_TEST_DATABASE_URI")
@@ -1324,3 +1325,156 @@ def test_cli_config_against_a_real_database(capsys, monkeypatch, pg):
     payload = json.loads(capsys.readouterr().out)
     for finding in payload:
         assert finding["evidence"], f"{finding['setting']} reported with no evidence"
+
+
+# -- Partition advisor ------------------------------------------------------
+
+PARTITION_SCHEMA = "pgdebug_partition_test"
+
+
+@pytest_asyncio.fixture
+async def partition_pg():
+    """Two tables the same size, told apart only by what the queries do.
+
+    ``events`` is filtered by time; ``ledger`` is not. Nothing about their
+    shape distinguishes them — same row count, same timestamp column, same
+    primary key — so if the advisor reaches different verdicts it can only be
+    from the workload, which is the claim being tested.
+    """
+    client = PgDebug(DATABASE_URI)
+    await client.execute_sql(f"DROP SCHEMA IF EXISTS {PARTITION_SCHEMA} CASCADE")
+    await client.execute_sql(f"CREATE SCHEMA {PARTITION_SCHEMA}")
+
+    for table in ("events", "ledger"):
+        await client.execute_sql(
+            f"""
+            CREATE TABLE {PARTITION_SCHEMA}.{table} (
+                id bigserial PRIMARY KEY,
+                tenant_id int NOT NULL,
+                created_at timestamptz NOT NULL,
+                amount numeric
+            )
+            """
+        )
+        await client.execute_sql(
+            f"INSERT INTO {PARTITION_SCHEMA}.{table} (tenant_id, created_at, amount) "
+            f"SELECT (i % 7) + 1, now() - (i || ' minutes')::interval, i / 100.0 FROM generate_series(1, 20000) i"
+        )
+        await client.execute_sql(f"ANALYZE {PARTITION_SCHEMA}.{table}")
+
+    try:
+        yield client
+    finally:
+        await client.execute_sql(f"DROP SCHEMA IF EXISTS {PARTITION_SCHEMA} CASCADE")
+        await client.close()
+
+
+def workload_for(table, pruning_share):
+    """Queries against ``table`` of which ``pruning_share`` restrict on the key.
+
+    The weight is one per query when the caller supplies the list, so the share
+    is just how many of them filter.
+    """
+    total = 10
+    pruning = round(total * pruning_share)
+    return [f"SELECT count(*) FROM {PARTITION_SCHEMA}.{table} WHERE created_at > now() - interval '{i} day'" for i in range(1, pruning + 1)] + [
+        f"SELECT sum(amount) FROM {PARTITION_SCHEMA}.{table} WHERE amount > {i}" for i in range(total - pruning)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_table_the_workload_filters_by_time_is_recommended(partition_pg):
+    candidates = await partition_pg.suggest_partitions(sql=workload_for("events", 0.9), min_table_bytes=0)
+
+    events = next(c for c in candidates if c.table == "events")
+    assert events.recommended is True
+    assert events.column == "created_at"
+    assert events.strategy is Strategy.RANGE
+
+
+@pytest.mark.asyncio
+async def test_an_identical_table_the_workload_does_not_filter_is_refused(partition_pg):
+    """Same shape, same size, same timestamp. Only the queries differ, and the
+    verdict has to follow them rather than the table."""
+    candidates = await partition_pg.suggest_partitions(sql=workload_for("ledger", 0.2), min_table_bytes=0)
+
+    ledger = next(c for c in candidates if c.table == "ledger")
+    assert ledger.recommended is False
+    assert ledger.pruning_share < 0.5
+    assert ledger.ddl == []
+
+
+@pytest.mark.asyncio
+async def test_the_primary_key_is_named_as_the_thing_that_has_to_change(partition_pg):
+    candidates = await partition_pg.suggest_partitions(sql=workload_for("events", 1.0), min_table_bytes=0)
+
+    events = next(c for c in candidates if c.table == "events")
+    assert any("events_pkey" in blocker for blocker in events.blockers)
+
+
+@pytest.mark.asyncio
+async def test_the_generated_ddl_actually_runs(partition_pg):
+    """The claim that costs the most if it is wrong. A sketch that fails on the
+    blocker the advisor itself named would be found by whoever tried it, after
+    they had already decided to do this."""
+    candidates = await partition_pg.suggest_partitions(sql=workload_for("events", 1.0), min_table_bytes=0)
+    events = next(c for c in candidates if c.table == "events")
+
+    for statement in events.ddl:
+        if statement.startswith("--"):
+            continue
+        await partition_pg.execute_sql(statement)
+
+    partitions = await partition_pg.execute_sql(
+        f"SELECT count(*) AS n FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        f"WHERE n.nspname = '{PARTITION_SCHEMA}' AND c.relispartition"
+    )
+    assert partitions[0]["n"] > 0
+
+
+@pytest.mark.asyncio
+async def test_the_partitioned_table_the_ddl_builds_actually_prunes(partition_pg):
+    """The whole recommendation rests on this. If the plan still reads every
+    partition, the advice was wrong however good the reasoning looked."""
+    candidates = await partition_pg.suggest_partitions(sql=workload_for("events", 1.0), min_table_bytes=0)
+    events = next(c for c in candidates if c.table == "events")
+
+    for statement in events.ddl:
+        if not statement.startswith("--"):
+            await partition_pg.execute_sql(statement)
+    await partition_pg.execute_sql(
+        f"INSERT INTO {PARTITION_SCHEMA}.events_partitioned (tenant_id, created_at, amount) "
+        f"SELECT tenant_id, created_at, amount FROM {PARTITION_SCHEMA}.events"
+    )
+    await partition_pg.execute_sql(f"ANALYZE {PARTITION_SCHEMA}.events_partitioned")
+
+    plan = await partition_pg.explain_query(f"SELECT count(*) FROM {PARTITION_SCHEMA}.events_partitioned WHERE created_at > now() - interval '1 day'")
+
+    assert "Subplans Removed" in plan.value, "the partition key does not prune, so the recommendation was wrong"
+
+
+@pytest.mark.asyncio
+async def test_a_table_no_query_touches_is_not_judged(partition_pg):
+    candidates = await partition_pg.suggest_partitions(sql=["SELECT 1"], min_table_bytes=0)
+
+    assert [c.table for c in candidates if c.schema == PARTITION_SCHEMA] == []
+
+
+@pytest.mark.asyncio
+async def test_the_advisor_runs_in_restricted_mode(partition_pg):
+    queries = workload_for("events", 0.9)
+    async with PgDebug(DATABASE_URI, access_mode=AccessMode.RESTRICTED) as restricted:
+        candidates = await restricted.suggest_partitions(sql=queries, min_table_bytes=0)
+
+    unrestricted = await partition_pg.suggest_partitions(sql=queries, min_table_bytes=0)
+    assert [(c.qualified_table, c.recommended) for c in candidates] == [(c.qualified_table, c.recommended) for c in unrestricted]
+
+
+def test_cli_partitions_against_a_real_database(capsys, monkeypatch, partition_pg):
+    monkeypatch.setenv("DATABASE_URI", DATABASE_URI or "")
+
+    assert cli.main(["--json", "partitions", "--min-size", "1MB"]) == 0
+
+    for candidate in json.loads(capsys.readouterr().out):
+        assert candidate["evidence"], f"{candidate['table']} reported with no evidence"
+        assert candidate["reasons"], f"{candidate['table']} reported with no reasoning"

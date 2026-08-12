@@ -18,6 +18,7 @@ without an MCP client in the loop.
 - **Configuration review** — the server's settings judged against what it is actually doing: `work_mem` against bytes spilled to temporary files, `shared_buffers` against the cache hit rate it is achieving, `max_wal_size` against how many checkpoints were forced rather than scheduled. A default that is doing no harm is left alone, and nothing here guesses at the machine's memory or storage.
 - **Migration review** — read a migration before running it and see, per statement, the lock it takes, how long it holds it, whether it rewrites the table, and a safer rewrite where one exists. Connected, it reports how big the tables actually are, which is what decides whether a rewrite is a pause or an outage.
 - **Data model review** — foreign keys with no index behind them, keys whose two sides are different types, tables with no primary key, columns ordered so alignment padding costs bytes on every row, and types that do not mean what they look like. Each finding says whether it is proven from the catalog or inferred from statistics, and carries the DDL that fixes it.
+- **Partition advice** — whether a table is worth partitioning, decided by the share of recorded query time that would still prune rather than by the table's size. It is built to say no: a 400 GB table where a third of the query time filters on a timestamp is a worse table after partitioning, and the verdict comes with the number behind it either way.
 - **Health checks** — invalid/duplicate/bloated/unused indexes, table bloat, connection utilization, transaction ID wraparound risk, autovacuum backlog and what is holding the vacuum horizon, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints, statistics freshness.
 - **Top queries** — the most expensive queries recorded by `pg_stat_statements`, ranked by resource blend or by execution time, cumulatively or sampled over an interval.
 - **Index tuning** — recommend indexes for your recorded workload or for a specific set of queries, with before/after planner costs, the size HypoPG measures for each candidate, and what each one will cost to keep up to date.
@@ -66,6 +67,9 @@ pg-debug column-stats orders             # why the planner estimates what it doe
 pg-debug config                          # settings vs what the server is doing
 pg-debug config --exit-code              # fails on a durability setting that is off
 
+pg-debug partitions                      # is any table worth partitioning?
+pg-debug partitions --min-size 500MB --min-pruning-share 0.7
+
 pg-debug check-migration 001_add_column.sql   # what will this lock, and for how long?
 pg-debug check-migration --offline --exit-code migrations/*.sql
 
@@ -109,6 +113,7 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `column-stats TABLE` | — |
 | `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--exit-code` |
 | `config` | `--exit-code` |
+| `partitions` | `--min-size SIZE` (default 1GB, accepts `500MB`/`2GB`), `--min-pruning-share SHARE` (default 0.5), `--limit N` (default 200) |
 | `check-migration SQL` | a file path, inline SQL, or `-` for stdin; `--offline`, `--exit-code` |
 | `model` | `-s, --schema SCHEMA`, `-r, --rule RULES` (comma-separated, default `all`), `--proven-only`, `--min-rows N` (default 1000), `--exit-code` |
 | `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10, ignored for cumulative `resources`), `-i, --interval SECONDS` |
@@ -151,6 +156,26 @@ than scheduled. It does not guess at hardware — PostgreSQL cannot see the
 machine's memory or whether its storage is solid state, so no finding rests on
 assuming either, and where the right value depends on something invisible from
 here the finding says so instead of inventing a number.
+
+`partitions` decides from the workload, not from the table. Partitioning pays
+when queries filter on the partition key — they read one partition instead of
+all of them — and it pays most when old rows are removed by that key, because
+dropping a partition replaces a DELETE and the vacuum after it. It costs when
+queries *do not* filter on the key, since those now read every partition, and
+it constrains the model: every unique constraint has to include the partition
+key. So the number the verdict turns on is the share of recorded query time
+that restricts on a candidate key, and a table that does not clear the
+threshold is reported as examined-and-refused with that share attached, rather
+than left out. Half the value of the command is the tables it talks you out of.
+
+What comes out for a recommended table is the target shape, not a migration:
+converting a populated table means creating the partitioned one, copying,
+reconciling constraints and swapping names, and generating that unseen is how
+people lose data. The sketch does run, though — where the primary key would
+have to gain the partition key it is recreated rather than copied, because
+`LIKE ... INCLUDING ALL` brings the old key along and PostgreSQL rejects the
+CREATE outright. The monthly boundaries come from the column's histogram, so
+they cover the span the data actually occupies.
 
 `check-migration` answers a different question from the rest: not what the
 database is, but what a change will do to everyone using it while it runs. The
@@ -309,6 +334,7 @@ bad URL instead.
 | `review_data_model(rules="all", schema=None, min_rows=1000, proven_only=False)` | `list[ModelFinding]` — most severe first |
 | `check_migration(sql)` | `list[StatementReview]` — most severe first |
 | `review_configuration()` | `list[ConfigFinding]` — most severe first |
+| `suggest_partitions(sql=None, min_table_bytes=1GB, min_pruning_share=0.5, limit=200)` | `list[PartitionCandidate]` — recommended first, then by size |
 | `get_top_queries(sort_by="resources", limit=10, interval_seconds=None)` | `list[dict]` — one per query |
 | `analyze_workload_indexes(...)` / `analyze_query_indexes(queries, ...)` | `dict` with `summary`, `recommendations`, `query_impact` |
 

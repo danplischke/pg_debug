@@ -33,6 +33,25 @@ logger = logging.getLogger(__name__)
 #: recorded text is whichever of the two arrived first.
 QUERY_MARKER = "/* pg_debug */"
 
+#: Statement keywords that only ever describe transaction bookkeeping.
+TRANSACTION_CONTROL = frozenset({"BEGIN", "COMMIT", "ROLLBACK", "END", "START", "SAVEPOINT", "RELEASE"})
+
+
+def workload_only() -> str:
+    """SQL for "this row is the workload, not pg_debug's own bookkeeping".
+
+    Belongs with :data:`QUERY_MARKER` because it is the other half of it: the
+    marker is what the driver writes, this is how a reader gets rid of it.
+    Applied inside the statement rather than after it, so that pg_debug's own
+    queries cannot take up half of a ``LIMIT 10``. The marker covers everything
+    the driver runs; transaction control has to be matched by keyword, because
+    a bare BEGIN issued by the driver carries no comment of its own.
+    """
+    # An underscore is a LIKE wildcard, and the marker contains one.
+    marker = QUERY_MARKER.replace("_", r"\_")
+    keywords = ", ".join(f"'{keyword}'" for keyword in sorted(TRANSACTION_CONTROL))
+    return f"query NOT LIKE '{marker}%' AND upper(split_part(btrim(query), ' ', 1)) NOT IN ({keywords})"
+
 
 def obfuscate_password(text: str | None) -> str | None:
     """

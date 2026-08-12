@@ -14,12 +14,15 @@ from .index import split_table_reference
 from .index import table_identifier
 from .safe_sql import SafeSqlDriver
 from .sql_driver import QUERY_MARKER
+from .sql_driver import TRANSACTION_CONTROL
 from .sql_driver import DbConnPool
 from .sql_driver import SqlDriver
 from .sql_driver import obfuscate_password
+from .sql_driver import workload_only
 
 __all__ = [
     "QUERY_MARKER",
+    "TRANSACTION_CONTROL",
     "ColumnCollector",
     "DbConnPool",
     "IndexDefinition",
@@ -36,4 +39,5 @@ __all__ = [
     "resolve_table_reference",
     "split_table_reference",
     "table_identifier",
+    "workload_only",
 ]

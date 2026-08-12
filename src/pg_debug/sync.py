@@ -31,6 +31,9 @@ from .migration import StatementReview
 from .model import DEFAULT_MIN_ROWS
 from .model import ModelFinding
 from .model import RuleId
+from .partition import DEFAULT_MIN_PRUNING_SHARE
+from .partition import DEFAULT_MIN_TABLE_BYTES
+from .partition import PartitionCandidate
 from .schema import ObjectType
 from .sql import DbConnPool
 
@@ -209,6 +212,24 @@ class SyncPgDebug:
     def review_configuration(self) -> List[ConfigFinding]:
         """Review the server's settings against what it is actually doing."""
         return self._call(self._client.review_configuration)
+
+    # -- Partitioning --------------------------------------------------------
+
+    def suggest_partitions(
+        self,
+        sql: Optional[str | List[str]] = None,
+        min_table_bytes: int = DEFAULT_MIN_TABLE_BYTES,
+        min_pruning_share: float = DEFAULT_MIN_PRUNING_SHARE,
+        limit: int = 200,
+    ) -> List[PartitionCandidate]:
+        """Decide whether a table is worth partitioning, from what the workload does."""
+        return self._call(
+            self._client.suggest_partitions,
+            sql=sql,
+            min_table_bytes=min_table_bytes,
+            min_pruning_share=min_pruning_share,
+            limit=limit,
+        )
 
     # -- Live activity -------------------------------------------------------
 

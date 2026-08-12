@@ -53,6 +53,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   query time and vetoed indexes plainly worth having. At the 0.1 default it
   breaks ties towards the quieter table without overruling a real improvement.
   `write_weight=0` restores the previous behaviour.
+- `pg-debug partitions` and `PgDebug.suggest_partitions()`, which say whether a
+  table is worth partitioning and on what key, decided by the share of recorded
+  query time that restricts on that key rather than by the table's size. It is
+  built to say no: every table examined is reported with its verdict, and the
+  refusals carry the share they were refused on, because a large table where
+  most of the query time filters on nothing in particular is made slower by
+  partitioning and that is the more useful answer more often.
+
+  Predicates are read from the parsed statement, so a column a query merely
+  selects does not count as one it prunes on, and the operator decides the
+  strategy: HASH prunes on equality alone, so a column queried by range is
+  never given one. Deletes are weighed separately, since a delete that restricts
+  on the key becomes a DROP rather than a scan and the vacuum after it.
+
+  For a recommended table it emits the target shape — not a migration.
+  Converting a populated table needs a copy, a constraint reconciliation and a
+  name swap, which is not something to generate unseen. The sketch does run:
+  where the primary key would have to gain the partition key it is recreated
+  rather than copied, because `LIKE ... INCLUDING ALL` brings the old key along
+  and PostgreSQL rejects the CREATE. Monthly boundaries come from the column's
+  histogram, so they cover the span the data occupies.
 - `pg-debug config` and `PgDebug.review_configuration()`, which review the
   server's settings against what it is actually doing rather than against a
   table of recommended values. `work_mem` is raised only where queries have

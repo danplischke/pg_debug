@@ -303,6 +303,63 @@ def render_migration_review(reviews: Sequence[Any]) -> str:
     return "\n".join(lines).strip("\n")
 
 
+def render_partition_candidates(candidates: Sequence[Any]) -> str:
+    """Render the partitioning verdicts, recommended tables first.
+
+    The tables advised against are printed too, and with the number behind the
+    verdict, because "we looked and it would not pay" is the answer more often
+    and is worth as much as a recommendation. They come after a divider so that
+    nobody skims the top of the output and reads a rejection as advice.
+    """
+    if not candidates:
+        return "No table is both large enough and busy enough to be worth partitioning."
+
+    recommended = [candidate for candidate in candidates if candidate.recommended]
+    against = [candidate for candidate in candidates if not candidate.recommended]
+
+    lines: List[str] = []
+    for candidate in recommended:
+        lines.extend(_partition_candidate_lines(candidate))
+
+    if against:
+        lines.append("")
+        lines.append("-- Examined and not recommended " + "-" * 42)
+        for candidate in against:
+            lines.extend(_partition_candidate_lines(candidate))
+
+    lines.append("")
+    lines.append(f"{len(recommended)} of {len(candidates)} table{'' if len(candidates) == 1 else 's'} examined would gain from partitioning")
+    return "\n".join(lines).strip("\n")
+
+
+def _partition_candidate_lines(candidate: Any) -> List[str]:
+    verdict = "partition" if candidate.recommended else "leave as it is"
+    lines = [
+        "",
+        f"[{verdict}] {candidate.qualified_table} — {humanize.naturalsize(candidate.table_bytes)}, {candidate.row_count:,} rows",
+        f"    key:      {candidate.strategy.value.upper()} ({candidate.column}) {candidate.column_type}",
+        f"    prunes:   {candidate.pruning_share:.0%} of the recorded query time against this table",
+    ]
+    for reason in candidate.reasons:
+        lines.append(f"    {reason}")
+
+    alternatives = candidate.evidence.get("alternatives") or []
+    others = [a for a in alternatives if a["column"] != candidate.column]
+    if others:
+        shown = ", ".join(f"{a['column']} ({a['pruning_share']:.0%}, {a['strategy']})" for a in others[:3])
+        lines.append(f"    also considered: {shown}")
+
+    for blocker in candidate.blockers:
+        lines.append(f"    ! {blocker}")
+
+    if candidate.ddl:
+        lines.append("")
+        for statement in candidate.ddl:
+            lines.append(f"      {statement}")
+
+    return lines
+
+
 __all__ = [
     "format_duration",
     "render_activity",
@@ -314,6 +371,7 @@ __all__ = [
     "render_migration_review",
     "render_model_findings",
     "render_object_details",
+    "render_partition_candidates",
     "render_rows",
     "render_vacuum_progress",
     "to_json",

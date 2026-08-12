@@ -31,6 +31,7 @@ from .formatting import render_index_recommendations
 from .formatting import render_migration_review
 from .formatting import render_model_findings
 from .formatting import render_object_details
+from .formatting import render_partition_candidates
 from .formatting import render_rows
 from .formatting import render_vacuum_progress
 from .formatting import to_json
@@ -40,6 +41,8 @@ from .migration import MigrationLinter
 from .model import DEFAULT_MIN_ROWS
 from .model import RuleId
 from .model import Severity
+from .partition import DEFAULT_MIN_PRUNING_SHARE
+from .partition import DEFAULT_MIN_TABLE_BYTES
 from .schema import ObjectType
 from .sql import obfuscate_password
 
@@ -187,6 +190,26 @@ def read_migration(value: str) -> str:
     return value
 
 
+#: Suffixes accepted for a size argument, as PostgreSQL itself writes them.
+SIZE_UNITS = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+
+
+def parse_size(value: str) -> int:
+    """Return a byte count from ``500MB``, ``2GB`` or a bare number.
+
+    Raises:
+        argparse.ArgumentTypeError: If the value is not a size.
+    """
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([a-zA-Z]*)\s*", value)
+    if not match:
+        raise argparse.ArgumentTypeError(f"'{value}' is not a size. Write it as a number of bytes, or with a unit: 500MB, 2GB.")
+
+    number, unit = match.group(1), match.group(2).upper()
+    if unit and unit not in SIZE_UNITS:
+        raise argparse.ArgumentTypeError(f"'{match.group(2)}' is not a size unit. Use one of: {', '.join(SIZE_UNITS)}.")
+    return int(float(number) * SIZE_UNITS.get(unit or "B", 1))
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser."""
     parser = argparse.ArgumentParser(
@@ -308,6 +331,28 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any high-severity finding is reported, for use in CI.",
     )
     config.set_defaults(func=cmd_config)
+
+    partitions = subparsers.add_parser("partitions", help="Say whether a table is worth partitioning, from what the workload does")
+    partitions.add_argument(
+        "--min-size",
+        dest="min_table_bytes",
+        type=parse_size,
+        default=DEFAULT_MIN_TABLE_BYTES,
+        help=f"Ignore tables smaller than this, e.g. 500MB or 2GB (default: {DEFAULT_MIN_TABLE_BYTES // 1024**3}GB).",
+    )
+    partitions.add_argument(
+        "--min-pruning-share",
+        type=float,
+        default=DEFAULT_MIN_PRUNING_SHARE,
+        help=f"The share of recorded query time that has to keep pruning for a table to be recommended (default: {DEFAULT_MIN_PRUNING_SHARE}).",
+    )
+    partitions.add_argument(
+        "--limit",
+        type=int,
+        default=200,
+        help="How many recorded queries to judge by (default: 200).",
+    )
+    partitions.set_defaults(func=cmd_partitions)
 
     check_migration = subparsers.add_parser("check-migration", help="Review a migration for the locks it takes before running it")
     check_migration.add_argument("sql", help="Migration file, SQL, or - to read it from stdin")
@@ -459,6 +504,14 @@ async def cmd_config(pg: PgDebug, args: argparse.Namespace) -> Any:
     return await pg.review_configuration()
 
 
+async def cmd_partitions(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.suggest_partitions(
+        min_table_bytes=args.min_table_bytes,
+        min_pruning_share=args.min_pruning_share,
+        limit=args.limit,
+    )
+
+
 async def cmd_check_migration(pg: PgDebug, args: argparse.Namespace) -> Any:
     return await pg.check_migration(read_migration(args.sql))
 
@@ -514,6 +567,8 @@ def format_result(command: str, result: Any, as_json: bool) -> str:
             return to_json([review.to_dict() for review in result])
         if command == "config":
             return to_json([finding.to_dict() for finding in result])
+        if command == "partitions":
+            return to_json([candidate.to_dict() for candidate in result])
         return to_json(result)
 
     if command == "activity":
@@ -532,6 +587,8 @@ def format_result(command: str, result: Any, as_json: bool) -> str:
         return render_migration_review(result)
     if command == "config":
         return render_configuration_review(result)
+    if command == "partitions":
+        return render_partition_candidates(result)
     if command in ("tune-workload", "tune-queries"):
         return render_index_recommendations(result)
     return render_rows(result)

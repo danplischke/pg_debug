@@ -408,3 +408,32 @@ def test_optimizer_falls_back_to_the_environment(monkeypatch):
     monkeypatch.setenv("PG_DEBUG_LLM_MODEL", "from-env")
     assert LLMOptimizerTool(MagicMock(spec=SqlDriver)).model == "from-env"
     assert LLMOptimizerTool(MagicMock(spec=SqlDriver), model="explicit").model == "explicit"
+
+
+@pytest.mark.asyncio
+async def test_suggest_partitions_passes_its_thresholds_through(pg):
+    with (
+        patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
+        patch("pg_debug.client.PartitionAdvisor") as advisor_cls,
+    ):
+        advisor_cls.return_value.analyze = AsyncMock(return_value=[])
+
+        assert await pg.suggest_partitions(min_table_bytes=1024, min_pruning_share=0.7, limit=25) == []
+
+        assert advisor_cls.call_args.kwargs == {"min_table_bytes": 1024, "min_pruning_share": 0.7}
+        advisor_cls.return_value.analyze.assert_awaited_once_with(query_list=None, limit=25)
+
+
+@pytest.mark.asyncio
+async def test_suggest_partitions_accepts_a_single_query_as_a_string(pg):
+    """One query is the natural way to ask "would this query prune", so it must
+    not arrive at the advisor as a list of characters."""
+    with (
+        patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
+        patch("pg_debug.client.PartitionAdvisor") as advisor_cls,
+    ):
+        advisor_cls.return_value.analyze = AsyncMock(return_value=[])
+
+        await pg.suggest_partitions(sql="SELECT * FROM events WHERE created_at > now()")
+
+        assert advisor_cls.return_value.analyze.call_args.kwargs["query_list"] == ["SELECT * FROM events WHERE created_at > now()"]

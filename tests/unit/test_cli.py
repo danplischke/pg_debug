@@ -664,3 +664,106 @@ def test_split_index_columns_splits_only_at_the_top_level():
 
 def test_split_index_columns_ignores_blank_entries():
     assert cli.split_index_columns(" a , , b ") == ["a", "b"]
+
+
+# -- Partitioning -----------------------------------------------------------
+
+
+def partition_candidate(**overrides):
+    from pg_debug.partition import PartitionCandidate
+    from pg_debug.partition import Strategy
+
+    base = dict(
+        schema="public",
+        table="events",
+        table_bytes=400 * 1024**3,
+        row_count=2_000_000_000,
+        column="created_at",
+        column_type="timestamp with time zone",
+        strategy=Strategy.RANGE,
+        pruning_share=0.9,
+        recommended=True,
+        reasons=["Queries restricting on created_at would read one partition."],
+        blockers=[],
+        ddl=["CREATE TABLE public.events_partitioned (LIKE public.events INCLUDING ALL) PARTITION BY RANGE (created_at);"],
+        evidence={"alternatives": []},
+    )
+    return PartitionCandidate(**{**base, **overrides})
+
+
+def test_partitions_renders_a_recommendation(pg_client):
+    pg_client.suggest_partitions = AsyncMock(return_value=[partition_candidate()])
+
+    code, out, _ = run(["partitions"])
+
+    assert code == 0
+    assert "[partition] public.events" in out
+    assert "RANGE (created_at)" in out
+    assert "90%" in out
+    assert "PARTITION BY RANGE" in out
+
+
+def test_partitions_reports_a_refusal_under_its_own_heading(pg_client):
+    """A rejection skimmed off the top of the output would read as advice."""
+    pg_client.suggest_partitions = AsyncMock(return_value=[partition_candidate(recommended=False, pruning_share=0.2, ddl=[])])
+
+    code, out, _ = run(["partitions"])
+
+    assert code == 0
+    assert "Examined and not recommended" in out
+    assert "[leave as it is] public.events" in out
+    assert "PARTITION BY" not in out
+
+
+def test_partitions_says_so_when_nothing_qualifies(pg_client):
+    pg_client.suggest_partitions = AsyncMock(return_value=[])
+
+    code, out, _ = run(["partitions"])
+
+    assert code == 0
+    assert out.strip() == "No table is both large enough and busy enough to be worth partitioning."
+
+
+def test_partitions_json_carries_the_verdict_and_its_evidence(pg_client):
+    pg_client.suggest_partitions = AsyncMock(return_value=[partition_candidate()])
+
+    code, out, _ = run(["--json", "partitions"])
+
+    payload = json.loads(out)
+    assert code == 0
+    assert payload[0]["recommended"] is True
+    assert payload[0]["strategy"] == "range"
+    assert payload[0]["pruning_share"] == 0.9
+
+
+def test_partitions_passes_its_thresholds_through(pg_client):
+    pg_client.suggest_partitions = AsyncMock(return_value=[])
+
+    run(["partitions", "--min-size", "500MB", "--min-pruning-share", "0.7", "--limit", "50"])
+
+    pg_client.suggest_partitions.assert_awaited_once_with(
+        min_table_bytes=500 * 1024**2,
+        min_pruning_share=0.7,
+        limit=50,
+    )
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("1024", 1024),
+        ("1KB", 1024),
+        ("500MB", 500 * 1024**2),
+        ("2GB", 2 * 1024**3),
+        ("1.5gb", int(1.5 * 1024**3)),
+        (" 4 TB ", 4 * 1024**4),
+    ],
+)
+def test_parse_size_accepts_the_units_postgres_uses(text, expected):
+    assert cli.parse_size(text) == expected
+
+
+@pytest.mark.parametrize("text", ["", "big", "10PB", "GB"])
+def test_parse_size_rejects_what_is_not_a_size(text):
+    with pytest.raises(argparse.ArgumentTypeError):
+        cli.parse_size(text)

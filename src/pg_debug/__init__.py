@@ -54,6 +54,9 @@ from .model import ModelFinding
 from .model import ModelReviewer
 from .model import RuleId
 from .model import Severity
+from .partition import PartitionAdvisor
+from .partition import PartitionCandidate
+from .partition import Strategy
 from .schema import ObjectType
 from .schema import SchemaInspector
 from .sql import DbConnPool
@@ -96,6 +99,8 @@ __all__ = [
     "ModelReviewer",
     "NotConnectedError",
     "ObjectType",
+    "PartitionAdvisor",
+    "PartitionCandidate",
     "PgDebug",
     "PgDebugError",
     "PlanNode",
@@ -107,6 +112,7 @@ __all__ = [
     "SqlDriver",
     "StatementReview",
     "StatisticsInspector",
+    "Strategy",
     "SyncPgDebug",
     "TopQueriesCalc",
     "__version__",
