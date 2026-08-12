@@ -69,6 +69,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Workload analysis stopped at the first query it could not parse, reporting
+  `syntax error at or near "<"` and abandoning the rest. That text comes from
+  `pg_stat_statements` itself: a role that is not a superuser and lacks
+  `pg_read_all_stats` sees `<insufficient privilege>` in place of other roles'
+  queries. Entries that cannot be parsed are now skipped, and the run says how
+  many were dropped and why — including the grant that makes them visible.
+- Nor could the advisor be trusted to survive a query it could not *plan*.
+  `pg_stat_statements` records queries with their constants stripped out, and
+  the values put back in their place are guesses; one of the wrong type — an
+  integer against an enum or a domain — raised and ended the analysis. Such
+  queries are now dropped in the same pass.
+- A workload that was dropped entirely reported "No index recommendations
+  found.", which reads as "your indexes are fine" rather than "none of your
+  queries could be used". It now explains itself.
+- `tune-queries` and `tune-workload` raised `hypopg: "x" is not a table or
+  materialized view` for any query against a view — an ordinary thing for a
+  workload to contain, and fatal to the whole run. Candidates are now limited
+  to relations an index can actually be created on, which also stops the
+  advisor proposing indexes on catalog tables. The advisor no longer analyzes
+  pg_debug's own queries either.
+- A statement that failed inside `SqlDriver.session()` left the pinned
+  connection's transaction aborted, so every later statement in that session
+  failed with "current transaction is aborted". Outside a session the pool
+  resets a returned connection; pinned, it does not, so one recoverable error
+  took the whole session with it. The session now clears the aborted
+  transaction and carries on — hypothetical indexes live in backend memory and
+  survive it.
 - The index advisor measured every candidate with `hypopg_relation_size()` and
   then threw the measurement away, rebuilding each recommendation without it.
   Everything downstream fell back to a formula over `pg_stats` that read

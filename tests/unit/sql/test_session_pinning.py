@@ -156,3 +156,63 @@ async def test_index_tuning_runs_inside_a_session():
     await advisor.analyze_workload(query_list=["SELECT 1"])
 
     assert entered == [True]
+
+
+class FailingDriver(SqlDriver):
+    """Fails one nominated statement, and records rollbacks on the pin."""
+
+    def __init__(self, conn, failing_query: str):
+        super().__init__(conn=conn)
+        self.failing_query = failing_query
+        self.rollbacks = 0
+
+    async def _execute_with_connection(self, connection, query, params, force_readonly):
+        if query == self.failing_query:
+            raise RuntimeError("operator does not exist: information_schema.character_data = integer")
+        return None
+
+    async def _reset_pinned_transaction(self):
+        self.rollbacks += 1
+        await super()._reset_pinned_transaction()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_statement_does_not_poison_the_rest_of_the_session():
+    """Outside a session the connection goes back to the pool and is reset. Pinned,
+    it stays — so without this every later statement fails with 'current
+    transaction is aborted' and one recoverable error takes the whole session.
+    """
+    driver = FailingDriver(RotatingConnPool(), failing_query="BOOM")
+
+    async with driver.session():
+        with pytest.raises(RuntimeError):
+            await driver.execute_query("BOOM")
+        # The session is still usable.
+        await driver.execute_query("SELECT 1")
+
+    assert driver.rollbacks == 1
+
+
+@pytest.mark.asyncio
+async def test_the_original_error_survives_a_failed_rollback():
+    """Whatever went wrong clearing the transaction, the caller needs to see the
+    error that caused it, not the one from the cleanup."""
+    driver = FailingDriver(RotatingConnPool(), failing_query="BOOM")
+
+    async with driver.session():
+        driver._pinned_connection = MagicMock()
+        driver._pinned_connection.rollback = AsyncMock(side_effect=RuntimeError("rollback failed"))
+
+        with pytest.raises(RuntimeError, match="operator does not exist"):
+            await driver.execute_query("BOOM")
+
+
+@pytest.mark.asyncio
+async def test_a_failure_outside_a_session_needs_no_reset():
+    """The pool resets a returned connection, so there is nothing to clear."""
+    driver = FailingDriver(RotatingConnPool(), failing_query="BOOM")
+
+    with pytest.raises(RuntimeError):
+        await driver.execute_query("BOOM")
+
+    assert driver.rollbacks == 0

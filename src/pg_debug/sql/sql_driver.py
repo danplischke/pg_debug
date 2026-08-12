@@ -303,7 +303,20 @@ class SqlDriver:
 
             # Inside session(), every statement goes to the pinned connection.
             if self._pinned_connection is not None:
-                return await self._execute_with_connection(self._pinned_connection, query, params, force_readonly=force_readonly)
+                try:
+                    return await self._execute_with_connection(self._pinned_connection, query, params, force_readonly=force_readonly)
+                except Exception:
+                    # A failed statement leaves the connection's transaction
+                    # aborted, and outside a session that connection would go
+                    # back to the pool to be reset. Pinned, it stays — so every
+                    # later statement in the session fails with "current
+                    # transaction is aborted" and one recoverable error takes
+                    # the whole session with it. Statements here commit
+                    # individually, so clearing it loses nothing committed, and
+                    # hypothetical indexes live in backend memory rather than in
+                    # the transaction.
+                    await self._reset_pinned_transaction()
+                    raise
 
             # Handle connection pool vs direct connection
             if self.is_pool:
@@ -323,6 +336,16 @@ class SqlDriver:
                 self.conn = None
 
             raise e
+
+    async def _reset_pinned_transaction(self) -> None:
+        """Clear an aborted transaction so the pinned session stays usable."""
+        if self._pinned_connection is None:
+            return
+        try:
+            await self._pinned_connection.rollback()
+        except Exception as rollback_error:
+            # Never let this replace the error that caused it.
+            logger.error(f"Error clearing the session's aborted transaction: {rollback_error}")
 
     async def _execute_with_connection(self, connection, query, params, force_readonly) -> Optional[List[RowResult]]:
         """Execute query with the given connection."""

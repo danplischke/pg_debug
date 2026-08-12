@@ -153,6 +153,15 @@ class DatabaseTuningAdvisor(IndexTuningBase):
             if kept_cols:
                 table_columns[tbl] = kept_cols
 
+        # A query may name a view, or a catalog table, and HypoPG raises on the
+        # first of those rather than declining it — which used to abort the
+        # whole analysis over one ordinary query.
+        indexable = await self.indexable_tables(table_columns)
+        skipped = sorted(set(table_columns) - indexable)
+        if skipped:
+            self.dta_trace(f"Skipping {len(skipped)} relation(s) that cannot carry an index: {', '.join(skipped)}")
+            table_columns = {table: cols for table, cols in table_columns.items() if table in indexable}
+
         candidates = []
         for table, cols in table_columns.items():
             # TODO: Optimize by prioritizing columns from filters/joins; current approach generates all combinations

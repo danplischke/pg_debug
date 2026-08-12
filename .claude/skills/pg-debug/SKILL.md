@@ -193,6 +193,17 @@ yesterday means the counters are young, not that the index is dead — check
 `metrics.max_scans` and how long statistics have been accumulating. Cache hit
 rate on an idle test database is meaningless.
 
+### When tuning reports fewer queries than expected
+
+The workload comes from `pg_stat_statements` and not every entry can be used.
+Entries that cannot be parsed or planned are skipped and the run says how many
+and why — relay that rather than presenting the result as a complete picture.
+The usual cause is privilege: a role that is neither a superuser nor a member
+of `pg_read_all_stats` sees `<insufficient privilege>` instead of other roles'
+query text, so the workload it analyzes is only its own queries. `GRANT
+pg_read_all_stats TO <role>` fixes it. Queries against views are skipped by
+design: an index goes on the tables underneath.
+
 ## Reviewing the data model
 
 Everything else here asks what the server is doing. This asks whether the

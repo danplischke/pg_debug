@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 
+import psycopg
 import pytest
 import pytest_asyncio
 
@@ -24,6 +25,8 @@ from pg_debug.database_health.table_bloat_calc import TableBloatCalc
 from pg_debug.errors import ExtensionRequiredError
 from pg_debug.errors import InvalidArgumentError
 from pg_debug.index.dta_calc import HYPOTHETICAL_INDEX_SIZES_SQL
+from pg_debug.index.dta_calc import DatabaseTuningAdvisor
+from pg_debug.index.index_opt_base import HIDDEN_QUERY_TEXT
 from pg_debug.sql import SafeSqlDriver
 
 DATABASE_URI = os.environ.get("PG_DEBUG_TEST_DATABASE_URI")
@@ -959,3 +962,104 @@ def test_cli_model_command_against_a_real_database(capsys, monkeypatch, model_pg
     assert json.loads(capsys.readouterr().out) == []
 
     assert cli.main(["model", "--schema", MODEL_SCHEMA, "--exit-code"]) == cli.UNHEALTHY_EXIT_CODE
+
+
+# -- Workload entries the advisor cannot use --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_view_in_the_workload_does_not_abort_the_analysis(pg):
+    """HypoPG raises on a view rather than declining it, so one ordinary query
+    against one used to take the whole run with it."""
+    if not await has_extension(pg, "hypopg"):
+        pytest.skip("hypopg is not installed")
+
+    result = await pg.analyze_query_indexes([f"SELECT * FROM {SCHEMA}.paid_orders WHERE customer_id = 42"])
+
+    assert "error" not in result
+    # The index belongs on the table underneath, which this query does not name.
+    assert result["recommendations"] == "No index recommendations found."
+
+
+@pytest.mark.asyncio
+async def test_a_view_alongside_a_table_still_yields_the_table_index(pg):
+    if not await has_extension(pg, "hypopg"):
+        pytest.skip("hypopg is not installed")
+
+    result = await pg.analyze_query_indexes(
+        [f"SELECT o.* FROM {SCHEMA}.paid_orders p JOIN {SCHEMA}.orders o ON o.id = p.id WHERE o.customer_id = 42"]
+    )
+
+    assert "error" not in result
+    assert any("orders" in rec["index_definition"] for rec in result["recommendations"])
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_query_is_skipped_rather_than_ending_the_analysis(pg):
+    """The reported failure: pg_stat_statements hands back text that is not SQL
+    — '<insufficient privilege>' for another role's query — and the advisor
+    stopped at the first one."""
+    if not await has_extension(pg, "hypopg"):
+        pytest.skip("hypopg is not installed")
+
+    advisor = DatabaseTuningAdvisor(await pg.sql_driver())
+    workload = [
+        {"query": HIDDEN_QUERY_TEXT, "queryid": 1, "calls": 100, "avg_exec_time": 10.0},
+        {"query": f"SELECT * FROM {SCHEMA}.orders WHERE customer_id = 42", "queryid": 2, "calls": 100, "avg_exec_time": 10.0},
+    ]
+
+    session = await advisor.analyze_workload(workload=workload)
+
+    assert session.error is None
+    assert [rec.table for rec in session.recommendations] == [f"{SCHEMA}.orders"]
+
+
+@pytest.mark.asyncio
+async def test_a_wholly_unusable_workload_explains_itself(pg):
+    """Otherwise this reports "no index recommendations", which reads as
+    "your indexes are fine"."""
+    if not await has_extension(pg, "hypopg"):
+        pytest.skip("hypopg is not installed")
+
+    advisor = DatabaseTuningAdvisor(await pg.sql_driver())
+    workload = [{"query": HIDDEN_QUERY_TEXT, "queryid": 1, "calls": 100, "avg_exec_time": 10.0}]
+
+    session = await advisor.analyze_workload(workload=workload)
+
+    assert session.recommendations == []
+    assert "pg_read_all_stats" in (session.error or "")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_statement_leaves_the_session_usable(pg):
+    """A pinned connection is not returned to the pool between statements, so
+    without a rollback one error would abort every statement after it."""
+    driver = await pg.sql_driver()
+
+    async with driver.session():
+        with pytest.raises(psycopg.errors.InvalidTextRepresentation):
+            await driver.execute_query("SELECT 1 = 'not an integer'")
+
+        rows = await driver.execute_query("SELECT 1 AS ok")
+
+    assert rows is not None
+    assert rows[0].cells["ok"] == 1
+
+
+@pytest.mark.asyncio
+async def test_hypothetical_indexes_survive_a_failed_statement(pg):
+    """The rollback clears the aborted transaction; HypoPG keeps its indexes in
+    backend memory, so the session's state is not collateral damage."""
+    if not await has_extension(pg, "hypopg"):
+        pytest.skip("hypopg is not installed")
+
+    driver = await pg.sql_driver()
+
+    async with driver.session():
+        await driver.execute_query(f"SELECT hypopg_create_index('CREATE INDEX ON {SCHEMA}.orders (customer_id)')")
+        with pytest.raises(psycopg.errors.InvalidTextRepresentation):
+            await driver.execute_query("SELECT 1 = 'not an integer'")
+
+        remaining = await driver.execute_query("SELECT count(*) AS n FROM hypopg()")
+        assert remaining is not None
+        assert remaining[0].cells["n"] == 1

@@ -10,9 +10,11 @@ from typing import Iterable
 
 from pglast import parse_sql
 from pglast.ast import SelectStmt
+from pglast.parser import ParseError
 
 from ..artifacts import calculate_improvement_multiple
 from ..explain import ExplainPlanTool
+from ..sql import QUERY_MARKER
 from ..sql import IndexDefinition
 from ..sql import SafeSqlDriver
 from ..sql import SqlBindParams
@@ -25,6 +27,15 @@ from ..sql import table_identifier
 logger = logging.getLogger(__name__)
 
 MAX_NUM_INDEX_TUNING_QUERIES = 10
+
+#: What pg_stat_statements shows instead of another role's query text, unless
+#: the reading role is a superuser or has been granted pg_read_all_stats.
+HIDDEN_QUERY_TEXT = "<insufficient privilege>"
+
+#: Relation kinds an index can be created on: ordinary tables, materialized
+#: views and partitioned tables. A view is not one of them — it has no storage
+#: of its own, and the index belongs on the tables underneath it.
+INDEXABLE_RELKINDS = ("r", "m", "p")
 
 
 def pp_list(lst: list[Any]) -> str:
@@ -184,6 +195,10 @@ class IndexTuningBase(ABC):
         # Add trace accumulator
         self._dta_traces: list[str] = []
 
+        # Set when part of the workload could not be read; see
+        # _describe_dropped_queries.
+        self._workload_warning: str | None = None
+
     async def analyze_workload(
         self,
         workload: list[dict[str, Any]] | None = None,
@@ -283,6 +298,11 @@ class IndexTuningBase(ABC):
                 if query_weights is None or len(query_weights) == 0:
                     self.dta_trace("No query provided")
                     session.recommendations = []
+                    # "No index recommendations" reads as "your indexes are
+                    # fine". If the workload was dropped rather than analyzed,
+                    # say which it was.
+                    if self._workload_warning:
+                        session.error = self._workload_warning
                 else:
                     # Gather queries as strings
                     workload_queries = [q for q, _, _ in query_weights]
@@ -338,8 +358,17 @@ class IndexTuningBase(ABC):
         return None
 
     async def _validate_and_parse_workload(self, workload: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Validate the workload to ensure it is analyzable."""
+        """Keep the queries that can be analyzed, and say what was dropped.
+
+        A workload read from ``pg_stat_statements`` is not all valid SQL. A role
+        without ``pg_read_all_stats`` sees ``<insufficient privilege>`` in place
+        of other roles' query text, and a statement can use grammar the bundled
+        parser does not know. Neither is a reason to abandon the rest of the
+        workload, which is what an uncaught parse error here used to do.
+        """
         validated_workload = []
+        dropped: dict[str, int] = {}
+
         for q in workload:
             query_text = q["query"]
             if not query_text:
@@ -347,10 +376,26 @@ class IndexTuningBase(ABC):
                 continue
             query_text = query_text.strip().lower()
 
+            if QUERY_MARKER in query_text:
+                # pg_debug's own catalog queries are not the user's workload.
+                logger.debug("Skipping one of our own queries")
+                continue
+
+            if query_text.startswith(HIDDEN_QUERY_TEXT):
+                dropped["hidden"] = dropped.get("hidden", 0) + 1
+                continue
+
             # Replace parameter placeholders with dummy values
             query_text = await self._sql_bind_params.replace_parameters(query_text)
 
-            parsed = parse_sql(query_text)
+            try:
+                parsed = parse_sql(query_text)
+            except ParseError as e:
+                # One malformed entry among hundreds is not a reason to report
+                # nothing at all.
+                dropped["unparseable"] = dropped.get("unparseable", 0) + 1
+                logger.debug(f"Skipping unparseable query ({e}): {query_text[:50]}...")
+                continue
             if not parsed:
                 logger.debug(f"Skipping non-parseable query: {query_text[:50]}...")
                 continue
@@ -359,10 +404,67 @@ class IndexTuningBase(ABC):
                 logger.debug(f"Skipping non-analyzable query: {query_text[:50]}...")
                 continue
 
+            if not await self._is_plannable(query_text):
+                dropped["unplannable"] = dropped.get("unplannable", 0) + 1
+                continue
+
             q["query"] = query_text
             q["stmt"] = stmt
             validated_workload.append(q)
+
+        self._workload_warning = self._describe_dropped_queries(dropped, kept=len(validated_workload))
+        if self._workload_warning:
+            logger.warning(self._workload_warning)
         return validated_workload
+
+    async def _is_plannable(self, query_text: str) -> bool:
+        """Whether the server will actually plan the query as reconstructed.
+
+        pg_stat_statements records queries with their constants replaced by
+        placeholders, and the values put back in their place are guesses. A
+        guess of the wrong type — an integer where the column is an enum or a
+        domain — plans as an error. Finding that out here costs nothing, since
+        the plan is cached and the analysis needs it anyway; finding it out
+        later aborted the whole run.
+        """
+        try:
+            await self.get_explain_plan_with_indexes(query_text, frozenset())
+            return True
+        except Exception as e:
+            logger.debug(f"Skipping query the server will not plan ({e}): {query_text[:80]}...")
+            return False
+
+    @staticmethod
+    def _describe_dropped_queries(dropped: dict[str, int], kept: int) -> str | None:
+        """Explain a workload that was read only in part, or not at all.
+
+        Silence here would be misleading: an empty workload reports "no index
+        recommendations", which reads as "your indexes are fine" rather than
+        "none of your queries could be used".
+        """
+        explanations = {
+            "hidden": (
+                f"came back as '{HIDDEN_QUERY_TEXT}' — pg_stat_statements hides the text of other roles' "
+                f"queries unless the role reading it is a superuser or has been granted pg_read_all_stats"
+            ),
+            "unparseable": (
+                "could not be parsed — the statement may use grammar this parser does not know, or the "
+                "recorded text may be incomplete; run with -vv to see them"
+            ),
+            "unplannable": (
+                "could not be planned, usually because pg_stat_statements records a query without its "
+                "constants and the values substituted back in were the wrong type; run with -vv to see them"
+            ),
+        }
+        reasons = [f"{count} {explanations[reason]}" for reason, count in dropped.items() if count]
+        if not reasons:
+            return None
+
+        total = sum(dropped.values())
+        skipped = f"{total} was skipped" if total == 1 else f"{total} were skipped"
+        if kept:
+            return f"Analyzing {kept} quer{'y' if kept == 1 else 'ies'}; {skipped}: " + "; ".join(reasons) + "."
+        return f"None of the {total} queries in the workload could be analyzed: " + "; ".join(reasons) + "."
 
     def _covert_workload_to_query_weights(self, workload: list[dict[str, Any]]) -> list[tuple[str, SelectStmt, float]]:
         """Convert workload to query weights based on query frequency."""
@@ -444,6 +546,35 @@ class IndexTuningBase(ABC):
             [min_calls, min_avg_time_ms, limit],
         )
         return [dict(row.cells) for row in result] if result else []
+
+    async def indexable_tables(self, tables: Iterable[str]) -> set[str]:
+        """Keep the names that refer to something an index can be created on.
+
+        Workloads are full of views, and asking HypoPG to index one raises an
+        error that aborts the entire analysis — so they are dropped here rather
+        than discovered at creation time. Names are resolved through
+        ``to_regclass``, which applies the connection's search_path exactly as
+        the query itself would. Anything in a system schema is dropped too: an
+        index on a catalog table is not a recommendation anybody wants.
+        """
+        names = sorted({table for table in tables if table})
+        if not names:
+            return set()
+
+        rows = await SafeSqlDriver.execute_param_query(
+            self.sql_driver,
+            """
+            SELECT t.name AS name
+            FROM unnest({}::text[]) AS t(name)
+            JOIN pg_class c ON c.oid = to_regclass(t.name)
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind = ANY({})
+              AND n.nspname <> 'information_schema'
+              AND n.nspname NOT LIKE 'pg\\_%'
+            """,
+            [names, list(INDEXABLE_RELKINDS)],
+        )
+        return {row.cells["name"] for row in rows} if rows else set()
 
     def _is_analyzable_stmt(self, stmt: Any) -> bool:
         """Check if a statement can be analyzed for index recommendations."""

@@ -120,39 +120,28 @@ async def test_extract_columns_from_join_query(create_dta):
 @pytest.mark.asyncio
 async def test_generate_candidates(async_sql_driver, create_dta):
     """Test index candidate generation."""
-    global responses
-    responses = [
-        # information_schema.columns
-        [
-            MockCell(
-                {
-                    "table_schema": "public",
-                    "table_name": "users",
-                    "column_name": "name",
-                    "data_type": "character varying",
-                    "character_maximum_length": 150,
-                    "avg_width": 30,
-                    "potential_long_text": True,
-                }
-            )
-        ],
-        # create the hypothetical indexes and measure them in one statement
-        [MockCell({"index_name": "pg_debug_idx_users_name_1", "index_size": 81920})],
-        # hypopg_reset
-        [],
-    ]
-    global responses_index
-    responses_index = 0
 
     async def mock_execute_query(query):
-        global responses_index
-        responses_index += 1
-        logger.info(
-            f"Query: {query}\n    Response: {
-                list(json.dumps(x.cells) for x in responses[responses_index - 1]) if responses_index <= len(responses) else None
-            }\n--------------------------------------------------------"
-        )
-        return responses[responses_index - 1] if responses_index <= len(responses) else None
+        logger.info(f"Query: {query}")
+        if "to_regclass" in query:
+            return [MockCell({"name": "users"})]
+        if "FROM information_schema.columns c" in query:
+            return [
+                MockCell(
+                    {
+                        "table_schema": "public",
+                        "table_name": "users",
+                        "column_name": "name",
+                        "data_type": "character varying",
+                        "character_maximum_length": 150,
+                        "avg_width": 30,
+                        "potential_long_text": True,
+                    }
+                )
+            ]
+        if "hypopg_create_index" in query:
+            return [MockCell({"index_name": "pg_debug_idx_users_name_1", "index_size": 81920})]
+        return None
 
     async_sql_driver.execute_query = AsyncMock(side_effect=mock_execute_query)
 
@@ -188,6 +177,9 @@ async def test_analyze_workload(async_sql_driver, create_dta):
                 return [MockCell({"QUERY PLAN": [{"Plan": {"Total Cost": 100.0}}]})]  # Current cost
         elif "hypopg_reset" in query:
             return None
+        elif "to_regclass" in query:
+            # Every table named in these tests is an ordinary table.
+            return [MockCell({"name": name}) for name in ("users", "orders")]
         elif "FROM information_schema.columns c" in query:
             return [
                 MockCell(
@@ -629,6 +621,9 @@ async def test_basic_workload_analysis(async_sql_driver):
             return [MockCell({"rel_size": 10_000_000})]
         if query.strip() == "SELECT hypopg_reset();":
             return []
+        if "to_regclass" in query:
+            # Both are ordinary tables, so both can carry an index.
+            return [MockCell({"name": name}) for name in ("users", "orders")]
 
         responses_index += 1
         logger.info(

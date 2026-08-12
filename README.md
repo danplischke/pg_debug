@@ -142,6 +142,14 @@ measures with, so the two cannot disagree: a table it calls optimally packed is
 one the bloat check will not accuse of padding. On a table of fixed-width
 columns its prediction is exact, page for page.
 
+Index tuning reads its workload from `pg_stat_statements`, where not every
+entry is usable: a role that is neither a superuser nor a member of
+`pg_read_all_stats` sees `<insufficient privilege>` in place of other roles'
+query text, and a query recorded without its constants may not plan once
+values are substituted back in. Those entries are skipped and the run reports
+how many and why. Queries against views are skipped too — an index belongs on
+the tables underneath a view, and HypoPG cannot put one on the view itself.
+
 A hypothetical index `SPEC` is `table(column, ...)` with an optional method —
 `orders(user_id)`, `orders(user_id, created_at):btree`,
 `reporting.orders(status):hash`. Columns may be expressions, as in
