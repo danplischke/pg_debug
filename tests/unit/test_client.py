@@ -299,3 +299,40 @@ async def test_analyze_workload_indexes_with_llm_method(pg):
 async def test_index_tuning_rejects_unknown_method(pg):
     with pytest.raises(InvalidArgumentError, match="Unknown index tuning method"):
         await pg.analyze_workload_indexes(method="guess")  # type: ignore[arg-type]
+
+
+# -- LLM tuning method ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_llm_method_rejects_multiple_queries_up_front(pg):
+    with pytest.raises(InvalidArgumentError, match="one query at a time"):
+        await pg.analyze_query_indexes(["SELECT 1", "SELECT 2"], method="llm")
+
+
+@pytest.mark.asyncio
+async def test_llm_method_accepts_a_single_query(pg):
+    with (
+        patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
+        patch("pg_debug.client.LLMOptimizerTool"),
+        patch("pg_debug.client.TextPresentation") as presentation_cls,
+    ):
+        presentation_cls.return_value.analyze_queries = AsyncMock(return_value={"recommendations": []})
+        await pg.analyze_query_indexes(["SELECT 1"], method="llm")
+
+    presentation_cls.return_value.analyze_queries.assert_awaited_once()
+
+
+def test_llm_model_defaults_to_a_capable_model(monkeypatch):
+    from pg_debug.index.llm_opt import DEFAULT_LLM_MODEL
+    from pg_debug.index.llm_opt import llm_model
+
+    monkeypatch.delenv("PG_DEBUG_LLM_MODEL", raising=False)
+    assert llm_model() == DEFAULT_LLM_MODEL
+
+
+def test_llm_model_is_configurable(monkeypatch):
+    from pg_debug.index.llm_opt import llm_model
+
+    monkeypatch.setenv("PG_DEBUG_LLM_MODEL", "gpt-4o-mini")
+    assert llm_model() == "gpt-4o-mini"

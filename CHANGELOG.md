@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A `pg-debug` project skill (`.claude/skills/pg-debug/SKILL.md`) documenting
+  how to drive the tool from Claude Code.
+- `PG_DEBUG_LLM_MODEL`, which overrides the model used by the `llm` tuning
+  method (previously hardcoded to `gpt-4o`).
+- A complete CLI command reference and an "LLM tuning method" section in the
+  README.
+
+### Changed
+
+- `analyze_query_indexes(..., method="llm")` rejects more than one query up
+  front, instead of failing deep in the analysis, since the LLM optimizer
+  reasons about a single plan.
+
 ## [0.1.0] - 2026-08-12
 
 First release. `pg_debug` extracts the analysis engine of

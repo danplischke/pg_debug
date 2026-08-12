@@ -1,5 +1,6 @@
 import logging
 import math
+import os
 from dataclasses import dataclass
 from typing import Any
 from typing import override
@@ -19,12 +20,16 @@ from .index_opt_base import IndexTuningBase
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_LLM_MODEL = "gpt-4o"
+
 
 def _make_llm_client():
     """Build the instructor-wrapped OpenAI client used by the LLM optimizer.
 
     The LLM optimizer is optional, so its dependencies are imported lazily and
-    are only required when this tuning method is actually used.
+    are only required when this tuning method is actually used. The client
+    reads OPENAI_API_KEY (and OPENAI_BASE_URL, for an OpenAI-compatible
+    endpoint) from the environment.
     """
     try:
         import instructor
@@ -35,6 +40,15 @@ def _make_llm_client():
         ) from e
 
     return instructor.from_openai(OpenAI())
+
+
+def llm_model() -> str:
+    """The model the LLM optimizer asks for candidate indexes.
+
+    Override it with PG_DEBUG_LLM_MODEL — the default is a capable general
+    model, but the prompt is not tied to it.
+    """
+    return os.environ.get("PG_DEBUG_LLM_MODEL", DEFAULT_LLM_MODEL)
 
 
 # We introduce a Pydantic index class to facilitate communication with the LLM
@@ -169,7 +183,7 @@ class LLMOptimizerTool(IndexTuningBase):
                 remaining_attempts_prompt = ""
 
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model=llm_model(),
                 response_model=IndexingAlternative,
                 temperature=1.2,
                 messages=[

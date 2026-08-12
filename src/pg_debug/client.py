@@ -390,6 +390,10 @@ class PgDebug:
             raise InvalidArgumentError("Please provide a non-empty list of queries to analyze.")
         if len(queries) > MAX_NUM_INDEX_TUNING_QUERIES:
             raise InvalidArgumentError(f"Please provide a list of up to {MAX_NUM_INDEX_TUNING_QUERIES} queries to analyze.")
+        if method == "llm" and len(queries) > 1:
+            # The LLM optimizer reasons about one plan at a time; say so before
+            # opening a connection rather than failing deep in the analysis.
+            raise InvalidArgumentError("The 'llm' method analyzes one query at a time. Pass a single query, or use the 'dta' method.")
 
         presentation = await self._index_tuning_presentation(method)
         return await presentation.analyze_queries(queries=queries, max_index_size_mb=max_index_size_mb)

@@ -52,16 +52,40 @@ pg-debug tune-queries "SELECT * FROM orders WHERE user_id = 42"
 pg-debug tune-workload --max-index-size-mb 500
 ```
 
-Global options:
+### Global options
+
+These go before the command (`pg-debug --json health`, not `pg-debug health --json`):
 
 | Option | Meaning |
 | --- | --- |
-| `-d, --database-url` | Connection URL. Defaults to `$DATABASE_URI`, then `$DATABASE_URL`. |
-| `--access-mode` | `unrestricted` (default) or `restricted` (read-only statements only). |
-| `--timeout` | Statement timeout in seconds. Defaults to none in unrestricted mode and 30 in restricted mode. |
-| `--search-path` | Schema search path for the connection, e.g. `reporting,public`. |
+| `-d, --database-url URL` | Connection URL. Defaults to `$DATABASE_URI`, then `$DATABASE_URL`. |
+| `--access-mode {unrestricted,restricted}` | `unrestricted` (default) runs any statement; `restricted` allows read-only statements only. |
+| `--timeout SECONDS` | Statement timeout. Defaults to none in unrestricted mode and 30 in restricted mode. |
+| `--search-path SCHEMAS` | Schema search path for the connection, e.g. `reporting,public`. |
 | `--json` | Emit raw JSON instead of formatted text. |
 | `-v, --verbose` | Log at INFO, or DEBUG when repeated. |
+| `--version` | Print the version and exit. |
+
+### Commands
+
+| Command | Arguments and options |
+| --- | --- |
+| `schemas` | — |
+| `objects SCHEMA` | `-t, --type {table,view,sequence,extension}` (default `table`) |
+| `describe NAME` | `-s, --schema SCHEMA` (default `public`, ignored if `NAME` is qualified), `-t, --type {table,view,sequence,extension}` |
+| `execute SQL` | — |
+| `explain SQL` | `--analyze`, `-i, --hypothetical-index SPEC` (repeatable) |
+| `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--exit-code` |
+| `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10, ignored for `resources`) |
+| `tune-workload` | `--max-index-size-mb MB` (default 10000), `--method {dta,llm}` (default `dta`) |
+| `tune-queries QUERY...` | up to 10 queries, same options as `tune-workload` |
+
+Health checks are `index`, `connection`, `vacuum`, `sequence`, `replication`,
+`buffer`, `constraint` and `all`.
+
+A hypothetical index `SPEC` is `table(column, ...)` with an optional method —
+`orders(user_id)`, `orders(user_id, created_at):btree`,
+`reporting.orders(status):hash`.
 
 SQL arguments accept `-` to read the statement from stdin:
 
@@ -165,6 +189,48 @@ driver = SqlDriver(engine_url="postgresql://localhost/mydb")
 checks = await DatabaseHealthTool(driver).run_checks("buffer")
 ```
 
+## The LLM tuning method
+
+Both tune commands take `--method`. `dta` (the default) is a deterministic
+search: it enumerates index combinations from the query's predicates and scores
+each one against the planner. `llm` instead asks a language model for candidate
+index sets, then scores those the same way — every suggestion is still
+validated with HypoPG against the real planner, so the model proposes, it does
+not decide.
+
+It is worth trying when `dta` finds nothing and you suspect a non-obvious index
+(an unusual column order, or a column the predicate only touches indirectly).
+For everyday tuning, `dta` is faster, free and reproducible.
+
+```bash
+pip install 'pg-debug[llm]'
+export OPENAI_API_KEY=sk-...
+
+pg-debug tune-queries --method llm "SELECT * FROM orders WHERE user_id = 42 AND status = 'paid'"
+```
+
+What to expect:
+
+- **One query at a time.** The optimizer reasons about a single plan, so
+  `tune-queries --method llm` takes exactly one query and rejects more.
+  `tune-workload --method llm` only works if the recorded workload narrows to a
+  single query — otherwise use `dta` for workloads.
+- **Several API calls per run**, at your own cost. It keeps proposing until
+  five consecutive rounds fail to improve the objective.
+- **HypoPG is still required** — that is what scores each proposal.
+- **Non-deterministic.** It samples at a high temperature by design, so two
+  runs on the same query can differ. Treat the output as candidates to review,
+  not a verdict.
+- **The model is configurable** with `PG_DEBUG_LLM_MODEL` (default `gpt-4o`).
+  The client reads `OPENAI_API_KEY` and honours `OPENAI_BASE_URL`, so an
+  OpenAI-compatible endpoint works if it supports structured outputs.
+
+The same choice is available from the library:
+
+```python
+result = await pg.analyze_query_indexes([query], method="llm")
+```
+
 ### Known limitations
 
 - Index tuning resolves schema-qualified table names directly. Unqualified
@@ -181,7 +247,16 @@ checks = await DatabaseHealthTool(driver).run_checks("buffer")
 | --- | --- |
 | `DATABASE_URI`, `DATABASE_URL` | Default connection URL. |
 | `PG_DEBUG_INCLUDE_TRACE` | Set to `true` to include the index advisor's internal trace under `_trace` in tuning results. |
-| `OPENAI_API_KEY` | Used by the optional `llm` index tuning method. |
+| `PG_DEBUG_LLM_MODEL` | Model for the `llm` tuning method (default `gpt-4o`). |
+| `OPENAI_API_KEY`, `OPENAI_BASE_URL` | Credentials and endpoint for the `llm` tuning method. |
+
+## Using it from Claude Code
+
+`.claude/skills/pg-debug/SKILL.md` is a project skill that teaches Claude Code
+how to drive this tool — which command answers which question, how to read the
+output, and the traps (extensions, `search_path`, access modes). It loads
+automatically when you ask about slow queries, indexes or database health in a
+session started in this repository.
 
 ## Development
 
