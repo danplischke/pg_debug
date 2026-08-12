@@ -16,6 +16,7 @@ from .replication_calc import ReplicationCalc
 from .result import HealthCheckResult
 from .sequence_health_calc import SequenceHealthCalc
 from .statistics_health_calc import StatisticsHealthCalc
+from .table_bloat_calc import TableBloatCalc
 from .vacuum_health_calc import VacuumHealthCalc
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ class HealthType(str, Enum):
     BUFFER = "buffer"
     CONSTRAINT = "constraint"
     STATISTICS = "statistics"
+    TABLE = "table"
     ALL = "all"
 
     @classmethod
@@ -73,7 +75,8 @@ class DatabaseHealthTool:
         Args:
             health_type: A single health type, a comma-separated string, or an
                 iterable of health types. Valid values: index, connection,
-                vacuum, sequence, replication, buffer, constraint, all.
+                vacuum, sequence, replication, buffer, constraint, statistics,
+                table, all.
 
         Returns:
             An ordered mapping of check name to its
@@ -116,6 +119,9 @@ class DatabaseHealthTool:
 
         if HealthType.STATISTICS in health_types:
             results.append(await StatisticsHealthCalc(self.sql_driver).stale_statistics_check())
+
+        if HealthType.TABLE in health_types:
+            results.append(await TableBloatCalc(self.sql_driver).table_bloat_check())
 
         return {result.name: result for result in results}
 

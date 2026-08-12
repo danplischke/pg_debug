@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from contextlib import asynccontextmanager
 from typing import Any
+from typing import AsyncIterator
 from typing import ClassVar
 from typing import Optional
 
@@ -879,6 +881,12 @@ class SafeSqlDriver(SqlDriver):
         """
         self.sql_driver = sql_driver
         self.timeout = timeout
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[SqlDriver]:
+        """Pin the wrapped driver's connection, so restricted mode behaves the same."""
+        async with self.sql_driver.session():
+            yield self
 
     def _validate_node(self, node: Node) -> None:
         """Recursively validate a node and all its children"""

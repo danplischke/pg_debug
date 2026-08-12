@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from logging import getLogger
 from typing import Any
 from typing import Dict
@@ -335,35 +336,55 @@ async def test_index_exists(create_dta):
 
 
 @pytest.mark.asyncio
-async def test_ndistinct_handling(create_dta):
-    """Test handling of ndistinct values in row estimation calculations."""
-    dta = create_dta
+@pytest.mark.parametrize(
+    "stats,expected,why",
+    [
+        (
+            {"total_width": 10.0, "total_distinct": 5, "reltuples": 100_000.0},
+            3_600_000,  # 18.0 * 100000 * 2.0
+            "a btree has one entry per row, whatever the column's distinctness",
+        ),
+        (
+            {"total_width": 10.0, "total_distinct": -1.0, "reltuples": 100_000.0},
+            3_600_000,
+            "a negative n_distinct is a fraction of the row count, not one value",
+        ),
+        (
+            {"total_width": 10.0, "total_distinct": 5, "reltuples": -1.0},
+            180,  # 18.0 * 5.0 * 2.0
+            "reltuples is -1 when the table was never analyzed; fall back to n_distinct",
+        ),
+        (
+            {"total_width": 10.0, "total_distinct": 0, "reltuples": 0.0},
+            36,  # 18.0 * 1.0 * 2.0
+            "an empty table still gets a non-zero floor",
+        ),
+        (
+            {"total_width": 10.0, "total_distinct": None, "reltuples": None},
+            36,
+            "missing statistics must not blow up",
+        ),
+    ],
+)
+async def test_index_size_fallback_is_driven_by_row_count(create_dta, stats, expected, why):
+    """The formula only runs for indexes HypoPG never measured.
 
-    # Test cases with different ndistinct values
-    test_cases = [
-        {
-            "stats": {
-                "total_width": 10.0,
-                "total_distinct": 5,
-            },  # Positive ndistinct
-            "expected": 180,  # 18.0 * 5.0 * 2.0
-        },
-        {
-            "stats": {
-                "total_width": 10.0,
-                "total_distinct": -0.5,
-            },  # Negative ndistinct
-            "expected": 36,  # 18.0 * 1.0 * 2.0
-        },
-        {
-            "stats": {"total_width": 10.0, "total_distinct": 0},  # Zero ndistinct
-            "expected": 36,  # 18.0 * 1.0 * 2.0
-        },
-    ]
+    It used to collapse a negative n_distinct to 1.0, which priced every
+    high-cardinality column — the ones most worth indexing — at ~26 bytes.
+    """
+    assert create_dta._estimate_index_size_internal(stats=stats) == expected, why
 
-    for case in test_cases:
-        result = dta._estimate_index_size_internal(stats=case["stats"])
-        assert result == case["expected"], f"Failed for n_distinct={case['stats']['total_distinct']}. Expected: {case['expected']}, Got: {result}"
+
+@pytest.mark.asyncio
+async def test_a_measured_size_beats_the_formula(create_dta, async_sql_driver):
+    """HypoPG's own estimate is better than anything derived from pg_stats."""
+    async_sql_driver.execute_query = AsyncMock(return_value=[MockCell({"total_width": 10.0, "total_distinct": 5, "reltuples": 100.0})])
+
+    formula_size = await create_dta._estimate_index_size("users", ["name"])
+    create_dta.record_measured_index_size("users", ("name",), 524_288)
+
+    assert formula_size != 524_288
+    assert await create_dta._estimate_index_size("users", ["name"]) == 524_288
 
 
 @pytest.mark.asyncio
@@ -540,33 +561,37 @@ async def test_basic_workload_analysis(async_sql_driver):
                 }
             ),
         ],
-        # hypopg_reset
-        [],
-        # EXPLAIN without indexes
-        [MockCell({"QUERY PLAN": [{"Plan": {"Total Cost": 100.0}}]})],  # users.name
-        [MockCell({"QUERY PLAN": [{"Plan": {"Total Cost": 150.0}}]})],  # orders.user_id
-        [MockCell({"rel_size": 10000})],  # users table size
-        [MockCell({"rel_size": 10000})],  # orders table size
-        # pg_stats for size (users.name, orders.user_id)
-        [MockCell({"total_width": 10, "total_distinct": 100})],
-        # EXPLAIN with users.name index
-        [MockCell({"QUERY PLAN": [{"Plan": {"Total Cost": 50.0}}]})],  # users.name
-        [MockCell({"QUERY PLAN": [{"Plan": {"Total Cost": 150.0}}]})],  # orders.user_id
-        [MockCell({"total_width": 8, "total_distinct": 50})],
-        # EXPLAIN without orders.user_id index
-        [MockCell({"QUERY PLAN": [{"Plan": {"Total Cost": 100.0}}]})],  # users.name
-        [MockCell({"QUERY PLAN": [{"Plan": {"Total Cost": 75.0}}]})],  # orders.user_id
-        # EXPLAIN with users.name and orders.user_id indexes
-        [MockCell({"QUERY PLAN": [{"Plan": {"Total Cost": 50.0}}]})],  # users.name
-        [MockCell({"QUERY PLAN": [{"Plan": {"Total Cost": 75.0}}]})],  # orders.user_id
-        # hypopg_reset (final cleanup)
-        [],
     ]
     global responses_index
     responses_index = 0
 
+    # Plan costs are answered by content rather than by position: the greedy
+    # search walks a set of candidates, so the order it explains them in is not
+    # fixed, and the sizes HypoPG measured above mean no pg_stats lookup
+    # happens at all.
+    plan_costs = {
+        (): {"users": 100.0, "orders": 150.0},
+        ("pg_debug_idx_users_name_1",): {"users": 50.0, "orders": 150.0},
+        ("pg_debug_idx_orders_user_id_1",): {"users": 100.0, "orders": 5.0},
+        ("pg_debug_idx_orders_user_id_1", "pg_debug_idx_users_name_1"): {"users": 50.0, "orders": 5.0},
+    }
+
     async def mock_execute_query(query, *args, **kwargs):
         global responses_index
+        if "EXPLAIN" in query:
+            # The hypothetical indexes are created in the same statement, so
+            # the explained query is only what follows EXPLAIN.
+            configuration = tuple(sorted(set(re.findall(r"pg_debug_idx_\w+", query))))
+            explained = query.split("EXPLAIN", 1)[1]
+            table = "users" if " users " in explained else "orders"
+            return [MockCell({"QUERY PLAN": [{"Plan": {"Total Cost": plan_costs[configuration][table]}}]})]
+        if "pg_total_relation_size" in query:
+            # Realistically far larger than the indexes, so the objective
+            # function's space term does not swamp the time term.
+            return [MockCell({"rel_size": 10_000_000})]
+        if query.strip() == "SELECT hypopg_reset();":
+            return []
+
         responses_index += 1
         logger.info(
             f"Query: {query}\n    Response: {
@@ -583,6 +608,9 @@ async def test_basic_workload_analysis(async_sql_driver):
     assert len(session.recommendations) > 0
     assert any(r.table == "users" and "name" in r.columns for r in session.recommendations)
     assert any(r.table == "orders" and "user_id" in r.columns for r in session.recommendations)
+    # The sizes HypoPG measured survive into the recommendations rather than
+    # being recomputed from pg_stats.
+    assert {r.index_recommendation.estimated_size_bytes for r in session.recommendations} == {8000, 4000}
 
 
 @pytest.mark.asyncio

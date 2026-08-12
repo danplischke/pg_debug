@@ -2,8 +2,10 @@
 
 import logging
 import re
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
+from typing import AsyncIterator
 from typing import Dict
 from typing import List
 from typing import Optional
@@ -201,6 +203,10 @@ class SqlDriver:
 
         cells: Dict[str, Any]
 
+    # Set by session(). Declared on the class so subclasses that do not call
+    # this __init__ (SafeSqlDriver) still read a sane default.
+    _pinned_connection: Any = None
+
     def __init__(
         self,
         conn: Any = None,
@@ -235,6 +241,43 @@ class SqlDriver:
         else:
             raise ValueError("Connection not established. Either conn or engine_url must be provided")
 
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator["SqlDriver"]:
+        """Pin one pooled connection for the duration of the block.
+
+        Session state — hypothetical indexes, ``SET``, temp tables, advisory
+        locks — lives in the connection that created it. Without a pin, the
+        pool is free to hand the next statement a different connection and the
+        state silently disappears.
+
+        The pinned driver is the same object, so anything already holding a
+        reference to it sees the pin too. That also means a pinned driver must
+        not be shared across concurrent tasks: one connection cannot run two
+        statements at once.
+        """
+        if self._pinned_connection is not None:
+            # Nested session: reuse the outer pin rather than borrowing twice.
+            yield self
+            return
+
+        if self.conn is None:
+            self.connect()
+            if self.conn is None:
+                raise ValueError("Connection not established")
+
+        if not self.is_pool:
+            # A direct connection is already a single session.
+            yield self
+            return
+
+        pool = await self.conn.pool_connect()
+        async with pool.connection() as connection:
+            self._pinned_connection = connection
+            try:
+                yield self
+            finally:
+                self._pinned_connection = None
+
     async def execute_query(
         self,
         query: LiteralString,
@@ -257,6 +300,10 @@ class SqlDriver:
                 self.connect()
                 if self.conn is None:
                     raise ValueError("Connection not established")
+
+            # Inside session(), every statement goes to the pinned connection.
+            if self._pinned_connection is not None:
+                return await self._execute_with_connection(self._pinned_connection, query, params, force_readonly=force_readonly)
 
             # Handle connection pool vs direct connection
             if self.is_pool:

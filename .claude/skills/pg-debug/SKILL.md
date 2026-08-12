@@ -1,6 +1,6 @@
 ---
 name: pg-debug
-description: Diagnose and tune a PostgreSQL database with the pg_debug library and its pg-debug CLI — inspect schemas and tables, read EXPLAIN plans, test hypothetical indexes without creating them, see what every backend is doing right now and which one is blocking the others, track vacuum progress, check planner statistics behind bad row estimates, run health checks (bloated/duplicate/unused indexes, vacuum wraparound, sequence exhaustion, replication, cache hit rates, invalid constraints, stale statistics), find the most expensive queries from pg_stat_statements, and get index recommendations. Use this skill whenever the user asks why a Postgres query is slow, why the database is stuck or blocked, whether an index would help, what indexes to add, whether their database is healthy, what tables or columns exist, or wants to script any of that in Python — even if they never mention pg_debug by name. Also use it when writing code against the pg_debug package.
+description: Diagnose and tune a PostgreSQL database with the pg_debug library and its pg-debug CLI — inspect schemas and tables, read EXPLAIN plans, test hypothetical indexes without creating them, see what every backend is doing right now and which one is blocking the others, track vacuum progress, check planner statistics behind bad row estimates, run health checks (bloated/duplicate/unused indexes, table bloat, vacuum wraparound, sequence exhaustion, replication, cache hit rates, invalid constraints, stale statistics), find the most expensive queries from pg_stat_statements, and get index recommendations. Use this skill whenever the user asks why a Postgres query is slow, why the database is stuck or blocked, whether an index would help, what indexes to add, whether their database is healthy, what tables or columns exist, or wants to script any of that in Python — even if they never mention pg_debug by name. Also use it when writing code against the pg_debug package.
 ---
 
 # pg_debug
@@ -84,6 +84,9 @@ pg-debug tune-workload --max-index-size-mb 500    # from pg_stat_statements
 Each recommendation carries an estimated size and the planner cost before and
 after, individually and cumulatively. Report those numbers rather than just the
 DDL — the improvement multiple is what justifies the write cost of a new index.
+The size is what HypoPG measures for the candidate index, and it is also what
+`--max-index-size-mb` budgets against, so a small budget really does drop
+recommendations.
 
 Two things routinely surprise people:
 
@@ -162,10 +165,10 @@ pg-debug --json health                   # structured, for scripts
 pg-debug health --exit-code              # exit 3 if anything is unhealthy (CI)
 ```
 
-Checks: `index` (invalid, duplicate, bloated, unused), `connection`, `vacuum`
-(transaction ID wraparound), `sequence` (approaching maximum), `replication`,
-`buffer` (cache hit rates), `constraint` (invalid constraints), `statistics`
-(never analyzed or drifted), `all`.
+Checks: `index` (invalid, duplicate, bloated, unused), `table` (heap bloat),
+`connection`, `vacuum` (transaction ID wraparound), `sequence` (approaching
+maximum), `replication`, `buffer` (cache hit rates), `constraint` (invalid
+constraints), `statistics` (never analyzed or drifted), `all`.
 
 In JSON each check has `healthy`, `summary`, `findings` (the flagged objects)
 and `metrics` (the numbers and thresholds behind the verdict). Filter on
@@ -174,6 +177,14 @@ and `metrics` (the numbers and thresholds behind the verdict). Filter on
 ```bash
 pg-debug --json health | jq 'to_entries | map(select(.value.healthy == false))'
 ```
+
+`table` estimates bloat from `pg_stats` and `pg_class`, so it needs no
+extension, and reports a table only when it wastes at least 100 MB *and* at
+least 20% of its size. The estimate ignores inter-column padding and so reads a
+few percent high; `bloat_percent` in the 20-30% range on a busy table is
+usually normal churn, not a reason to `VACUUM FULL`. Confirm with `pgstattuple`
+before recommending a rewrite, and check the vacuum settings first — bloat that
+keeps coming back is an autovacuum problem, not a one-off cleanup.
 
 Interpret before relaying. "Unused index" on a database that restarted
 yesterday means the counters are young, not that the index is dead — check
@@ -280,6 +291,19 @@ The live-activity and statistics methods mirror the commands:
 `list_activity(include_idle=, min_duration_seconds=, blocked_only=)`,
 `vacuum_progress()`, `column_stats(table)`, `extended_statistics(table)`, and
 `get_top_queries(..., interval_seconds=)` for sampling.
+
+Each `execute_sql` call may land on a different pooled connection, so session
+state does not carry over: a `SET`, a temp table, an advisory lock or a
+hypothetical index created in one call is not guaranteed to exist in the next,
+and a `BEGIN` will not hold. When you need several statements in one session,
+drop to the driver and pin it:
+
+```python
+driver = await pg.sql_driver()
+async with driver.session():
+    await driver.execute_query("SET LOCAL work_mem = '256MB'")
+    rows = await driver.execute_query("SELECT ...")
+```
 
 ## The LLM tuning method
 

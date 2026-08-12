@@ -117,16 +117,11 @@ class DatabaseTuningAdvisor(IndexTuningBase):
 
             self.dta_trace("Evaluating seed:")
             current_cost = await self._evaluate_configuration_cost(query_weights, frozenset(seed))
-            candidate_indexes = set(
-                {
-                    IndexRecommendation(
-                        c.table,
-                        tuple(c.columns),
-                        c.using,
-                    )
-                    for c in all_candidates
-                }
-            )
+            # Keep the candidate objects themselves. Rebuilding them here used
+            # to drop the size HypoPG measured in generate_candidates, along
+            # with the long-text-column warning, and left the greedy search
+            # optimizing against a fabricated space term.
+            candidate_indexes = set(all_candidates)
             final_indexes, final_cost = await self._enumerate_greedy(query_weights, seed.copy(), current_cost, candidate_indexes - seed)
 
             if final_cost < best_config[1]:
@@ -199,6 +194,10 @@ class DatabaseTuningAdvisor(IndexTuningBase):
                 for idx in condition_filtered:
                     if idx.name in index_map:
                         idx.estimated_size_bytes = index_map[idx.name]
+                        # The planner's own number, so the objective function,
+                        # the size budget and the reported size all use it
+                        # instead of the pg_stats guess.
+                        self.record_measured_index_size(idx.table, idx.columns, idx.estimated_size_bytes)
 
             # Best effort: this may run on a different connection, but every
             # explain issues its own hypopg_reset() first, so stale hypothetical

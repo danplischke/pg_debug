@@ -20,6 +20,7 @@ from pg_debug import PgDebug
 from pg_debug import SyncPgDebug
 from pg_debug import cli
 from pg_debug.artifacts import ExplainPlanArtifact
+from pg_debug.database_health.table_bloat_calc import TableBloatCalc
 from pg_debug.errors import ExtensionRequiredError
 from pg_debug.errors import InvalidArgumentError
 from pg_debug.index.dta_calc import HYPOTHETICAL_INDEX_SIZES_SQL
@@ -261,6 +262,54 @@ async def test_analyze_db_health_flags_a_duplicate_index(pg, tuning_table):
     assert all(f["index_scans"] == 0 for f in unused.findings if f["index"] in pair)
 
 
+@pytest.mark.asyncio
+async def test_table_bloat_flags_a_churned_table(pg):
+    """Delete most of a table without vacuuming it back down and it shows up."""
+    table = f"{SCHEMA}.churned"
+    # Autovacuum would shrink the dead space back out from under the test.
+    await pg.execute_sql(f"CREATE TABLE {table} (id integer, payload text) WITH (autovacuum_enabled = false)")
+    await pg.execute_sql(f"INSERT INTO {table} SELECT i, repeat('x', 200) FROM generate_series(1, 40000) i")
+    await pg.execute_sql(f"DELETE FROM {table} WHERE id % 10 <> 0")
+    # The deleted rows still occupy their pages: relpages does not shrink, and
+    # ANALYZE brings reltuples down to the rows that are actually live. That
+    # gap is exactly what the check measures.
+    await pg.execute_sql(f"ANALYZE {table}")
+
+    calc = TableBloatCalc(await pg.sql_driver())
+    check = await calc.table_bloat_check(min_bloat_bytes=1024 * 1024, min_bloat_percent=50.0)
+
+    assert check.healthy is False
+    ours = [f for f in check.findings if f["schema"] == SCHEMA and f["table"] == "churned"]
+    assert len(ours) == 1
+    assert float(ours[0]["bloat_percent"]) >= 50.0
+    assert int(ours[0]["bloat_bytes"]) < int(ours[0]["table_bytes"])
+
+
+@pytest.mark.asyncio
+async def test_table_bloat_leaves_a_freshly_loaded_table_alone(pg):
+    """The default thresholds must not fire on a table with nothing wrong."""
+    table = f"{SCHEMA}.compact"
+    await pg.execute_sql(f"CREATE TABLE {table} (id integer, payload text)")
+    await pg.execute_sql(f"INSERT INTO {table} SELECT i, repeat('x', 200) FROM generate_series(1, 40000) i")
+    await pg.execute_sql(f"ANALYZE {table}")
+
+    check = await TableBloatCalc(await pg.sql_driver()).table_bloat_check()
+
+    assert not [f for f in check.findings if f["table"] == "compact"]
+
+
+@pytest.mark.asyncio
+async def test_table_bloat_check_runs_in_restricted_mode(pg):
+    """The estimate is a plain SELECT, so it has to pass the safe-SQL parser."""
+    restricted = PgDebug(DATABASE_URI, access_mode="restricted")
+    try:
+        check = await TableBloatCalc(await restricted.sql_driver()).table_bloat_check()
+        assert check.name == "Table bloat"
+        assert check.summary
+    finally:
+        await restricted.close()
+
+
 def test_cli_health_exit_code_against_a_real_database(capsys, monkeypatch):
     monkeypatch.setenv("DATABASE_URI", DATABASE_URI or "")
 
@@ -349,6 +398,36 @@ async def test_hypothetical_index_sizes_are_measured_in_one_round_trip(pg):
         assert len(rows) == 1
         assert rows[0]["index_size"] > 0
         assert "customer_id" in rows[0]["index_name"]
+    finally:
+        await pg.execute_sql("SELECT hypopg_reset()")
+
+
+@pytest.mark.asyncio
+async def test_a_session_keeps_hypothetical_indexes_alive_across_statements(pg):
+    """The point of pinning: session state survives separate execute_query calls."""
+    if not await has_extension(pg, "hypopg"):
+        pytest.skip("hypopg is not installed")
+
+    driver = await pg.sql_driver()
+    create = SafeSqlDriver.param_sql_to_query(
+        "SELECT hypopg_create_index({});",
+        [f"CREATE INDEX ON {SCHEMA}.orders (customer_id)"],
+    )
+
+    try:
+        async with driver.session():
+            pids = set()
+            for _ in range(3):
+                rows = await driver.execute_query("SELECT pg_backend_pid() AS pid")
+                assert rows
+                pids.add(rows[0].cells["pid"])
+            assert len(pids) == 1, "a session must not change connections"
+
+            await driver.execute_query(create)  # type: ignore[arg-type]
+            visible = await driver.execute_query(HYPOTHETICAL_INDEX_SIZES_SQL)
+
+            assert visible, "the hypothetical index vanished inside a session"
+            assert visible[0].cells["index_size"] > 0
     finally:
         await pg.execute_sql("SELECT hypopg_reset()")
 

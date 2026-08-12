@@ -15,9 +15,9 @@ without an MCP client in the loop.
 - **Live activity** — what every backend is doing right now, what it is waiting on, and which process is blocking it.
 - **Vacuum progress** — running vacuums, their phase and how far through the heap they are.
 - **Planner statistics** — the per-column numbers behind a plan's row estimates, the extended statistics defined on a table, and which tables the planner is reasoning about with stale numbers.
-- **Health checks** — invalid/duplicate/bloated/unused indexes, connection utilization, transaction ID wraparound risk, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints, statistics freshness.
+- **Health checks** — invalid/duplicate/bloated/unused indexes, table bloat, connection utilization, transaction ID wraparound risk, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints, statistics freshness.
 - **Top queries** — the most expensive queries recorded by `pg_stat_statements`, ranked by resource blend or by execution time, cumulatively or sampled over an interval.
-- **Index tuning** — recommend indexes for your recorded workload or for a specific set of queries, with estimated size and before/after planner costs.
+- **Index tuning** — recommend indexes for your recorded workload or for a specific set of queries, with before/after planner costs and the size HypoPG measures for each candidate.
 - **Access modes** — run unrestricted, or in a `restricted` mode that parses each statement, rejects anything that is not read-only, and runs it in a read-only transaction with a statement timeout.
 
 ## Install
@@ -100,7 +100,14 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `tune-queries QUERY...` | up to 10 queries, same options as `tune-workload` |
 
 Health checks are `index`, `connection`, `vacuum`, `sequence`, `replication`,
-`buffer`, `constraint`, `statistics` and `all`.
+`buffer`, `constraint`, `statistics`, `table` and `all`.
+
+`table` estimates how much of each table's heap holds no live rows, from
+`pg_stats` and `pg_class` — no extension needed. A table is reported only when
+it wastes at least 100 MB *and* at least 20% of its size, so ordinary free
+space in a large table is not flagged. The estimate does not model the padding
+between columns, so it reads a few percent high even on a freshly loaded table;
+`pgstattuple` gives the exact figure at the cost of scanning the table.
 
 A hypothetical index `SPEC` is `table(column, ...)` with an optional method —
 `orders(user_id)`, `orders(user_id, created_at):btree`,
@@ -215,6 +222,20 @@ driver = SqlDriver(engine_url="postgresql://localhost/mydb")
 checks = await DatabaseHealthTool(driver).run_checks("buffer")
 ```
 
+The driver borrows a pooled connection per statement, so session state —
+hypothetical indexes, `SET`, temp tables, advisory locks — does not survive
+from one `execute_query` to the next. `session()` pins one connection for as
+long as you need it:
+
+```python
+async with driver.session():
+    await driver.execute_query("SELECT hypopg_create_index('CREATE INDEX ON orders (user_id)')")
+    sizes = await driver.execute_query("SELECT indexname, hypopg_relation_size(indexrelid) FROM hypopg()")
+```
+
+A pinned driver holds a single connection, so do not share it across
+concurrent tasks. Index tuning already wraps each analysis in one.
+
 ## The LLM tuning method
 
 Both tune commands take `--method`. `dta` (the default) is a deterministic
@@ -276,6 +297,10 @@ runs on pganalyze's
 - Index tuning resolves schema-qualified table names directly. Unqualified
   names resolve through the connection's `search_path`, which `--search-path` /
   the `search_path` option sets.
+- Index sizes come from `hypopg_relation_size()`, the planner's own estimate
+  for the candidate. Where HypoPG produced no measurement, the advisor falls
+  back to a formula over `pg_stats` and `pg_class.reltuples`, which is a rough
+  figure — it assumes one index entry per live row and a fixed overhead factor.
 - `analyze_query_indexes` (and `tune-queries`) accepts at most
   `MAX_NUM_INDEX_TUNING_QUERIES` (10) queries. `analyze_workload_indexes`
   (`tune-workload`) selects from `pg_stat_statements` instead: up to 100

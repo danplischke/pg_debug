@@ -80,7 +80,10 @@ class IndexRecommendation:
         return self._definition.__hash__()
 
     def __eq__(self, other: Any) -> bool:
-        return self._definition.__eq__(other.index_config)
+        if not isinstance(other, IndexRecommendation):
+            return NotImplemented
+        # Size is a measurement of the index, not part of its identity.
+        return self._definition == other.index_definition
 
     def __str__(self) -> str:
         return self._definition.__str__() + f" (estimated_size_bytes: {self.estimated_size_bytes})"
@@ -171,6 +174,8 @@ class IndexTuningBase(ABC):
         # Add memoization caches
         self.cost_cache: dict[frozenset[IndexDefinition], float] = {}
         self._size_estimate_cache: dict[tuple[str, frozenset[str]], int] = {}
+        # Sizes HypoPG actually measured, which beat the fallback formula.
+        self._measured_size_cache: dict[tuple[str, frozenset[str]], int] = {}
         self._table_size_cache = {}
         self._estimate_table_size_cache = {}
         self._explain_plans_cache = {}
@@ -214,8 +219,9 @@ class IndexTuningBase(ABC):
         self._analysis_start_time = time.time()
         self._dta_traces = []  # Reset traces at start of analysis
 
-        # Clear the cache at the beginning of each analysis
+        # Clear the caches at the beginning of each analysis
         self._size_estimate_cache = {}
+        self._measured_size_cache = {}
 
         if max_index_size_mb > 0:
             self.budget_mb = max_index_size_mb
@@ -226,65 +232,69 @@ class IndexTuningBase(ABC):
         )
 
         try:
-            # Run pre-checks
-            precheck_result = await self._run_prechecks(session)
-            if precheck_result:
-                return precheck_result
+            # Every hypothetical index in this analysis has to live in one
+            # connection: HypoPG state is session-scoped, and without a pin
+            # the pool is free to hand the next statement a different one.
+            async with self.sql_driver.session():
+                # Run pre-checks
+                precheck_result = await self._run_prechecks(session)
+                if precheck_result:
+                    return precheck_result
 
-            # First try to use explicit workload if provided
-            if workload:
-                logger.debug(f"Using explicit workload with {len(workload)} queries")
-                session.workload_source = "args"
-                session.workload = workload
-            # Then try direct query list if provided
-            elif query_list:
-                logger.debug(f"Using provided query list with {len(query_list)} queries")
-                session.workload_source = "query_list"
-                session.workload = []
-                for i, query in enumerate(query_list):
-                    # Create a synthetic workload entry for each query
-                    session.workload.append(
-                        {
-                            "query": query,
-                            "queryid": f"direct-{i}",
-                        }
-                    )
+                # First try to use explicit workload if provided
+                if workload:
+                    logger.debug(f"Using explicit workload with {len(workload)} queries")
+                    session.workload_source = "args"
+                    session.workload = workload
+                # Then try direct query list if provided
+                elif query_list:
+                    logger.debug(f"Using provided query list with {len(query_list)} queries")
+                    session.workload_source = "query_list"
+                    session.workload = []
+                    for i, query in enumerate(query_list):
+                        # Create a synthetic workload entry for each query
+                        session.workload.append(
+                            {
+                                "query": query,
+                                "queryid": f"direct-{i}",
+                            }
+                        )
 
-            # Then try SQL file if provided
-            elif sql_file:
-                logger.debug(f"Reading queries from file: {sql_file}")
-                session.workload_source = "sql_file"
-                session.workload = self._get_workload_from_file(sql_file)
+                # Then try SQL file if provided
+                elif sql_file:
+                    logger.debug(f"Reading queries from file: {sql_file}")
+                    session.workload_source = "sql_file"
+                    session.workload = self._get_workload_from_file(sql_file)
 
-            # Finally fall back to query stats
-            else:
-                logger.debug("Using query statistics from the database")
-                session.workload_source = "query_store"
-                session.workload = await self._get_query_stats(min_calls, min_avg_time_ms, limit)
+                # Finally fall back to query stats
+                else:
+                    logger.debug("Using query statistics from the database")
+                    session.workload_source = "query_store"
+                    session.workload = await self._get_query_stats(min_calls, min_avg_time_ms, limit)
 
-            if not session.workload:
-                logger.warning("No workload to analyze")
-                return session
+                if not session.workload:
+                    logger.warning("No workload to analyze")
+                    return session
 
-            session.workload = await self._validate_and_parse_workload(session.workload)
+                session.workload = await self._validate_and_parse_workload(session.workload)
 
-            query_weights = self._covert_workload_to_query_weights(session.workload)
+                query_weights = self._covert_workload_to_query_weights(session.workload)
 
-            if query_weights is None or len(query_weights) == 0:
-                self.dta_trace("No query provided")
-                session.recommendations = []
-            else:
-                # Gather queries as strings
-                workload_queries = [q for q, _, _ in query_weights]
+                if query_weights is None or len(query_weights) == 0:
+                    self.dta_trace("No query provided")
+                    session.recommendations = []
+                else:
+                    # Gather queries as strings
+                    workload_queries = [q for q, _, _ in query_weights]
 
-                self.dta_trace(f"Workload queries ({len(workload_queries)}): {pp_list(workload_queries)}")
+                    self.dta_trace(f"Workload queries ({len(workload_queries)}): {pp_list(workload_queries)}")
 
-                # Generate and evaluate index recommendations
-                recommendations: tuple[set[IndexRecommendation], float] = await self._generate_recommendations(query_weights)
-                session.recommendations = await self._format_recommendations(query_weights, recommendations)
+                    # Generate and evaluate index recommendations
+                    recommendations: tuple[set[IndexRecommendation], float] = await self._generate_recommendations(query_weights)
+                    session.recommendations = await self._format_recommendations(query_weights, recommendations)
 
-                # Reset HypoPG only once at the end
-                await self.sql_driver.execute_query("SELECT hypopg_reset();")
+                    # Reset HypoPG only once at the end
+                    await self.sql_driver.execute_query("SELECT hypopg_reset();")
 
         except Exception as e:
             logger.error(f"Error in workload analysis: {e}", exc_info=True)
@@ -503,9 +513,26 @@ class IndexTuningBase(ABC):
             self.dta_trace(f"    + error evaluating configuration: {e}")
             raise ValueError("Error evaluating configuration") from e
 
+    @staticmethod
+    def _size_cache_key(table: str, columns: Iterable[str]) -> tuple[str, frozenset[str]]:
+        return (table, frozenset(columns))
+
+    def record_measured_index_size(self, table: str, columns: Iterable[str], size_bytes: int) -> None:
+        """Remember a size HypoPG measured for an index on these columns.
+
+        The planner's own estimate beats anything derived from pg_stats, so it
+        is what the objective function, the size budget and the reported size
+        should all use.
+        """
+        self._measured_size_cache[self._size_cache_key(table, columns)] = int(size_bytes)
+
     async def _estimate_index_size(self, table: str, columns: list[str]) -> int:
-        # Create a hashable key for the cache
-        cache_key = (table, frozenset(columns))
+        cache_key = self._size_cache_key(table, columns)
+
+        # A real measurement always wins over the formula below.
+        measured = self._measured_size_cache.get(cache_key)
+        if measured is not None:
+            return measured
 
         # Check if we already have a cached result
         if cache_key in self._size_estimate_cache:
@@ -515,14 +542,17 @@ class IndexTuningBase(ABC):
             # Use parameterized query instead of f-string for security
             schema, table_name = split_table_reference(table)
             stats_query = """
-            SELECT COALESCE(SUM(avg_width), 0) AS total_width,
-                   COALESCE(SUM(n_distinct), 0) AS total_distinct
-            FROM pg_stats
-            WHERE tablename = {} AND attname = ANY({})
+            SELECT COALESCE(SUM(s.avg_width), 0) AS total_width,
+                   COALESCE(SUM(s.n_distinct), 0) AS total_distinct,
+                   MAX(c.reltuples) AS reltuples
+            FROM pg_stats s
+            JOIN pg_class c ON c.relname = s.tablename
+            JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = s.schemaname
+            WHERE s.tablename = {} AND s.attname = ANY({})
             """
             params: list[Any] = [table_name, columns]
             if schema:
-                stats_query += " AND schemaname = {}"
+                stats_query += " AND s.schemaname = {}"
                 params.append(schema)
 
             result = await SafeSqlDriver.execute_param_query(
@@ -541,12 +571,31 @@ class IndexTuningBase(ABC):
             raise ValueError("Error estimating index size") from e
 
     def _estimate_index_size_internal(self, stats: dict[str, Any]) -> int:
+        """Rough size for an index HypoPG never measured.
+
+        A btree holds one entry per live row, so the row count sets the size —
+        not the column's distinctness. ``n_distinct`` is only a fallback for
+        when the row count is unknown, and it needs care: pg_stats reports it
+        as a *negative fraction* of the row count whenever the planner tracks
+        distinctness that way (-1 means unique). Treating that as "one distinct
+        value" priced every high-cardinality column, exactly the columns worth
+        indexing, at a couple of dozen bytes.
+        """
         width = (stats["total_width"] or 0) + 8  # 8 bytes for the heap TID
-        ndistinct = stats["total_distinct"] or 1.0
-        ndistinct = ndistinct if ndistinct > 0 else 1.0
-        # simplistic formula
-        size_estimate = int(width * ndistinct * 2.0)
-        return size_estimate
+
+        # reltuples is -1 on a relation that has never been analyzed or
+        # vacuumed (PostgreSQL 14+), and 0 on one that is genuinely empty.
+        reltuples = float(stats.get("reltuples") or 0.0)
+        entries = reltuples if reltuples > 0 else 0.0
+
+        if entries <= 0:
+            ndistinct = float(stats["total_distinct"] or 0.0)
+            # Without a row count, a negative fraction cannot be resolved into
+            # a count, so take its magnitude and accept the underestimate.
+            entries = abs(ndistinct)
+
+        # The factor stands in for per-entry overhead and the default fillfactor.
+        return int(width * max(entries, 1.0) * 2.0)
 
     async def _format_recommendations(
         self, query_weights: list[tuple[str, SelectStmt, float]], best_config: tuple[set[IndexRecommendation], float]

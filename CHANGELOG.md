@@ -29,8 +29,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   method (previously hardcoded to `gpt-4o`).
 - A complete CLI command reference and an "LLM tuning method" section in the
   README.
+- A `table` health check estimating how much of each table's heap holds no live
+  rows, from `pg_stats` and `pg_class` — no extension required. A table is
+  reported only when it wastes at least 100 MB *and* at least 20% of its size,
+  so ordinary free space in a large table is not flagged.
+- `SqlDriver.session()`, an async context manager that pins one pooled
+  connection so session state — hypothetical indexes, `SET`, temp tables,
+  advisory locks — survives across calls. `SafeSqlDriver` proxies it, and index
+  tuning now runs each analysis inside one.
 
 ### Fixed
+
+- The index advisor measured every candidate with `hypopg_relation_size()` and
+  then threw the measurement away, rebuilding each recommendation without it.
+  Everything downstream fell back to a formula over `pg_stats` that read
+  `n_distinct` as a count when PostgreSQL reports it as a negative fraction of
+  the row count, so every high-cardinality column — the best index candidates —
+  was priced at about 26 bytes. That number drove the reported size, the
+  `--max-index-size-mb` budget and the space term of the search's objective
+  function, so the budget never bound and the search was biased toward exactly
+  the indexes whose size it underestimated. Measured sizes are now the source
+  of truth, and the fallback formula sizes an index by the table's row count.
+- `IndexRecommendation.__eq__` read an attribute that does not exist, so
+  comparing two recommendations raised `AttributeError` instead of comparing
+  them.
 
 - The CLI rejected expression indexes: `-i 'users(lower(email))'` and anything
   with a comma inside a function call or quoted string failed to parse. The
