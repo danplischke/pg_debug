@@ -336,3 +336,44 @@ def test_llm_model_is_configurable(monkeypatch):
 
     monkeypatch.setenv("PG_DEBUG_LLM_MODEL", "gpt-4o-mini")
     assert llm_model() == "gpt-4o-mini"
+
+
+def test_llm_model_defaults_to_the_environment(monkeypatch, pool):
+    monkeypatch.delenv("PG_DEBUG_LLM_MODEL", raising=False)
+    assert PgDebug(pool=pool).llm_model is None
+
+
+@pytest.mark.asyncio
+async def test_llm_model_from_the_client_reaches_the_optimizer(pg):
+    with (
+        patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
+        patch("pg_debug.client.LLMOptimizerTool") as llm_cls,
+        patch("pg_debug.client.TextPresentation") as presentation_cls,
+    ):
+        presentation_cls.return_value.analyze_queries = AsyncMock(return_value={})
+        pg.llm_model = "gpt-4o-mini"
+        await pg.analyze_query_indexes(["SELECT 1"], method="llm")
+
+    assert llm_cls.call_args.kwargs["model"] == "gpt-4o-mini"
+
+
+@pytest.mark.asyncio
+async def test_a_per_call_llm_model_wins(pg):
+    with (
+        patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
+        patch("pg_debug.client.LLMOptimizerTool") as llm_cls,
+        patch("pg_debug.client.TextPresentation") as presentation_cls,
+    ):
+        presentation_cls.return_value.analyze_workload = AsyncMock(return_value={})
+        pg.llm_model = "gpt-4o"
+        await pg.analyze_workload_indexes(method="llm", llm_model="o3-mini")
+
+    assert llm_cls.call_args.kwargs["model"] == "o3-mini"
+
+
+def test_optimizer_falls_back_to_the_environment(monkeypatch):
+    from pg_debug.index.llm_opt import LLMOptimizerTool
+
+    monkeypatch.setenv("PG_DEBUG_LLM_MODEL", "from-env")
+    assert LLMOptimizerTool(MagicMock(spec=SqlDriver)).model == "from-env"
+    assert LLMOptimizerTool(MagicMock(spec=SqlDriver), model="explicit").model == "explicit"

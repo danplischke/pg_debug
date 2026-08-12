@@ -29,6 +29,7 @@ from .formatting import render_rows
 from .formatting import render_vacuum_progress
 from .formatting import to_json
 from .index.index_opt_base import MAX_NUM_INDEX_TUNING_QUERIES
+from .index.llm_opt import DEFAULT_LLM_MODEL
 from .schema import ObjectType
 from .sql import obfuscate_password
 
@@ -97,6 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--search-path",
         help="Schema search path to set on the connection, e.g. 'reporting,public'. Index tuning resolves table names through it.",
+    )
+    parser.add_argument(
+        "--llm-model",
+        metavar="MODEL",
+        help=f"Model for the 'llm' tuning method. Defaults to $PG_DEBUG_LLM_MODEL, then {DEFAULT_LLM_MODEL}.",
     )
     parser.add_argument("--json", action="store_true", help="Print raw JSON instead of formatted text.")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="Log at INFO level, or DEBUG when repeated.")
@@ -354,6 +360,7 @@ async def run(args: argparse.Namespace) -> int:
         access_mode=AccessMode(args.access_mode),
         timeout=args.timeout,
         search_path=args.search_path,
+        llm_model=args.llm_model,
     ) as pg:
         result = await args.func(pg, args)
 

@@ -21,6 +21,8 @@ from pg_debug import cli
 from pg_debug.artifacts import ExplainPlanArtifact
 from pg_debug.errors import ExtensionRequiredError
 from pg_debug.errors import InvalidArgumentError
+from pg_debug.index.dta_calc import HYPOTHETICAL_INDEX_SIZES_SQL
+from pg_debug.sql import SafeSqlDriver
 
 DATABASE_URI = os.environ.get("PG_DEBUG_TEST_DATABASE_URI")
 
@@ -257,6 +259,54 @@ async def test_analyze_query_indexes(pg, tuning_table):
     assert result["summary"]["total_recommendations"] >= 1
     assert all(rec["index_target_table"] == tuning_table for rec in result["recommendations"])
     assert all(rec["index_definition"].startswith("CREATE INDEX pg_debug_idx_") for rec in result["recommendations"])
+
+
+@pytest.mark.asyncio
+async def test_hypothetical_index_sizes_are_measured_in_one_round_trip(pg):
+    """Creating and measuring must share a statement, and avoid hypopg's views.
+
+    Hypothetical indexes live in the session that created them, and the pool
+    does not promise the next statement the same connection — so measuring in a
+    separate call can see none of them. The lookup also reads the hypopg()
+    function rather than hypopg_list_indexes, which HypoPG grants no privileges
+    on, so any role that did not create the extension gets "permission denied
+    for view".
+    """
+    if not await has_extension(pg, "hypopg"):
+        pytest.skip("hypopg is not installed")
+
+    create_and_measure = (
+        SafeSqlDriver.param_sql_to_query(
+            "SELECT hypopg_create_index({});",
+            [f"CREATE INDEX ON {SCHEMA}.orders (customer_id)"],
+        )
+        + HYPOTHETICAL_INDEX_SIZES_SQL
+    )
+
+    try:
+        rows = await pg.execute_sql(create_and_measure)
+
+        assert len(rows) == 1
+        assert rows[0]["index_size"] > 0
+        assert "customer_id" in rows[0]["index_name"]
+    finally:
+        await pg.execute_sql("SELECT hypopg_reset()")
+
+
+@pytest.mark.asyncio
+async def test_index_recommendations_carry_a_measured_size(pg, tuning_table):
+    """Sizes must survive a pool that has opened more than one connection."""
+    if not await has_extension(pg, "hypopg"):
+        pytest.skip("hypopg is not installed")
+
+    # Churn the pool so later statements are not guaranteed the same session.
+    for _ in range(4):
+        await pg.execute_sql("SELECT pg_backend_pid()")
+
+    result = await pg.analyze_query_indexes([f"SELECT * FROM {tuning_table} WHERE customer_id = 42 AND status = 'paid'"])
+
+    assert result["recommendations"], "expected at least one recommendation"
+    assert all(rec["index_estimated_size"] not in ("0 Bytes", None) for rec in result["recommendations"])
 
 
 @pytest.mark.asyncio

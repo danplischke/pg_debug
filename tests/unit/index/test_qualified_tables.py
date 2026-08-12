@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 from pglast import parse_sql
 
+from pg_debug.index.dta_calc import HYPOTHETICAL_INDEX_SIZES_SQL
 from pg_debug.index.dta_calc import ConditionColumnCollector
 from pg_debug.index.dta_calc import DatabaseTuningAdvisor
 from pg_debug.sql import ColumnCollector
@@ -155,3 +156,22 @@ def test_index_definition_for_a_qualified_table():
 
     assert index.name == "pg_debug_idx_reporting_orders_customer_id_1"
     assert index.definition == "CREATE INDEX pg_debug_idx_reporting_orders_customer_id_1 ON reporting.orders USING btree (customer_id)"
+
+
+def test_index_sizes_come_from_the_hypopg_function_not_its_view():
+    """HypoPG grants no privileges on its views.
+
+    A view is private to its owner by default, so reading
+    hypopg_list_indexes fails with "permission denied for view" for any role
+    that did not create the extension. The function behind it defaults to
+    EXECUTE for PUBLIC and exposes the same two columns.
+    """
+    assert "FROM hypopg()" in HYPOTHETICAL_INDEX_SIZES_SQL
+    assert "hypopg_list_indexes" not in HYPOTHETICAL_INDEX_SIZES_SQL
+    assert "hypopg_relation_size(indexrelid)" in HYPOTHETICAL_INDEX_SIZES_SQL
+
+
+def test_hypopg_function_is_allowed_in_restricted_mode():
+    from pg_debug.sql.safe_sql import SafeSqlDriver
+
+    assert "hypopg" in SafeSqlDriver.ALLOWED_FUNCTIONS

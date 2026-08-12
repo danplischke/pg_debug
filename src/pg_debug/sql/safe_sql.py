@@ -538,6 +538,7 @@ class SafeSqlDriver(SqlDriver):
         # Recovery Information Functions (safe ones)
         "pg_is_in_recovery",
         # Hypopg functions
+        "hypopg",
         "hypopg_create_index",
         "hypopg_reset",
         "hypopg_relation_size",

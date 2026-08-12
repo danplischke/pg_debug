@@ -25,6 +25,15 @@ from .index_opt_base import pp_list
 
 logger = logging.getLogger(__name__)
 
+# Sizes of the hypothetical indexes created so far.
+#
+# This reads the hypopg() function rather than the hypopg_list_indexes view it
+# backs. HypoPG's extension script grants no privileges on its views, and a
+# view is private to its owner by default, so any role that did not create the
+# extension gets "permission denied for view hypopg_list_indexes". Functions
+# default to EXECUTE for PUBLIC, and hypopg() exposes both columns needed here.
+HYPOTHETICAL_INDEX_SIZES_SQL = "SELECT indexname AS index_name, hypopg_relation_size(indexrelid) AS index_size FROM hypopg();"
+
 # --- Data Classes ---
 
 logger = logging.getLogger(__name__)
@@ -167,25 +176,33 @@ class DatabaseTuningAdvisor(IndexTuningBase):
         self.dta_trace(f"Filtered to {len(filtered_candidates)} after removing existing indexes.")
         self.dta_trace(f"Filtered to {len(condition_filtered1)} after removing unused columns.")
         self.dta_trace(f"Filtered to {len(condition_filtered)} after removing long text columns.")
-        # Batch create all hypothetical indexes and store their size estimates
+        # Batch create all hypothetical indexes and store their size estimates.
+        #
+        # The creates and the measurement go in one round trip on purpose.
+        # Hypothetical indexes live in the session that created them, and the
+        # connection pool does not promise the next statement the same session
+        # — measuring in a second call can land on another connection and see
+        # no indexes at all, which would silently make every candidate look
+        # free. Only the last statement's results come back, so the size query
+        # goes last.
         if len(condition_filtered) > 0:
-            query = "SELECT hypopg_create_index({});" * len(condition_filtered)
-            await SafeSqlDriver.execute_param_query(
-                self.sql_driver,
-                query,
-                [idx.definition for idx in condition_filtered],
+            create_and_measure = (
+                SafeSqlDriver.param_sql_to_query(
+                    "SELECT hypopg_create_index({});" * len(condition_filtered),
+                    [idx.definition for idx in condition_filtered],
+                )
+                + HYPOTHETICAL_INDEX_SIZES_SQL
             )
-
-            # Get estimated sizes without resetting indexes yet
-            result = await self.sql_driver.execute_query(
-                "SELECT index_name, hypopg_relation_size(indexrelid) as index_size FROM hypopg_list_indexes;"
-            )
+            result = await self.sql_driver.execute_query(cast(LiteralString, create_and_measure))
             if result is not None:
                 index_map = {r.cells["index_name"]: r.cells["index_size"] for r in result}
                 for idx in condition_filtered:
                     if idx.name in index_map:
                         idx.estimated_size_bytes = index_map[idx.name]
 
+            # Best effort: this may run on a different connection, but every
+            # explain issues its own hypopg_reset() first, so stale hypothetical
+            # indexes cannot leak into a plan.
             await self.sql_driver.execute_query("SELECT hypopg_reset();")
         return condition_filtered
 

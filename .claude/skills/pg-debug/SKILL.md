@@ -80,7 +80,9 @@ Two things routinely surprise people:
 
 - **Requires HypoPG.** Without it, tuning returns an `error` explaining how to
   install it. `top-queries` and `tune-workload` additionally need
-  `pg_stat_statements`.
+  `pg_stat_statements`. No superuser is needed — pg_debug uses HypoPG's
+  functions, which any role can execute, not its views, which are private to
+  the role that created the extension.
 - **Unqualified names resolve through the `search_path`.** Schema-qualified
   names (`reporting.orders`) work directly. For unqualified queries against
   another schema, pass `--search-path reporting,public`.
@@ -284,8 +286,9 @@ pg-debug tune-queries --method llm "SELECT * FROM orders WHERE user_id = 42"
 
 Reach for it only when `dta` finds nothing and you suspect a non-obvious index.
 It handles **one query at a time**, makes several paid API calls per run, and
-samples at a high temperature, so runs differ. `PG_DEBUG_LLM_MODEL` overrides
-the model (default `gpt-4o`). For everyday tuning `dta` is faster, free and
+samples at a high temperature, so runs differ. Set the model with
+`--llm-model`, `PG_DEBUG_LLM_MODEL`, or `llm_model=` on the client (default
+`gpt-4o`). For everyday tuning `dta` is faster, free and
 reproducible — do not reach for `llm` by default, and tell the user it costs
 money before running it.
 

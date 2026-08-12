@@ -111,6 +111,7 @@ class PgDebug:
         access_mode: AccessMode | str = AccessMode.UNRESTRICTED,
         timeout: Optional[int] = None,
         search_path: Optional[str] = None,
+        llm_model: Optional[str] = None,
         pool: Optional[DbConnPool] = None,
     ):
         """
@@ -125,6 +126,9 @@ class PgDebug:
             search_path: Schema search path to set on every connection, e.g.
                 ``"reporting, public"``. Index tuning resolves table names
                 through it.
+            llm_model: Model for the ``llm`` index tuning method. Defaults to
+                the ``PG_DEBUG_LLM_MODEL`` environment variable, then to
+                :data:`~pg_debug.index.llm_opt.DEFAULT_LLM_MODEL`.
             pool: An existing connection pool to use. When given, the client
                 does not close it on exit and does not reconfigure it, so
                 ``search_path`` and the server-side timeout are its owner's
@@ -134,6 +138,7 @@ class PgDebug:
         self.access_mode = AccessMode(access_mode)
         self.timeout = timeout
         self.search_path = search_path
+        self.llm_model = llm_model
         self._pool = (
             pool
             if pool is not None
@@ -421,7 +426,12 @@ class PgDebug:
 
     # -- Index tuning --------------------------------------------------------
 
-    async def analyze_workload_indexes(self, max_index_size_mb: int = 10000, method: TuningMethod = "dta") -> Dict[str, Any]:
+    async def analyze_workload_indexes(
+        self,
+        max_index_size_mb: int = 10000,
+        method: TuningMethod = "dta",
+        llm_model: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Recommend indexes for the workload recorded by pg_stat_statements.
 
         Args:
@@ -429,12 +439,14 @@ class PgDebug:
             method: ``dta`` (default) searches index combinations against the
                 planner; ``llm`` asks a language model for candidates and
                 requires the ``llm`` extra.
+            llm_model: Model to use for the ``llm`` method, overriding the
+                client's own setting for this call.
 
         Returns:
             A dict with ``summary``, ``recommendations`` and ``query_impact``,
             or an ``error`` key when the analysis could not be completed.
         """
-        presentation = await self._index_tuning_presentation(method)
+        presentation = await self._index_tuning_presentation(method, llm_model)
         return await presentation.analyze_workload(max_index_size_mb=max_index_size_mb)
 
     async def analyze_query_indexes(
@@ -442,6 +454,7 @@ class PgDebug:
         queries: List[str],
         max_index_size_mb: int = 10000,
         method: TuningMethod = "dta",
+        llm_model: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Recommend indexes for a specific list of queries.
 
@@ -450,6 +463,8 @@ class PgDebug:
                 ``MAX_NUM_INDEX_TUNING_QUERIES``.
             max_index_size_mb: Total size budget for recommended indexes.
             method: ``dta`` (default) or ``llm``.
+            llm_model: Model to use for the ``llm`` method, overriding the
+                client's own setting for this call.
 
         Returns:
             A dict with ``summary``, ``recommendations`` and ``query_impact``,
@@ -467,15 +482,15 @@ class PgDebug:
             # opening a connection rather than failing deep in the analysis.
             raise InvalidArgumentError("The 'llm' method analyzes one query at a time. Pass a single query, or use the 'dta' method.")
 
-        presentation = await self._index_tuning_presentation(method)
+        presentation = await self._index_tuning_presentation(method, llm_model)
         return await presentation.analyze_queries(queries=queries, max_index_size_mb=max_index_size_mb)
 
-    async def _index_tuning_presentation(self, method: TuningMethod) -> TextPresentation:
+    async def _index_tuning_presentation(self, method: TuningMethod, llm_model: Optional[str] = None) -> TextPresentation:
         if method not in ("dta", "llm"):
             raise InvalidArgumentError(f"Unknown index tuning method: {method}. Valid values are: dta, llm.")
 
         driver = await self.sql_driver()
-        index_tuning = DatabaseTuningAdvisor(driver) if method == "dta" else LLMOptimizerTool(driver)
+        index_tuning = DatabaseTuningAdvisor(driver) if method == "dta" else LLMOptimizerTool(driver, model=llm_model or self.llm_model)
         return TextPresentation(driver, index_tuning)
 
 

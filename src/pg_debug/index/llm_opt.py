@@ -3,6 +3,7 @@ import math
 import os
 from dataclasses import dataclass
 from typing import Any
+from typing import Optional
 from typing import override
 
 from pglast.ast import SelectStmt
@@ -90,12 +91,23 @@ class LLMOptimizerTool(IndexTuningBase):
         sql_driver: SqlDriver,
         max_no_progress_attempts: int = 5,
         pareto_alpha: float = 2.0,
+        model: Optional[str] = None,
     ):
+        """
+        Args:
+            sql_driver: Database access.
+            max_no_progress_attempts: Give up after this many rounds that fail
+                to improve the objective.
+            pareto_alpha: How heavily index size counts against execution cost.
+            model: Model to ask for candidate indexes. Defaults to
+                ``PG_DEBUG_LLM_MODEL``, then :data:`DEFAULT_LLM_MODEL`.
+        """
         super().__init__(sql_driver)
         self.sql_driver = sql_driver
         self.max_no_progress_attempts = max_no_progress_attempts
         self.pareto_alpha = pareto_alpha
-        logger.info("Initialized LLMOptimizerTool with max_no_progress_attempts=%d", max_no_progress_attempts)
+        self.model = model or llm_model()
+        logger.info("Initialized LLMOptimizerTool with model=%s max_no_progress_attempts=%d", self.model, max_no_progress_attempts)
 
     def score(self, execution_cost: float, index_size: float) -> float:
         return math.log(execution_cost) + self.pareto_alpha * math.log(index_size)
@@ -183,7 +195,7 @@ class LLMOptimizerTool(IndexTuningBase):
                 remaining_attempts_prompt = ""
 
             response = client.chat.completions.create(
-                model=llm_model(),
+                model=self.model,
                 response_model=IndexingAlternative,
                 temperature=1.2,
                 messages=[

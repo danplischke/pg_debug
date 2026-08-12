@@ -33,6 +33,10 @@ Some features need server-side extensions: index tuning and hypothetical-index p
 need `hypopg`, and workload analysis and `top-queries` need `pg_stat_statements`. The
 library tells you which one is missing and how to install it.
 
+No superuser is required. Everything runs through HypoPG's functions, which are
+executable by any role; the extension's convenience *views* are not readable by
+default, and pg_debug does not use them.
+
 ## CLI
 
 ```bash
@@ -73,6 +77,7 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `--access-mode {unrestricted,restricted}` | `unrestricted` (default) runs any statement; `restricted` allows read-only statements only. |
 | `--timeout SECONDS` | Statement timeout. Defaults to none in unrestricted mode and 30 in restricted mode. |
 | `--search-path SCHEMAS` | Schema search path for the connection, e.g. `reporting,public`. |
+| `--llm-model MODEL` | Model for the `llm` tuning method. Defaults to `$PG_DEBUG_LLM_MODEL`, then `gpt-4o`. |
 | `--json` | Emit raw JSON instead of formatted text. |
 | `-v, --verbose` | Log at INFO, or DEBUG when repeated. |
 | `--version` | Print the version and exit. |
@@ -238,14 +243,18 @@ What to expect:
 - **Non-deterministic.** It samples at a high temperature by design, so two
   runs on the same query can differ. Treat the output as candidates to review,
   not a verdict.
-- **The model is configurable** with `PG_DEBUG_LLM_MODEL` (default `gpt-4o`).
-  The client reads `OPENAI_API_KEY` and honours `OPENAI_BASE_URL`, so an
-  OpenAI-compatible endpoint works if it supports structured outputs.
+- **The model is configurable** three ways, most specific first: the
+  `--llm-model` flag (or `llm_model=` on the client and per call),
+  `PG_DEBUG_LLM_MODEL`, then the `gpt-4o` default. The client reads
+  `OPENAI_API_KEY` and honours `OPENAI_BASE_URL`, so an OpenAI-compatible
+  endpoint works if it supports structured outputs.
 
 The same choice is available from the library:
 
 ```python
+pg = PgDebug(url, llm_model="o3-mini")                       # for every call
 result = await pg.analyze_query_indexes([query], method="llm")
+result = await pg.analyze_query_indexes([query], method="llm", llm_model="gpt-4o")  # just this one
 ```
 
 ### Relationship to pganalyze

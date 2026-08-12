@@ -135,9 +135,7 @@ async def test_generate_candidates(async_sql_driver, create_dta):
                 }
             )
         ],
-        # create index users.name
-        [MockCell({"indexrelid": 123})],
-        # pg_stat_statements
+        # create the hypothetical indexes and measure them in one statement
         [MockCell({"index_name": "pg_debug_idx_users_name_1", "index_size": 81920})],
         # hypopg_reset
         [],
@@ -531,9 +529,8 @@ async def test_basic_workload_analysis(async_sql_driver):
                 }
             ),
         ],
-        # hypopg_create_index (for users.name, orders.user_id)
-        [MockCell({"indexrelid": 1554}), MockCell({"indexrelid": 1555})],
-        # hypopg_list_indexes
+        # hypopg_create_index for users.name and orders.user_id, measured in
+        # the same statement
         [
             MockCell({"index_name": "pg_debug_idx_users_name_1", "index_size": 8000}),
             MockCell(

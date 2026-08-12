@@ -77,14 +77,14 @@ def test_the_method_keyword_reaches_the_client(pg, tuning_method):
     with patch.object(pg.client, "analyze_query_indexes", AsyncMock(return_value={})) as analyze:
         pg.analyze_query_indexes(["SELECT 1"], method=tuning_method)
 
-    analyze.assert_awaited_once_with(["SELECT 1"], max_index_size_mb=10000, method=tuning_method)
+    analyze.assert_awaited_once_with(["SELECT 1"], max_index_size_mb=10000, method=tuning_method, llm_model=None)
 
 
 def test_the_method_keyword_reaches_the_client_for_workloads(pg):
     with patch.object(pg.client, "analyze_workload_indexes", AsyncMock(return_value={})) as analyze:
         pg.analyze_workload_indexes(method="llm", max_index_size_mb=50)
 
-    analyze.assert_awaited_once_with(max_index_size_mb=50, method="llm")
+    analyze.assert_awaited_once_with(max_index_size_mb=50, method="llm", llm_model=None)
 
 
 def test_exceptions_propagate_to_the_caller(pg):
@@ -136,5 +136,13 @@ def test_connect_returns_the_client(pool):
     pg = SyncPgDebug("postgresql://localhost/db", pool=pool)
     try:
         assert pg.connect() is pg
+    finally:
+        pg.close()
+
+
+def test_sync_forwards_the_llm_model(pool):
+    pg = SyncPgDebug(pool=pool, llm_model="o3-mini")
+    try:
+        assert pg.client.llm_model == "o3-mini"
     finally:
         pg.close()

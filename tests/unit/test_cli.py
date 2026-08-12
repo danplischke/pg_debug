@@ -406,3 +406,23 @@ def test_unexpected_errors_hide_the_password(pg_client):
     assert code == 1
     assert "hunter2" not in err
     assert "****" in err
+
+
+def test_llm_model_flag_reaches_the_client(pg_client):
+    pg_client.analyze_query_indexes = AsyncMock(return_value={"recommendations": []})
+
+    with patch("pg_debug.cli.PgDebug") as client_cls:
+        client_cls.return_value = pg_client
+        assert run(["--llm-model", "o3-mini", "tune-queries", "--method", "llm", "SELECT 1"])[0] == 0
+
+    assert client_cls.call_args.kwargs["llm_model"] == "o3-mini"
+
+
+def test_llm_model_defaults_to_unset(pg_client):
+    pg_client.list_schemas = AsyncMock(return_value=[])
+
+    with patch("pg_debug.cli.PgDebug") as client_cls:
+        client_cls.return_value = pg_client
+        assert run(["schemas"])[0] == 0
+
+    assert client_cls.call_args.kwargs["llm_model"] is None

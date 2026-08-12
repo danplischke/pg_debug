@@ -30,8 +30,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A complete CLI command reference and an "LLM tuning method" section in the
   README.
 
+### Fixed
+
+- Index candidate sizes were measured in a separate statement from the
+  hypothetical index creation. Hypothetical indexes are session-scoped and the
+  connection pool does not promise the next statement the same connection, so
+  the measurement could see no indexes and silently record every candidate as
+  costing nothing. Creation and measurement now share one round trip.
+- Index tuning failed with "permission denied for view hypopg_list_indexes"
+  for any role that did not create the HypoPG extension. HypoPG grants no
+  privileges on its views and a view is private to its owner, so the size
+  lookup now reads the `hypopg()` function it wraps, which defaults to EXECUTE
+  for PUBLIC and exposes the same columns.
+
 ### Changed
 
+- The `llm` tuning method's model can be set with `--llm-model`, the
+  `llm_model` client argument, or per call, in addition to
+  `PG_DEBUG_LLM_MODEL`.
 - `analyze_query_indexes(..., method="llm")` rejects more than one query up
   front, instead of failing deep in the analysis, since the LLM optimizer
   reasons about a single plan.

@@ -86,6 +86,7 @@ class SyncPgDebug:
         access_mode: AccessMode | str = AccessMode.UNRESTRICTED,
         timeout: Optional[int] = None,
         search_path: Optional[str] = None,
+        llm_model: Optional[str] = None,
         pool: Optional[DbConnPool] = None,
     ):
         """Takes the same arguments as :class:`~pg_debug.client.PgDebug`."""
@@ -96,6 +97,7 @@ class SyncPgDebug:
             access_mode=access_mode,
             timeout=timeout,
             search_path=search_path,
+            llm_model=llm_model,
             pool=pool,
         )
 
@@ -217,18 +219,35 @@ class SyncPgDebug:
 
     # -- Index tuning --------------------------------------------------------
 
-    def analyze_workload_indexes(self, max_index_size_mb: int = 10000, method: TuningMethod = "dta") -> Dict[str, Any]:
+    def analyze_workload_indexes(
+        self,
+        max_index_size_mb: int = 10000,
+        method: TuningMethod = "dta",
+        llm_model: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Recommend indexes for the workload recorded by pg_stat_statements."""
-        return self._call(self._client.analyze_workload_indexes, max_index_size_mb=max_index_size_mb, method=method)
+        return self._call(
+            self._client.analyze_workload_indexes,
+            max_index_size_mb=max_index_size_mb,
+            method=method,
+            llm_model=llm_model,
+        )
 
     def analyze_query_indexes(
         self,
         queries: List[str],
         max_index_size_mb: int = 10000,
         method: TuningMethod = "dta",
+        llm_model: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Recommend indexes for a specific list of queries."""
-        return self._call(self._client.analyze_query_indexes, queries, max_index_size_mb=max_index_size_mb, method=method)
+        return self._call(
+            self._client.analyze_query_indexes,
+            queries,
+            max_index_size_mb=max_index_size_mb,
+            method=method,
+            llm_model=llm_model,
+        )
 
 
 __all__ = ["SyncPgDebug"]
