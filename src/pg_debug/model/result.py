@@ -23,6 +23,8 @@ from typing import Set
 from typing import Tuple
 
 from ..errors import InvalidArgumentError
+from ..severity import SEVERITY_ORDER
+from ..severity import Severity
 
 #: Ignore tables smaller than this when a rule reasons from sampled statistics.
 #: Below it a sample is most of the table, and "no NULLs in 200 rows" says
@@ -38,15 +40,6 @@ class Confidence(str, Enum):
     #: Inferred from sampled planner statistics. Confirm before acting; every
     #: candidate carries a ``verify`` query that does exactly that.
     CANDIDATE = "candidate"
-
-
-class Severity(str, Enum):
-    HIGH = "high"
-    MEDIUM = "medium"
-    LOW = "low"
-
-
-_SEVERITY_ORDER = {Severity.HIGH: 0, Severity.MEDIUM: 1, Severity.LOW: 2}
 
 
 class RuleId(str, Enum):
@@ -136,7 +129,7 @@ class ModelFinding:
     @property
     def sort_key(self) -> Tuple[int, float, str, str, str]:
         """Severity first, then the rule's own measure of impact."""
-        return (_SEVERITY_ORDER[self.severity], -self.rank, self.rule.value, self.schema, self.table)
+        return (SEVERITY_ORDER[self.severity], -self.rank, self.rule.value, self.schema, self.table)
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the finding as a JSON-friendly dict."""

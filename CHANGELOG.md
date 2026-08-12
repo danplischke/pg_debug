@@ -39,6 +39,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   six-column table used in testing. A table is reported only when it wastes at
   least 100 MB *and* at least 20% of its size, so ordinary free space in a large
   table is not flagged.
+- `pg-debug check-migration` and `PgDebug.check_migration()`, which review a
+  migration before it runs: per statement, the lock it takes, how long it holds
+  it, whether it rewrites the table, and a safer rewrite where one exists. The
+  lock level alone settles little — ACCESS EXCLUSIVE held for a catalog update
+  lasts microseconds, the same lock held for a rewrite is an outage — so the
+  duration is reported beside it, and a connection is used to say how big the
+  affected tables actually are.
+
+  The lock and rewrite behaviour was measured against PostgreSQL 16, not taken
+  from documentation: each statement run in a transaction, `pg_locks` read for
+  the modes held, `relfilenode` compared before and after. Several results
+  contradict common advice, and the ones that do are pinned by tests —
+  `ADD COLUMN ... NOT NULL DEFAULT 0` has not rewritten the table since
+  PostgreSQL 11, and `ADD FOREIGN KEY` takes SHARE ROW EXCLUSIVE rather than
+  ACCESS EXCLUSIVE, so it never blocks readers. Whether a column default forces
+  a rewrite is resolved through `pg_proc`, since only volatility decides it.
+
+  `--offline` reviews without a connection, for CI where the reachable database
+  is not the one the migration will run against and its table sizes would
+  soften every verdict.
 - `pg-debug model` and `PgDebug.review_data_model()`, a review of the data
   model rather than of what the server is doing: foreign keys with no index
   behind them, keys whose two sides are different types, tables with no primary

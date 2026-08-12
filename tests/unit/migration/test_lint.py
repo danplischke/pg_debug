@@ -1,0 +1,315 @@
+"""What each statement in a migration will do while it runs.
+
+The lock levels asserted here were measured against PostgreSQL 16 — each
+statement run in a transaction, pg_locks read for the modes it held, and
+relfilenode compared before and after — not recalled. Several contradict the
+usual advice, and those are the ones worth pinning down.
+"""
+
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+
+import pytest
+
+from pg_debug.errors import InvalidArgumentError
+from pg_debug.migration import Duration
+from pg_debug.migration import LockLevel
+from pg_debug.migration import MigrationLinter
+from pg_debug.severity import Severity
+from pg_debug.sql import SqlDriver
+
+
+@pytest.fixture
+def linter():
+    """Offline: no sizes, so severities are not softened by a small table."""
+    return MigrationLinter()
+
+
+async def one(linter: MigrationLinter, sql: str):
+    reviews = await linter.review(sql)
+    assert len(reviews) == 1, f"expected one review, got {[r.kind for r in reviews]}"
+    return reviews[0]
+
+
+# -- Adding columns ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_adding_a_column_with_a_constant_default_does_not_rewrite(linter):
+    """Since PostgreSQL 11, and still widely believed otherwise."""
+    review = await one(linter, "ALTER TABLE orders ADD COLUMN n integer NOT NULL DEFAULT 0")
+
+    assert review.kind == "add_column"
+    assert review.rewrites_table is False
+    assert review.duration is Duration.INSTANT
+    assert review.severity is Severity.LOW
+
+
+@pytest.mark.asyncio
+async def test_adding_a_column_with_a_computed_default_is_flagged(linter):
+    review = await one(linter, "ALTER TABLE orders ADD COLUMN u uuid DEFAULT gen_random_uuid()")
+
+    assert review.kind == "add_column_with_computed_default"
+    assert review.rewrites_table is True
+    assert review.default_functions == ["gen_random_uuid"]
+    # The suggested rewrite has to be SQL somebody can actually run.
+    assert "ALTER TABLE orders ADD COLUMN u uuid;" in review.safer[0]
+    assert "SET DEFAULT gen_random_uuid()" in review.safer[1]
+
+
+@pytest.mark.asyncio
+async def test_a_stored_generated_column_rewrites(linter):
+    review = await one(linter, "ALTER TABLE orders ADD COLUMN d bigint GENERATED ALWAYS AS (id * 2) STORED")
+
+    assert review.kind == "add_generated_column"
+    assert review.rewrites_table is True
+
+
+def volatility_driver(name: str, volatile: bool):
+    """Answers the volatility lookup, and reports no table sizes."""
+    driver = MagicMock(spec=SqlDriver)
+
+    async def answer(query, *args, **kwargs):
+        if "provolatile" in query:
+            return [SqlDriver.RowResult(cells={"name": name, "volatile": volatile})]
+        return []
+
+    driver.execute_query = AsyncMock(side_effect=answer)
+    return driver
+
+
+@pytest.mark.asyncio
+async def test_a_stable_default_is_resolved_as_not_rewriting():
+    """now() is stable and costs nothing; clock_timestamp() is volatile and
+    costs a rewrite. Only the catalog can tell them apart."""
+    driver = volatility_driver("now", volatile=False)
+
+    review = await one(MigrationLinter(driver), "ALTER TABLE orders ADD COLUMN seen timestamptz DEFAULT now()")
+
+    assert review.kind == "add_column"
+    assert review.rewrites_table is False
+    assert review.duration is Duration.INSTANT
+    assert "not volatile" in review.detail
+
+
+@pytest.mark.asyncio
+async def test_a_volatile_default_is_resolved_as_rewriting():
+    driver = volatility_driver("clock_timestamp", volatile=True)
+
+    review = await one(MigrationLinter(driver), "ALTER TABLE orders ADD COLUMN seen timestamptz DEFAULT clock_timestamp()")
+
+    assert review.rewrites_table is True
+    assert "is volatile" in review.detail
+
+
+# -- Locks that surprise people ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_adding_a_foreign_key_does_not_block_readers(linter):
+    """Measured: SHARE ROW EXCLUSIVE, not ACCESS EXCLUSIVE. Most advice says
+    otherwise, and it matters — reads keep working throughout."""
+    review = await one(linter, "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users(id)")
+
+    assert review.lock is LockLevel.SHARE_ROW_EXCLUSIVE
+    assert "reads continue" in review.blocks
+    assert review.duration is Duration.SCAN
+    assert "NOT VALID" in review.safer[0]
+    assert "VALIDATE CONSTRAINT" in review.safer[1]
+
+
+@pytest.mark.asyncio
+async def test_creating_an_index_blocks_writes_but_not_reads(linter):
+    review = await one(linter, "CREATE INDEX i ON orders (status)")
+
+    assert review.lock is LockLevel.SHARE
+    assert review.safer == ["CREATE INDEX CONCURRENTLY i ON orders (status);"]
+
+
+@pytest.mark.asyncio
+async def test_creating_an_index_concurrently_blocks_nothing(linter):
+    review = await one(linter, "CREATE INDEX CONCURRENTLY i ON orders (status)")
+
+    assert review.lock is LockLevel.SHARE_UPDATE_EXCLUSIVE
+    assert review.severity is Severity.LOW
+    # The catch that actually bites people.
+    assert "cannot run inside a transaction" in review.detail
+
+
+@pytest.mark.asyncio
+async def test_validate_constraint_blocks_nothing(linter):
+    review = await one(linter, "ALTER TABLE orders VALIDATE CONSTRAINT fk")
+
+    assert review.lock is LockLevel.SHARE_UPDATE_EXCLUSIVE
+    assert review.severity is Severity.LOW
+
+
+@pytest.mark.asyncio
+async def test_set_not_null_scans_under_an_exclusive_lock(linter):
+    review = await one(linter, "ALTER TABLE orders ALTER COLUMN status SET NOT NULL")
+
+    assert review.lock is LockLevel.ACCESS_EXCLUSIVE
+    assert review.duration is Duration.SCAN
+    assert review.severity is Severity.HIGH
+    assert "NOT VALID" in review.safer[0]
+    assert "SET NOT NULL" in review.safer[2]
+
+
+@pytest.mark.asyncio
+async def test_altering_a_column_type_rewrites(linter):
+    review = await one(linter, "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint")
+
+    assert review.rewrites_table is True
+    assert review.duration is Duration.REWRITE
+    assert review.severity is Severity.HIGH
+
+
+@pytest.mark.asyncio
+async def test_dropping_a_column_is_instant(linter):
+    """ACCESS EXCLUSIVE, but a catalog update — the wait for the lock is the
+    only exposure."""
+    review = await one(linter, "ALTER TABLE orders DROP COLUMN note")
+
+    assert review.lock is LockLevel.ACCESS_EXCLUSIVE
+    assert review.duration is Duration.INSTANT
+    assert review.severity is Severity.LOW
+    assert "lock_timeout" in review.detail
+
+
+@pytest.mark.asyncio
+async def test_adopting_an_existing_index_as_a_key_is_instant(linter):
+    review = await one(linter, "ALTER TABLE orders ADD CONSTRAINT u UNIQUE USING INDEX orders_ref_key")
+
+    assert review.kind == "add_key_using_index"
+    assert review.duration is Duration.INSTANT
+
+
+@pytest.mark.asyncio
+async def test_adding_a_key_without_one_builds_the_index_under_the_lock(linter):
+    review = await one(linter, "ALTER TABLE orders ADD CONSTRAINT u UNIQUE (ref)")
+
+    assert review.duration is Duration.SCAN
+    assert "CREATE UNIQUE INDEX CONCURRENTLY" in review.safer[0]
+    assert "USING INDEX" in review.safer[1]
+
+
+@pytest.mark.asyncio
+async def test_vacuum_full_rewrites_and_blocks_everything(linter):
+    review = await one(linter, "VACUUM FULL orders")
+
+    assert review.lock is LockLevel.ACCESS_EXCLUSIVE
+    assert review.rewrites_table is True
+    assert "pg_repack" in review.safer[0]
+
+
+# -- Whole migrations -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_statements_are_ordered_worst_first(linter):
+    reviews = await linter.review(
+        """
+        ALTER TABLE orders DROP COLUMN note;
+        ALTER TABLE orders ALTER COLUMN user_id TYPE bigint;
+        CREATE INDEX i ON orders (status);
+        """
+    )
+
+    assert [r.severity for r in reviews] == [Severity.HIGH, Severity.MEDIUM, Severity.LOW]
+
+
+@pytest.mark.asyncio
+async def test_a_statement_is_as_unsafe_as_its_worst_subcommand(linter):
+    """One ALTER TABLE holds one lock for all of its parts."""
+    review = await one(linter, "ALTER TABLE orders ADD COLUMN n integer, ALTER COLUMN user_id TYPE bigint")
+
+    assert review.rewrites_table is True
+
+
+@pytest.mark.asyncio
+async def test_statements_that_take_no_interesting_lock_are_not_reported(linter):
+    assert await linter.review("CREATE TABLE t (id bigint PRIMARY KEY); INSERT INTO t VALUES (1);") == []
+
+
+@pytest.mark.asyncio
+async def test_unparseable_sql_is_rejected_with_its_reason(linter):
+    with pytest.raises(InvalidArgumentError, match="Could not parse"):
+        await linter.review("ALTER TABLE (")
+
+
+@pytest.mark.asyncio
+async def test_an_empty_migration_is_rejected(linter):
+    with pytest.raises(InvalidArgumentError):
+        await linter.review("   ")
+
+
+@pytest.mark.asyncio
+async def test_the_statement_text_is_reported_as_written(linter):
+    review = await one(linter, "ALTER TABLE   orders\n  DROP COLUMN note")
+
+    assert review.statement == "ALTER TABLE   orders\n  DROP COLUMN note"
+
+
+# -- Sizing -----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_small_table_softens_the_verdict():
+    """The same statement is an outage on a large table and a pause on a small
+    one, and only the database knows which this is."""
+    driver = MagicMock(spec=SqlDriver)
+    driver.execute_query = AsyncMock(return_value=[SqlDriver.RowResult(cells={"name": "orders", "bytes": 4 * 1024 * 1024})])
+
+    review = await one(MigrationLinter(driver), "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint")
+
+    assert review.severity is Severity.MEDIUM
+    assert "4.0 MB" in review.detail
+    assert "pause rather than an outage" in review.detail
+
+
+@pytest.mark.asyncio
+async def test_a_large_table_stays_high():
+    driver = MagicMock(spec=SqlDriver)
+    driver.execute_query = AsyncMock(return_value=[SqlDriver.RowResult(cells={"name": "orders", "bytes": 40 * 1024**3})])
+
+    review = await one(MigrationLinter(driver), "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint")
+
+    assert review.severity is Severity.HIGH
+    assert "40.0 GB" in review.detail
+
+
+@pytest.mark.asyncio
+async def test_a_database_that_will_not_answer_does_not_stop_the_review():
+    """A migration is worth reviewing even against a database that refuses."""
+    driver = MagicMock(spec=SqlDriver)
+    driver.execute_query = AsyncMock(side_effect=RuntimeError("permission denied"))
+
+    review = await one(MigrationLinter(driver), "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint")
+
+    assert review.table_bytes is None
+    assert review.severity is Severity.HIGH
+
+
+@pytest.mark.asyncio
+async def test_an_instant_statement_is_not_annotated_with_a_size():
+    driver = MagicMock(spec=SqlDriver)
+    driver.execute_query = AsyncMock(return_value=[SqlDriver.RowResult(cells={"name": "orders", "bytes": 40 * 1024**3})])
+
+    review = await one(MigrationLinter(driver), "ALTER TABLE orders DROP COLUMN note")
+
+    assert "40.0 GB" not in review.detail, "the size is irrelevant to a catalog update"
+
+
+def test_the_serialized_form_carries_both_halves_of_the_answer():
+    """A lock level without its duration tells the reader nothing."""
+    driver = MagicMock(spec=SqlDriver)
+    driver.execute_query = AsyncMock(return_value=[])
+    import asyncio
+
+    review = asyncio.run(MigrationLinter().review("CREATE INDEX i ON orders (status)"))[0]
+    payload = review.to_dict()
+
+    assert payload["lock"] == "SHARE"
+    assert payload["duration"].startswith("proportional")
+    assert payload["blocks"]
+    assert payload["safer"]

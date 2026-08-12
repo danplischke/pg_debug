@@ -26,6 +26,7 @@ from .client import SortBy
 from .client import TuningMethod
 from .database_health import HealthCheckResult
 from .database_health import HealthType
+from .migration import StatementReview
 from .model import DEFAULT_MIN_ROWS
 from .model import ModelFinding
 from .model import RuleId
@@ -199,6 +200,10 @@ class SyncPgDebug:
             min_rows=min_rows,
             proven_only=proven_only,
         )
+
+    def check_migration(self, sql: str) -> List[StatementReview]:
+        """Review a migration before running it."""
+        return self._call(self._client.check_migration, sql)
 
     # -- Live activity -------------------------------------------------------
 

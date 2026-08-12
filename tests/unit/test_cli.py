@@ -321,6 +321,46 @@ def test_model_without_exit_code_flag_always_succeeds(pg_client):
     assert run(["model"])[0] == 0
 
 
+def test_check_migration_reads_a_file(pg_client, tmp_path):
+    pg_client.check_migration = AsyncMock(return_value=[])
+    migration = tmp_path / "001_add_column.sql"
+    migration.write_text("ALTER TABLE orders ADD COLUMN n integer;")
+
+    assert run(["check-migration", str(migration)])[0] == 0
+    pg_client.check_migration.assert_awaited_once_with("ALTER TABLE orders ADD COLUMN n integer;")
+
+
+def test_check_migration_accepts_sql_inline(pg_client):
+    pg_client.check_migration = AsyncMock(return_value=[])
+
+    assert run(["check-migration", "ALTER TABLE orders DROP COLUMN n"])[0] == 0
+    pg_client.check_migration.assert_awaited_once_with("ALTER TABLE orders DROP COLUMN n")
+
+
+def test_check_migration_offline_never_opens_a_connection(pg_client):
+    """The point of --offline: CI has no production database to ask, and a
+    staging one would soften every verdict."""
+    code, out, _ = run(["check-migration", "--offline", "ALTER TABLE orders ALTER COLUMN id TYPE bigint"])
+
+    assert code == 0
+    assert "ACCESS EXCLUSIVE" in out
+    pg_client.check_migration.assert_not_called()
+
+
+def test_check_migration_offline_exit_code_fires_on_high_severity():
+    assert run(["check-migration", "--offline", "--exit-code", "ALTER TABLE orders ALTER COLUMN id TYPE bigint"])[0] == cli.UNHEALTHY_EXIT_CODE
+    assert run(["check-migration", "--offline", "--exit-code", "CREATE INDEX CONCURRENTLY i ON orders (a)"])[0] == 0
+
+
+def test_check_migration_json_is_machine_readable():
+    code, out, _ = run(["--json", "check-migration", "--offline", "CREATE INDEX i ON orders (a)"])
+
+    assert code == 0
+    payload = json.loads(out)
+    assert payload[0]["lock"] == "SHARE"
+    assert payload[0]["kind"] == "create_index"
+
+
 def test_top_queries_passes_options(pg_client):
     pg_client.get_top_queries = AsyncMock(return_value=[])
 

@@ -1,6 +1,6 @@
 ---
 name: pg-debug
-description: Diagnose and tune a PostgreSQL database with the pg_debug library and its pg-debug CLI — inspect schemas and tables, read EXPLAIN plans, test hypothetical indexes without creating them, see what every backend is doing right now and which one is blocking the others, track vacuum progress, check planner statistics behind bad row estimates, run health checks (bloated/duplicate/unused indexes, table bloat, vacuum wraparound, sequence exhaustion, replication, cache hit rates, invalid constraints, stale statistics), find the most expensive queries from pg_stat_statements, get index recommendations, and review the data model itself for design defects (unindexed foreign keys, mismatched key types, missing primary keys, wasteful column order, misleading column types). Use this skill whenever the user asks why a Postgres query is slow, why the database is stuck or blocked, whether an index would help, what indexes to add, whether their database is healthy, how to improve or review their schema or data model, what tables or columns exist, or wants to script any of that in Python — even if they never mention pg_debug by name. Also use it when writing code against the pg_debug package.
+description: Diagnose and tune a PostgreSQL database with the pg_debug library and its pg-debug CLI — inspect schemas and tables, read EXPLAIN plans, test hypothetical indexes without creating them, see what every backend is doing right now and which one is blocking the others, track vacuum progress, check planner statistics behind bad row estimates, run health checks (bloated/duplicate/unused indexes, table bloat, vacuum wraparound, sequence exhaustion, replication, cache hit rates, invalid constraints, stale statistics), find the most expensive queries from pg_stat_statements, get index recommendations, review the data model itself for design defects (unindexed foreign keys, mismatched key types, missing primary keys, wasteful column order, misleading column types), and review a migration before running it for the locks it takes and whether it rewrites a table. Use this skill whenever the user asks why a Postgres query is slow, why the database is stuck or blocked, whether an index would help, what indexes to add, whether their database is healthy, how to improve or review their schema or data model, whether a migration or ALTER TABLE is safe to run or will lock a table, what tables or columns exist, or wants to script any of that in Python — even if they never mention pg_debug by name. Also use it when writing code against the pg_debug package.
 ---
 
 # pg_debug
@@ -209,6 +209,35 @@ of `pg_read_all_stats` sees `<insufficient privilege>` instead of other roles'
 query text, so the workload it analyzes is only its own queries. `GRANT
 pg_read_all_stats TO <role>` fixes it. Queries against views are skipped by
 design: an index goes on the tables underneath.
+
+## Reviewing a migration before it runs
+
+```bash
+pg-debug check-migration 001_add_column.sql   # a file
+pg-debug check-migration "ALTER TABLE orders ALTER COLUMN id TYPE bigint"
+pg-debug check-migration --offline --exit-code 001.sql   # CI, no database needed
+pg-debug --json check-migration 001.sql
+```
+
+Each statement reports the lock it takes, **how long it holds it**, whether it
+rewrites the table, and a safer rewrite where one exists. Relay both halves:
+"ACCESS EXCLUSIVE" alone frightens people about statements that finish in
+microseconds, and reassures nobody about the ones that do not. `duration` is
+the field that separates them.
+
+Connected, it reports the real size of each table, and softens severity for a
+small one — correct when pointed at production, misleading when pointed at a
+development copy. If the database in reach is not the one the migration will
+run against, use `--offline` and report the unsoftened verdict.
+
+Facts worth knowing when reading its output, all measured rather than
+recalled: `ADD COLUMN ... NOT NULL DEFAULT 0` does *not* rewrite the table on
+PostgreSQL 11+; `ADD FOREIGN KEY` takes SHARE ROW EXCLUSIVE and never blocks
+readers; `CREATE INDEX CONCURRENTLY` blocks nothing but cannot run inside a
+transaction, so it cannot sit in a migration applied atomically. A default of
+`now()` is stable and costs nothing; `clock_timestamp()` and `random()` are
+volatile and force a rewrite — the tool resolves which through `pg_proc` when
+connected.
 
 ## Reviewing the data model
 

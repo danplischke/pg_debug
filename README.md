@@ -15,6 +15,7 @@ without an MCP client in the loop.
 - **Live activity** — what every backend is doing right now, what it is waiting on, and which process is blocking it.
 - **Vacuum progress** — running vacuums, their phase and how far through the heap they are.
 - **Planner statistics** — the per-column numbers behind a plan's row estimates, the extended statistics defined on a table, and which tables the planner is reasoning about with stale numbers.
+- **Migration review** — read a migration before running it and see, per statement, the lock it takes, how long it holds it, whether it rewrites the table, and a safer rewrite where one exists. Connected, it reports how big the tables actually are, which is what decides whether a rewrite is a pause or an outage.
 - **Data model review** — foreign keys with no index behind them, keys whose two sides are different types, tables with no primary key, columns ordered so alignment padding costs bytes on every row, and types that do not mean what they look like. Each finding says whether it is proven from the catalog or inferred from statistics, and carries the DDL that fixes it.
 - **Health checks** — invalid/duplicate/bloated/unused indexes, table bloat, connection utilization, transaction ID wraparound risk, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints, statistics freshness.
 - **Top queries** — the most expensive queries recorded by `pg_stat_statements`, ranked by resource blend or by execution time, cumulatively or sampled over an interval.
@@ -61,6 +62,9 @@ pg-debug health
 pg-debug health --type index,vacuum
 pg-debug column-stats orders             # why the planner estimates what it does
 
+pg-debug check-migration 001_add_column.sql   # what will this lock, and for how long?
+pg-debug check-migration --offline --exit-code migrations/*.sql
+
 pg-debug model                           # review the schema itself
 pg-debug model --schema public --proven-only
 pg-debug --json model | jq '.[] | select(.severity == "high")'
@@ -100,6 +104,7 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `vacuum-progress` | — |
 | `column-stats TABLE` | — |
 | `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--exit-code` |
+| `check-migration SQL` | a file path, inline SQL, or `-` for stdin; `--offline`, `--exit-code` |
 | `model` | `-s, --schema SCHEMA`, `-r, --rule RULES` (comma-separated, default `all`), `--proven-only`, `--min-rows N` (default 1000), `--exit-code` |
 | `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10, ignored for cumulative `resources`), `-i, --interval SECONDS` |
 | `tune-workload` | `--max-index-size-mb MB` (default 10000), `--method {dta,llm}` (default `dta`) |
@@ -118,6 +123,28 @@ the estimate cannot see is the *spread* of a variable-width column, since
 `pg_stats` records only an average — such a table reads a few percent bloated
 when it is not. `pgstattuple` gives the exact figure at the cost of scanning
 the table.
+
+`check-migration` answers a different question from the rest: not what the
+database is, but what a change will do to everyone using it while it runs. The
+lock level alone decides little — ACCESS EXCLUSIVE held for a catalog update
+lasts microseconds, while the same lock held for a rewrite is an outage — so
+each statement reports the lock *and* how long it is held, and, when connected,
+how big the table it is held on actually is.
+
+The lock and rewrite behaviour it reports was measured against PostgreSQL 16
+rather than taken from documentation: each statement was run in a transaction,
+`pg_locks` read for the modes it held, and `pg_class.relfilenode` compared
+before and after. Several results contradict widely repeated advice —
+`ADD COLUMN ... NOT NULL DEFAULT 0` has not rewritten the table since
+PostgreSQL 11, and `ADD FOREIGN KEY` takes SHARE ROW EXCLUSIVE, so readers are
+never blocked. An integration test re-measures three of these against the
+server it runs on, so a future PostgreSQL that changes one is caught rather
+than believed.
+
+`--offline` skips the connection. Severity is otherwise softened when the table
+is small on the database you are pointed at, which is right for production and
+misleading for a staging copy; in CI, prefer `--offline` unless the database
+you can reach is representative.
 
 `model` reviews the data model rather than the running server, and needs no
 extension. Its rules are `unindexed_foreign_key`, `foreign_key_type_mismatch`,
@@ -240,6 +267,7 @@ bad URL instead.
 | `column_stats(table)` / `extended_statistics(table)` | `list[dict]` — planner statistics |
 | `analyze_db_health(health_type="all")` | `dict[str, HealthCheckResult]` — check name to result |
 | `review_data_model(rules="all", schema=None, min_rows=1000, proven_only=False)` | `list[ModelFinding]` — most severe first |
+| `check_migration(sql)` | `list[StatementReview]` — most severe first |
 | `get_top_queries(sort_by="resources", limit=10, interval_seconds=None)` | `list[dict]` — one per query |
 | `analyze_workload_indexes(...)` / `analyze_query_indexes(queries, ...)` | `dict` with `summary`, `recommendations`, `query_impact` |
 

@@ -44,6 +44,9 @@ from .index import MAX_NUM_INDEX_TUNING_QUERIES
 from .index import DatabaseTuningAdvisor
 from .index import IndexRecommendation
 from .index import LLMOptimizerTool
+from .migration import LockLevel
+from .migration import MigrationLinter
+from .migration import StatementReview
 from .model import Confidence
 from .model import ModelFinding
 from .model import ModelReviewer
@@ -82,6 +85,8 @@ __all__ = [
     "IndexRecommendation",
     "InvalidArgumentError",
     "LLMOptimizerTool",
+    "LockLevel",
+    "MigrationLinter",
     "MissingDependencyError",
     "ModelFinding",
     "ModelReviewer",
@@ -96,6 +101,7 @@ __all__ = [
     "SchemaInspector",
     "Severity",
     "SqlDriver",
+    "StatementReview",
     "StatisticsInspector",
     "SyncPgDebug",
     "TopQueriesCalc",

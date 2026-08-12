@@ -27,6 +27,8 @@ from .index.dta_calc import DatabaseTuningAdvisor
 from .index.index_opt_base import MAX_NUM_INDEX_TUNING_QUERIES
 from .index.llm_opt import LLMOptimizerTool
 from .index.presentation import TextPresentation
+from .migration import MigrationLinter
+from .migration import StatementReview
 from .model import DEFAULT_MIN_ROWS
 from .model import ModelFinding
 from .model import ModelReviewer
@@ -369,6 +371,28 @@ class PgDebug:
         """
         reviewer = ModelReviewer(await self.sql_driver())
         return await reviewer.review(rules=rules, schema=schema, min_rows=min_rows, proven_only=proven_only)
+
+    async def check_migration(self, sql: str) -> List[StatementReview]:
+        """Review a migration before running it.
+
+        Reports, for each statement, the lock it takes, how long it holds it,
+        and whether it rewrites the table. The lock level alone decides little:
+        ACCESS EXCLUSIVE held for a catalog update lasts microseconds, while the
+        same lock held for a rewrite of a large table is an outage. The
+        connection is used to say which of those a statement actually is, by
+        looking up the real size of every table it touches.
+
+        Args:
+            sql: The migration. Multiple statements are fine.
+
+        Returns:
+            :class:`~pg_debug.migration.StatementReview` objects, most severe
+            first, each carrying a safer rewrite where one exists.
+
+        Raises:
+            InvalidArgumentError: If the SQL cannot be parsed.
+        """
+        return await MigrationLinter(await self.sql_driver()).review(sql)
 
     # -- Live activity -------------------------------------------------------
 

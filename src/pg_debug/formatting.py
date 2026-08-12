@@ -251,6 +251,39 @@ def render_model_findings(findings: Sequence[Any]) -> str:
     return "\n".join(lines).strip("\n")
 
 
+def render_migration_review(reviews: Sequence[Any]) -> str:
+    """Render a migration review, worst statement first.
+
+    The lock and how long it is held are the two halves of the answer, so they
+    are always shown together — a lock level on its own tells the reader
+    nothing about whether to worry.
+    """
+    if not reviews:
+        return "Nothing in this migration takes a lock worth reporting."
+
+    lines: List[str] = []
+    for review in reviews:
+        lines.append("")
+        lines.append(f"[{review.severity.value}] {review.statement}")
+        lines.append(f"    lock:     {review.lock.value} — blocks {review.blocks}")
+        lines.append(f"    held for: {review.duration.value}")
+        lines.append(f"    {review.summary}")
+        lines.append(f"    {review.detail}")
+        if review.safer:
+            lines.append("    safer:")
+            for statement in review.safer:
+                lines.append(f"      {statement}")
+
+    counts: Dict[str, int] = {}
+    for review in reviews:
+        counts[review.severity.value] = counts.get(review.severity.value, 0) + 1
+    summary = ", ".join(f"{count} {severity}" for severity, count in counts.items())
+    lines.append("")
+    noun = "statement" if len(reviews) == 1 else "statements"
+    lines.append(f"{len(reviews)} {noun} ({summary})")
+    return "\n".join(lines).strip("\n")
+
+
 __all__ = [
     "format_duration",
     "render_activity",
@@ -258,6 +291,7 @@ __all__ = [
     "render_health_checks",
     "render_index_recommendations",
     "render_mapping",
+    "render_migration_review",
     "render_model_findings",
     "render_object_details",
     "render_rows",

@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import sys
+from pathlib import Path
 from typing import Any
 from typing import Dict
 from typing import Iterator
@@ -26,6 +27,7 @@ from .formatting import render_activity
 from .formatting import render_column_stats
 from .formatting import render_health_checks
 from .formatting import render_index_recommendations
+from .formatting import render_migration_review
 from .formatting import render_model_findings
 from .formatting import render_object_details
 from .formatting import render_rows
@@ -33,6 +35,7 @@ from .formatting import render_vacuum_progress
 from .formatting import to_json
 from .index.index_opt_base import MAX_NUM_INDEX_TUNING_QUERIES
 from .index.llm_opt import DEFAULT_LLM_MODEL
+from .migration import MigrationLinter
 from .model import DEFAULT_MIN_ROWS
 from .model import RuleId
 from .model import Severity
@@ -171,6 +174,18 @@ def read_sql(value: str) -> str:
     return value
 
 
+def read_migration(value: str) -> str:
+    """Return a migration from a file path, stdin (``-``) or the argument itself."""
+    if value == "-":
+        return sys.stdin.read()
+    path = Path(value)
+    # A path is the usual case; inline SQL is accepted so the command is easy
+    # to try without writing a file first.
+    if path.exists():
+        return path.read_text()
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser."""
     parser = argparse.ArgumentParser(
@@ -284,6 +299,21 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any high-severity finding is reported, for use in CI.",
     )
     model.set_defaults(func=cmd_model)
+
+    check_migration = subparsers.add_parser("check-migration", help="Review a migration for the locks it takes before running it")
+    check_migration.add_argument("sql", help="Migration file, SQL, or - to read it from stdin")
+    check_migration.add_argument(
+        "--offline",
+        action="store_true",
+        help="Do not connect. Severities are not softened by table sizes, which is what you want when the database "
+        "reachable from CI is not the one the migration will run against.",
+    )
+    check_migration.add_argument(
+        "--exit-code",
+        action="store_true",
+        help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any statement is high severity, for use in CI.",
+    )
+    check_migration.set_defaults(func=cmd_check_migration)
 
     activity = subparsers.add_parser("activity", help="Show what the server is doing right now")
     activity.add_argument("-a", "--all", dest="include_idle", action="store_true", help="Include idle backends and idle auxiliary processes.")
@@ -416,6 +446,10 @@ async def cmd_health(pg: PgDebug, args: argparse.Namespace) -> Any:
     return await pg.analyze_db_health(args.health_type)
 
 
+async def cmd_check_migration(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.check_migration(read_migration(args.sql))
+
+
 async def cmd_model(pg: PgDebug, args: argparse.Namespace) -> Any:
     return await pg.review_data_model(
         rules=args.rules,
@@ -463,6 +497,8 @@ def format_result(command: str, result: Any, as_json: bool) -> str:
             return to_json({name: check.to_dict() for name, check in result.items()})
         if command == "model":
             return to_json([finding.to_dict() for finding in result])
+        if command == "check-migration":
+            return to_json([review.to_dict() for review in result])
         return to_json(result)
 
     if command == "activity":
@@ -477,6 +513,8 @@ def format_result(command: str, result: Any, as_json: bool) -> str:
         return render_health_checks(result)
     if command == "model":
         return render_model_findings(result)
+    if command == "check-migration":
+        return render_migration_review(result)
     if command in ("tune-workload", "tune-queries"):
         return render_index_recommendations(result)
     return render_rows(result)
@@ -494,6 +532,15 @@ def configure_logging(verbosity: int) -> None:
 
 async def run(args: argparse.Namespace) -> int:
     """Run a parsed command, returning the process exit code."""
+    if getattr(args, "offline", False):
+        # The only command that can answer without a database. Reviewing a
+        # migration against a database that is not the one it will run on is
+        # worse than reviewing it against none: a table that is small in staging
+        # softens every verdict about production.
+        result = await MigrationLinter().review(read_migration(args.sql))
+        print(format_result(args.command, result, args.json))
+        return UNHEALTHY_EXIT_CODE if args.exit_code and any(r.severity is Severity.HIGH for r in result) else 0
+
     async with PgDebug(
         database_url=args.database_url,
         access_mode=AccessMode(args.access_mode),
@@ -507,6 +554,9 @@ async def run(args: argparse.Namespace) -> int:
 
     if args.command == "health" and getattr(args, "exit_code", False):
         return UNHEALTHY_EXIT_CODE if any(not check.healthy for check in result.values()) else 0
+
+    if args.command == "check-migration" and getattr(args, "exit_code", False):
+        return UNHEALTHY_EXIT_CODE if any(review.severity is Severity.HIGH for review in result) else 0
 
     if args.command == "model" and getattr(args, "exit_code", False):
         # Only high severity fails a build. The rest is advice, and a gate that

@@ -1134,3 +1134,80 @@ async def test_top_queries_reports_the_workload_and_not_pg_debug(pg):
     assert any(f"{SCHEMA}.orders" in query for query in queries), "the workload query should be reported"
     assert not any("/* pg_debug */" in query for query in queries), "our own queries should not be"
     assert not any(query.strip().upper().startswith(("BEGIN", "COMMIT", "ROLLBACK")) for query in queries)
+
+
+# -- Migration review -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_migration_review_measures_the_tables_it_touches(pg):
+    reviews = await pg.check_migration(f"ALTER TABLE {SCHEMA}.orders ALTER COLUMN status TYPE varchar(20)")
+
+    assert len(reviews) == 1
+    assert reviews[0].table == f"{SCHEMA}.orders"
+    assert reviews[0].table_bytes and reviews[0].table_bytes > 0, "the size is what decides whether this is a pause or an outage"
+
+
+@pytest.mark.asyncio
+async def test_volatility_is_resolved_against_the_catalog(pg):
+    """now() is stable and does not rewrite; gen_random_uuid() is volatile and
+    does. Only pg_proc can tell them apart, and the answer is checked here
+    against the same server the claim is about."""
+    stable = await pg.check_migration(f"ALTER TABLE {SCHEMA}.orders ADD COLUMN seen timestamptz DEFAULT now()")
+    volatile = await pg.check_migration(f"ALTER TABLE {SCHEMA}.orders ADD COLUMN uid uuid DEFAULT gen_random_uuid()")
+
+    assert stable[0].rewrites_table is False
+    assert volatile[0].rewrites_table is True
+
+
+@pytest.mark.asyncio
+async def test_the_lock_levels_it_reports_are_the_ones_the_server_takes(pg):
+    """The whole table of lock levels was measured rather than recalled. This
+    re-measures three of them, so a future PostgreSQL that changes one is
+    caught here rather than believed."""
+    cases = [
+        (f"ALTER TABLE {SCHEMA}.orders ADD CONSTRAINT chk_total CHECK (total >= 0)", "AccessExclusiveLock"),
+        (f"ALTER TABLE {SCHEMA}.orders ADD CONSTRAINT fk_cust FOREIGN KEY (customer_id) REFERENCES {SCHEMA}.customers(id)", "ShareRowExclusiveLock"),
+        (f"CREATE INDEX idx_probe ON {SCHEMA}.orders (status)", "ShareLock"),
+    ]
+    expected = {
+        "AccessExclusiveLock": "ACCESS EXCLUSIVE",
+        "ShareRowExclusiveLock": "SHARE ROW EXCLUSIVE",
+        "ShareLock": "SHARE",
+    }
+
+    held_locks = f"SELECT mode FROM pg_locks WHERE pid = pg_backend_pid() AND locktype = 'relation' AND relation = '{SCHEMA}.orders'::regclass"
+
+    async with await psycopg.AsyncConnection.connect(DATABASE_URI or "") as conn:
+        for statement, strongest in cases:
+            reported = (await pg.check_migration(statement))[0]
+            await conn.execute(cast(LiteralString, statement))
+            rows = await (await conn.execute(held_locks)).fetchall()
+            await conn.rollback()
+
+            held = {row[0] for row in rows}
+            assert strongest in held, f"{statement} was expected to take {strongest}, took {held}"
+            assert reported.lock.value == expected[strongest]
+
+
+@pytest.mark.asyncio
+async def test_the_safer_rewrite_it_suggests_actually_runs(pg):
+    """Remediation nobody can paste is worse than none."""
+    review = (await pg.check_migration(f"ALTER TABLE {SCHEMA}.orders ALTER COLUMN status SET NOT NULL"))[0]
+
+    assert review.safer
+    for statement in review.safer:
+        await pg.execute_sql(statement.split("  --")[0])
+
+    columns = await pg.execute_sql(f"SELECT attnotnull FROM pg_attribute WHERE attrelid = '{SCHEMA}.orders'::regclass AND attname = 'status'")
+    assert columns[0]["attnotnull"] is True
+
+
+def test_cli_check_migration_against_a_real_database(capsys, monkeypatch, pg):
+    monkeypatch.setenv("DATABASE_URI", DATABASE_URI or "")
+
+    assert cli.main(["--json", "check-migration", f"CREATE INDEX i ON {SCHEMA}.orders (status)"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["kind"] == "create_index"
+    assert payload[0]["table_bytes"] > 0
