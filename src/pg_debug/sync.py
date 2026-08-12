@@ -24,6 +24,7 @@ from .client import AccessMode
 from .client import PgDebug
 from .client import SortBy
 from .client import TuningMethod
+from .configuration import ConfigFinding
 from .database_health import HealthCheckResult
 from .database_health import HealthType
 from .migration import StatementReview
@@ -204,6 +205,10 @@ class SyncPgDebug:
     def check_migration(self, sql: str) -> List[StatementReview]:
         """Review a migration before running it."""
         return self._call(self._client.check_migration, sql)
+
+    def review_configuration(self) -> List[ConfigFinding]:
+        """Review the server's settings against what it is actually doing."""
+        return self._call(self._client.review_configuration)
 
     # -- Live activity -------------------------------------------------------
 

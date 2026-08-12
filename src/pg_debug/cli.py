@@ -25,6 +25,7 @@ from .database_health import HealthType
 from .errors import PgDebugError
 from .formatting import render_activity
 from .formatting import render_column_stats
+from .formatting import render_configuration_review
 from .formatting import render_health_checks
 from .formatting import render_index_recommendations
 from .formatting import render_migration_review
@@ -300,6 +301,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     model.set_defaults(func=cmd_model)
 
+    config = subparsers.add_parser("config", help="Review the server's settings against what it is actually doing")
+    config.add_argument(
+        "--exit-code",
+        action="store_true",
+        help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any high-severity finding is reported, for use in CI.",
+    )
+    config.set_defaults(func=cmd_config)
+
     check_migration = subparsers.add_parser("check-migration", help="Review a migration for the locks it takes before running it")
     check_migration.add_argument("sql", help="Migration file, SQL, or - to read it from stdin")
     check_migration.add_argument(
@@ -446,6 +455,10 @@ async def cmd_health(pg: PgDebug, args: argparse.Namespace) -> Any:
     return await pg.analyze_db_health(args.health_type)
 
 
+async def cmd_config(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.review_configuration()
+
+
 async def cmd_check_migration(pg: PgDebug, args: argparse.Namespace) -> Any:
     return await pg.check_migration(read_migration(args.sql))
 
@@ -499,6 +512,8 @@ def format_result(command: str, result: Any, as_json: bool) -> str:
             return to_json([finding.to_dict() for finding in result])
         if command == "check-migration":
             return to_json([review.to_dict() for review in result])
+        if command == "config":
+            return to_json([finding.to_dict() for finding in result])
         return to_json(result)
 
     if command == "activity":
@@ -515,6 +530,8 @@ def format_result(command: str, result: Any, as_json: bool) -> str:
         return render_model_findings(result)
     if command == "check-migration":
         return render_migration_review(result)
+    if command == "config":
+        return render_configuration_review(result)
     if command in ("tune-workload", "tune-queries"):
         return render_index_recommendations(result)
     return render_rows(result)
@@ -554,6 +571,9 @@ async def run(args: argparse.Namespace) -> int:
 
     if args.command == "health" and getattr(args, "exit_code", False):
         return UNHEALTHY_EXIT_CODE if any(not check.healthy for check in result.values()) else 0
+
+    if args.command == "config" and getattr(args, "exit_code", False):
+        return UNHEALTHY_EXIT_CODE if any(finding.severity is Severity.HIGH for finding in result) else 0
 
     if args.command == "check-migration" and getattr(args, "exit_code", False):
         return UNHEALTHY_EXIT_CODE if any(review.severity is Severity.HIGH for review in result) else 0

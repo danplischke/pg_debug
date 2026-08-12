@@ -28,6 +28,8 @@ from .client import DATABASE_URL_ENV_VARS
 from .client import AccessMode
 from .client import PgDebug
 from .client import resolve_database_url
+from .configuration import ConfigFinding
+from .configuration import ConfigurationReviewer
 from .database_health import DatabaseHealthTool
 from .database_health import HealthCheckResult
 from .database_health import HealthType
@@ -70,6 +72,8 @@ __all__ = [
     "AccessMode",
     "ActivityInspector",
     "Confidence",
+    "ConfigFinding",
+    "ConfigurationReviewer",
     "ConnectionFailedError",
     "DatabaseHealthTool",
     "DatabaseTuningAdvisor",

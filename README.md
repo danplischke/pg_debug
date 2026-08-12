@@ -15,6 +15,7 @@ without an MCP client in the loop.
 - **Live activity** — what every backend is doing right now, what it is waiting on, and which process is blocking it.
 - **Vacuum progress** — running vacuums, their phase and how far through the heap they are.
 - **Planner statistics** — the per-column numbers behind a plan's row estimates, the extended statistics defined on a table, and which tables the planner is reasoning about with stale numbers.
+- **Configuration review** — the server's settings judged against what it is actually doing: `work_mem` against bytes spilled to temporary files, `shared_buffers` against the cache hit rate it is achieving, `max_wal_size` against how many checkpoints were forced rather than scheduled. A default that is doing no harm is left alone, and nothing here guesses at the machine's memory or storage.
 - **Migration review** — read a migration before running it and see, per statement, the lock it takes, how long it holds it, whether it rewrites the table, and a safer rewrite where one exists. Connected, it reports how big the tables actually are, which is what decides whether a rewrite is a pause or an outage.
 - **Data model review** — foreign keys with no index behind them, keys whose two sides are different types, tables with no primary key, columns ordered so alignment padding costs bytes on every row, and types that do not mean what they look like. Each finding says whether it is proven from the catalog or inferred from statistics, and carries the DDL that fixes it.
 - **Health checks** — invalid/duplicate/bloated/unused indexes, table bloat, connection utilization, transaction ID wraparound risk, autovacuum backlog and what is holding the vacuum horizon, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints, statistics freshness.
@@ -62,6 +63,9 @@ pg-debug health
 pg-debug health --type index,vacuum
 pg-debug column-stats orders             # why the planner estimates what it does
 
+pg-debug config                          # settings vs what the server is doing
+pg-debug config --exit-code              # fails on a durability setting that is off
+
 pg-debug check-migration 001_add_column.sql   # what will this lock, and for how long?
 pg-debug check-migration --offline --exit-code migrations/*.sql
 
@@ -104,6 +108,7 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `vacuum-progress` | — |
 | `column-stats TABLE` | — |
 | `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--exit-code` |
+| `config` | `--exit-code` |
 | `check-migration SQL` | a file path, inline SQL, or `-` for stdin; `--offline`, `--exit-code` |
 | `model` | `-s, --schema SCHEMA`, `-r, --rule RULES` (comma-separated, default `all`), `--proven-only`, `--min-rows N` (default 1000), `--exit-code` |
 | `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10, ignored for cumulative `resources`), `-i, --interval SECONDS` |
@@ -123,6 +128,16 @@ the estimate cannot see is the *spread* of a variable-width column, since
 `pg_stats` records only an average — such a table reads a few percent bloated
 when it is not. `pgstattuple` gives the exact figure at the cost of scanning
 the table.
+
+`config` reviews the server's settings, but argues every finding from a counter
+this server is already keeping rather than from a table of recommended values.
+`work_mem` is only raised if queries have actually spilled to disk;
+`shared_buffers` well below the database size is only mentioned if the cache is
+actually missing; `max_wal_size` only if checkpoints are being forced rather
+than scheduled. It does not guess at hardware — PostgreSQL cannot see the
+machine's memory or whether its storage is solid state, so no finding rests on
+assuming either, and where the right value depends on something invisible from
+here the finding says so instead of inventing a number.
 
 `check-migration` answers a different question from the rest: not what the
 database is, but what a change will do to everyone using it while it runs. The
@@ -280,6 +295,7 @@ bad URL instead.
 | `analyze_db_health(health_type="all")` | `dict[str, HealthCheckResult]` — check name to result |
 | `review_data_model(rules="all", schema=None, min_rows=1000, proven_only=False)` | `list[ModelFinding]` — most severe first |
 | `check_migration(sql)` | `list[StatementReview]` — most severe first |
+| `review_configuration()` | `list[ConfigFinding]` — most severe first |
 | `get_top_queries(sort_by="resources", limit=10, interval_seconds=None)` | `list[dict]` — one per query |
 | `analyze_workload_indexes(...)` / `analyze_query_indexes(queries, ...)` | `dict` with `summary`, `recommendations`, `query_impact` |
 

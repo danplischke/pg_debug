@@ -251,6 +251,25 @@ def render_model_findings(findings: Sequence[Any]) -> str:
     return "\n".join(lines).strip("\n")
 
 
+def render_configuration_review(findings: Sequence[Any]) -> str:
+    """Render a configuration review, most severe first."""
+    if not findings:
+        return "Nothing measurable is wrong with the configuration."
+
+    lines: List[str] = []
+    for finding in findings:
+        lines.append("")
+        lines.append(f"[{finding.severity.value}] {finding.setting} = {finding.current}")
+        lines.append(f"    {finding.summary}")
+        lines.append(f"    {finding.detail}")
+        if finding.recommended:
+            lines.append(f"    suggested: {finding.recommended}")
+
+    lines.append("")
+    lines.append(f"{len(findings)} setting{'' if len(findings) == 1 else 's'} worth looking at")
+    return "\n".join(lines).strip("\n")
+
+
 def render_migration_review(reviews: Sequence[Any]) -> str:
     """Render a migration review, worst statement first.
 
@@ -288,6 +307,7 @@ __all__ = [
     "format_duration",
     "render_activity",
     "render_column_stats",
+    "render_configuration_review",
     "render_health_checks",
     "render_index_recommendations",
     "render_mapping",

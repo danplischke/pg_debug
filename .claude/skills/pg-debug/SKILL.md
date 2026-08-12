@@ -223,6 +223,24 @@ query text, so the workload it analyzes is only its own queries. `GRANT
 pg_read_all_stats TO <role>` fixes it. Queries against views are skipped by
 design: an index goes on the tables underneath.
 
+## Reviewing the server's configuration
+
+```bash
+pg-debug config              # settings judged against what this server is doing
+pg-debug --json config
+pg-debug config --exit-code  # exit 3 on a durability setting that is off
+```
+
+Every finding is argued from a counter, and the `evidence` field carries it —
+quote that rather than the recommendation on its own, because it is what makes
+the suggestion checkable. An empty result means nothing *measurable* is wrong,
+which is not the same as optimal; say it that way.
+
+It deliberately does not guess at hardware, so where the right value depends on
+the machine's memory or storage the finding offers no number and says why. Do
+not fill that gap with a number of your own — suggest measuring again after a
+change instead.
+
 ## Reviewing a migration before it runs
 
 ```bash

@@ -321,6 +321,51 @@ def test_model_without_exit_code_flag_always_succeeds(pg_client):
     assert run(["model"])[0] == 0
 
 
+def test_config_renders_findings(pg_client):
+    from pg_debug.configuration import ConfigFinding
+
+    pg_client.review_configuration = AsyncMock(
+        return_value=[
+            ConfigFinding(
+                setting="work_mem",
+                current="4.0 MB",
+                severity=Severity.MEDIUM,
+                summary="Queries have spilled to disk.",
+                detail="detail",
+                recommended="8.0 MB",
+            )
+        ]
+    )
+
+    code, out, _ = run(["config"])
+
+    assert code == 0
+    assert "[medium] work_mem = 4.0 MB" in out
+    assert "suggested: 8.0 MB" in out
+
+
+def test_config_reports_a_clean_server_plainly(pg_client):
+    pg_client.review_configuration = AsyncMock(return_value=[])
+
+    code, out, _ = run(["config"])
+
+    assert code == 0
+    assert out.strip() == "Nothing measurable is wrong with the configuration."
+
+
+def test_config_exit_code_fires_only_on_high_severity(pg_client):
+    from pg_debug.configuration import ConfigFinding
+
+    def finding(severity):
+        return ConfigFinding(setting="fsync", current="off", severity=severity, summary="s", detail="d")
+
+    pg_client.review_configuration = AsyncMock(return_value=[finding(Severity.MEDIUM)])
+    assert run(["config", "--exit-code"])[0] == 0
+
+    pg_client.review_configuration = AsyncMock(return_value=[finding(Severity.HIGH)])
+    assert run(["config", "--exit-code"])[0] == cli.UNHEALTHY_EXIT_CODE
+
+
 def test_check_migration_reads_a_file(pg_client, tmp_path):
     pg_client.check_migration = AsyncMock(return_value=[])
     migration = tmp_path / "001_add_column.sql"

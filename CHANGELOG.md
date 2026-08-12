@@ -39,6 +39,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   six-column table used in testing. A table is reported only when it wastes at
   least 100 MB *and* at least 20% of its size, so ordinary free space in a large
   table is not flagged.
+- `pg-debug config` and `PgDebug.review_configuration()`, which review the
+  server's settings against what it is actually doing rather than against a
+  table of recommended values. `work_mem` is raised only where queries have
+  spilled to temporary files, `shared_buffers` questioned only where the cache
+  is genuinely missing, `max_wal_size` only where checkpoints are being forced
+  rather than scheduled — so a default doing no harm produces no finding, and
+  every finding carries the counter it rests on.
+
+  It does not guess at hardware. PostgreSQL cannot see how much memory the
+  machine has or whether its storage is solid state, so where the right value
+  depends on one of those the finding says so and offers no number.
 - Two `vacuum` health checks beyond wraparound. "Autovacuum backlog" reports
   tables autovacuum is not keeping clean and separates the three reasons that
   look alike: past its threshold and waiting, autovacuum switched off for it,

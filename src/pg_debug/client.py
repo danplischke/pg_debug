@@ -15,6 +15,8 @@ from typing import Optional
 from .activity import ActivityInspector
 from .artifacts import ErrorResult
 from .artifacts import ExplainPlanArtifact
+from .configuration import ConfigFinding
+from .configuration import ConfigurationReviewer
 from .database_health import DatabaseHealthTool
 from .database_health import HealthCheckResult
 from .database_health import HealthType
@@ -393,6 +395,22 @@ class PgDebug:
             InvalidArgumentError: If the SQL cannot be parsed.
         """
         return await MigrationLinter(await self.sql_driver()).review(sql)
+
+    async def review_configuration(self) -> List[ConfigFinding]:
+        """Review the server's settings against what it is actually doing.
+
+        Every finding is argued from a counter this server is already keeping —
+        blocks read against blocks hit, bytes spilled to temporary files,
+        checkpoints forced by WAL volume rather than by the timer — so a
+        default that is doing no harm is left alone. Nothing here guesses at
+        the machine's memory or storage, neither of which PostgreSQL exposes.
+
+        Returns:
+            :class:`~pg_debug.configuration.ConfigFinding` objects, most severe
+            first. Empty means nothing measurable is wrong, which is not the
+            same as optimal.
+        """
+        return await ConfigurationReviewer(await self.sql_driver()).review()
 
     # -- Live activity -------------------------------------------------------
 

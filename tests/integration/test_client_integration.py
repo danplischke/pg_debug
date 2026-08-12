@@ -1275,3 +1275,52 @@ async def test_a_write_transaction_holds_a_transaction_id(pg):
 
     assert not check.healthy
     assert any(f["holds"] == "a transaction id" for f in check.findings)
+
+
+# -- Configuration review ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_configuration_review_argues_from_this_server_s_counters(pg):
+    findings = await pg.review_configuration()
+
+    by_setting = {finding.setting: finding for finding in findings}
+    # Whatever it reports, every finding has to carry the measurement it rests on.
+    for finding in findings:
+        assert finding.evidence, f"{finding.setting} was reported with no evidence"
+
+    # A default this server is not suffering from must not be reported.
+    assert "maintenance_work_mem" not in by_setting, "nothing measures this, so nothing should claim it is wrong"
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_cache_is_not_told_to_grow(pg):
+    """shared_buffers below the database size is only a problem when reads are
+    actually missing, and on this server they are not."""
+    hit_rate = await pg.execute_sql(
+        "SELECT blks_hit::float8 / nullif(blks_hit + blks_read, 0) AS rate FROM pg_stat_database WHERE datname = current_database()"
+    )
+    if (hit_rate[0]["rate"] or 0) < 0.99:
+        pytest.skip("this server's cache is genuinely missing, so the finding is correct")
+
+    findings = await pg.review_configuration()
+
+    assert not any(finding.setting == "shared_buffers" for finding in findings)
+
+
+@pytest.mark.asyncio
+async def test_the_configuration_review_runs_in_restricted_mode(pg):
+    async with PgDebug(DATABASE_URI, access_mode=AccessMode.RESTRICTED) as restricted:
+        findings = await restricted.review_configuration()
+
+    assert [f.setting for f in findings] == [f.setting for f in await pg.review_configuration()]
+
+
+def test_cli_config_against_a_real_database(capsys, monkeypatch, pg):
+    monkeypatch.setenv("DATABASE_URI", DATABASE_URI or "")
+
+    assert cli.main(["--json", "config"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    for finding in payload:
+        assert finding["evidence"], f"{finding['setting']} reported with no evidence"
