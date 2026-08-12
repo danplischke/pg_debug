@@ -223,6 +223,14 @@ query text, so the workload it analyzes is only its own queries. `GRANT
 pg_read_all_stats TO <role>` fixes it. Queries against views are skipped by
 design: an index goes on the tables underneath.
 
+Each recommendation also carries a `write_cost` when the table has recorded
+writes: how many inserts, deletes and non-HOT updates every index on it has to
+be maintained for. Report it alongside the benefit rather than after it — an
+index that halves a query and is maintained on ten million writes a day is a
+different proposition from the same index on a table nobody writes to. A
+`hot_update_warning` means most updates to that table currently avoid the
+indexes entirely, and an index over a column they change would end that.
+
 ## Reviewing the server's configuration
 
 ```bash

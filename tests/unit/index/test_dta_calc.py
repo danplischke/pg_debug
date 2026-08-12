@@ -180,6 +180,8 @@ async def test_analyze_workload(async_sql_driver, create_dta):
         elif "to_regclass" in query:
             # Every table named in these tests is an ordinary table.
             return [MockCell({"name": name}) for name in ("users", "orders")]
+        elif "n_tup_hot_upd" in query:
+            return [MockCell({"inserts": 1000, "updates": 100, "deletes": 10, "hot_updates": 90})]
         elif "FROM information_schema.columns c" in query:
             return [
                 MockCell(

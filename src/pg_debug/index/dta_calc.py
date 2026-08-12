@@ -18,6 +18,7 @@ from ..sql import SqlDriver
 from ..sql import TableAliasVisitor
 from ..sql import resolve_table_reference
 from ..sql import split_table_reference
+from .index_opt_base import DEFAULT_WRITE_WEIGHT
 from .index_opt_base import IndexRecommendation
 from .index_opt_base import IndexTuningBase
 from .index_opt_base import candidate_str
@@ -52,6 +53,7 @@ class DatabaseTuningAdvisor(IndexTuningBase):
         min_column_usage: int = 1,  # skip columns used in fewer than this many queries
         seed_columns_count: int = 3,  # how many single-col seeds to pick
         pareto_alpha: float = 2.0,
+        write_weight: float = DEFAULT_WRITE_WEIGHT,
         min_time_improvement: float = 0.1,
     ):
         """
@@ -61,7 +63,9 @@ class DatabaseTuningAdvisor(IndexTuningBase):
         :param max_index_width: Maximum columns in an index
         :param min_column_usage: skip columns that appear in fewer than X queries
         :param seed_columns_count: how many top single-column indexes to pick as seeds
-        :param pareto_alpha: stop when relative improvement falls below this threshold
+        :param pareto_alpha: how heavily index size weighs against query time
+        :param write_weight: how heavily index maintenance weighs against query
+            time. 0 ignores writes, as this did before it was measured.
         :param min_time_improvement: stop when relative improvement falls below this threshold
         """
         super().__init__(sql_driver)
@@ -72,6 +76,7 @@ class DatabaseTuningAdvisor(IndexTuningBase):
         self.seed_columns_count = seed_columns_count
         self._analysis_start_time = 0.0
         self.pareto_alpha = pareto_alpha
+        self.write_weight = write_weight
         self.min_time_improvement = min_time_improvement
 
     def _check_time(self) -> bool:
@@ -228,18 +233,23 @@ class DatabaseTuningAdvisor(IndexTuningBase):
         Pareto optimal greedy approach using cost/benefit analysis:
         - Cost: Size of base relation plus size of indexes (in bytes)
         - Benefit: Inverse of query execution time (1/time)
-        - Objective function: log(time) + alpha * log(space)
+        - Objective function: log(time) + alpha * log(space) + beta * log1p(writes)
         - We want to minimize this function, with alpha=2 for 2x emphasis on performance
+        - The write term is what stops an index on a write-hot table looking as
+          cheap as the same index on a table nobody writes to. It counts the
+          writes every index on the table has to be maintained for, so each
+          index added to that table pays it again.
         - Primary stopping criterion: minimum relative time improvement threshold
         """
         import math
 
         # Parameters
         alpha = self.pareto_alpha
+        beta = self.write_weight
         min_time_improvement = self.min_time_improvement  # 5% default
 
         self.dta_trace("\n[GREEDY SEARCH] Starting enumeration")
-        self.dta_trace(f"  - Parameters: alpha={alpha}, min_time_improvement={min_time_improvement}")
+        self.dta_trace(f"  - Parameters: alpha={alpha}, beta={beta}, min_time_improvement={min_time_improvement}")
         self.dta_trace(f"  - Initial indexes: {len(current_indexes)}, Candidates: {len(candidate_indexes)}")
 
         # Get the tables involved in this analysis
@@ -258,7 +268,17 @@ class DatabaseTuningAdvisor(IndexTuningBase):
         # Total space is base relation plus indexes
         current_space = base_relation_size + indexes_size
         current_time = current_cost
-        current_objective = math.log(current_time) + alpha * math.log(current_space) if current_cost > 0 and current_space > 0 else float("inf")
+        # Writes are counted once for the heap itself and once more for every
+        # index on the table, so the term is a relative increase rather than a
+        # step up from nothing — the same shape as the space term above, which
+        # starts from the base relation rather than from zero.
+        base_writes = sum([(await self.write_load(table))["index_writes"] for table in tables])
+        current_writes = base_writes + sum([(await self.write_load(idx.table))["index_writes"] for idx in current_indexes])
+        current_objective = (
+            math.log(current_time) + alpha * math.log(current_space) + beta * math.log1p(current_writes)
+            if current_cost > 0 and current_space > 0
+            else float("inf")
+        )
 
         self.dta_trace(
             f"  - Initial configuration: Time={current_time:.2f}, "
@@ -275,6 +295,7 @@ class DatabaseTuningAdvisor(IndexTuningBase):
             best_index = None
             best_time = current_time
             best_space = current_space
+            best_writes = current_writes
             best_objective = current_objective
             best_time_improvement = 0
 
@@ -308,8 +329,14 @@ class DatabaseTuningAdvisor(IndexTuningBase):
                     self.dta_trace(f"  - Skipping candidate: {candidate_str([candidate])} because time improvement is below threshold")
                     continue
 
+                # Maintaining this index costs its table's write volume again.
+                candidate_writes = (await self.write_load(candidate.table))["index_writes"]
+                test_writes = current_writes + candidate_writes
+                if candidate_writes:
+                    self.dta_trace(f"    + Index-touching writes on {candidate.table}: {candidate_writes:,.0f}")
+
                 # Calculate objective for this configuration
-                test_objective = math.log(test_time) + alpha * math.log(test_space)
+                test_objective = math.log(test_time) + alpha * math.log(test_space) + beta * math.log1p(test_writes)
 
                 # Select the index with the best time improvement that meets our threshold
                 if test_objective < best_objective and time_improvement > best_time_improvement:
@@ -317,6 +344,7 @@ class DatabaseTuningAdvisor(IndexTuningBase):
                     best_index = candidate
                     best_time = test_time
                     best_space = test_space
+                    best_writes = test_writes
                     best_objective = test_objective
                     best_time_improvement = time_improvement
                 else:
@@ -348,6 +376,7 @@ class DatabaseTuningAdvisor(IndexTuningBase):
             # Update current metrics
             current_time = best_time
             current_space = best_space
+            current_writes = best_writes
             current_objective = best_objective
 
             iteration += 1

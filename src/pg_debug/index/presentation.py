@@ -17,6 +17,10 @@ from .index_opt_base import IndexTuningResult
 
 logger = logging.getLogger(__name__)
 
+#: Above this share of HOT updates, an index over the wrong column does more
+#: than add maintenance: it stops PostgreSQL avoiding the indexes altogether.
+HOT_UPDATE_WARNING_RATIO = 0.5
+
 
 class TextPresentation:
     """Text-based presentation of index tuning recommendations."""
@@ -190,6 +194,9 @@ class TextPresentation:
                 "index_estimated_size": humanize.naturalsize(rec.estimated_size_bytes),
                 "index_definition": rec.definition,
             }
+            write_cost = self._describe_write_cost(rec)
+            if write_cost:
+                rec_dict["write_cost"] = write_cost
             if rec.potential_problematic_reason == "long_text_column":
                 rec_dict["warning"] = (
                     "This index includes a text column with no length limit. A btree entry has to fit "
@@ -201,6 +208,40 @@ class TextPresentation:
                 rec_dict["warning"] = f"This index is potentially problematic because it includes a {rec.potential_problematic_reason} column."
             recommendations.append(rec_dict)
         return recommendations
+
+    @staticmethod
+    def _describe_write_cost(rec) -> Dict[str, Any] | None:
+        """What this index will cost to keep up to date.
+
+        An index is not paid for once. Every insert, every delete and every
+        update that changes an indexed column has to maintain it, and those
+        counts are already being kept — so the benefit and the cost can be
+        reported side by side rather than only the benefit.
+        """
+        load = getattr(rec, "write_load", None) or {}
+        index_writes = int(load.get("index_writes") or 0)
+        if not index_writes:
+            return None
+
+        cost: Dict[str, Any] = {
+            "index_touching_writes": index_writes,
+            "inserts": int(load.get("inserts") or 0),
+            "updates": int(load.get("updates") or 0),
+            "deletes": int(load.get("deletes") or 0),
+            "note": (
+                f"{index_writes:,} writes recorded on {rec.table} have to maintain every index on it, this one "
+                f"included. Inserts and deletes always do; updates only when they change an indexed column."
+            ),
+        }
+
+        hot_ratio = float(load.get("hot_ratio") or 0.0)
+        if hot_ratio >= HOT_UPDATE_WARNING_RATIO:
+            cost["hot_update_warning"] = (
+                f"{hot_ratio:.0%} of updates to {rec.table} are currently HOT — they rewrite the row without "
+                f"touching any index at all. An index over a column those updates change gives that up, and the "
+                f"table starts bloating faster as well as writing more."
+            )
+        return cost
 
     async def _generate_query_impact(self, session: IndexTuningResult) -> List[Dict[str, Any]]:
         """

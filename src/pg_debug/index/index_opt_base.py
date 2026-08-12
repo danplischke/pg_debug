@@ -32,6 +32,20 @@ MAX_NUM_INDEX_TUNING_QUERIES = 10
 #: the reading role is a superuser or has been granted pg_read_all_stats.
 HIDDEN_QUERY_TEXT = "<insufficient privilege>"
 
+#: How heavily index maintenance weighs in the search's objective.
+#:
+#: Deliberately small, and calibrated rather than assumed. The term is
+#: beta * log(write work), where write work counts each table's writes once for
+#: the heap and once more for every index on it — so adding the first index to
+#: a table moves it by log(2), about 0.69, whatever the write volume, while a
+#: worthwhile index typically improves the time term by 0.2 to 3. At 1.0 the
+#: term therefore vetoes indexes that are plainly worth having, which is what
+#: it did when first tried. At 0.1 it breaks ties — between two candidates of
+#: similar benefit the one on the quieter table wins — without overruling a
+#: real improvement. Raise it for a service where writes dominate; 0 restores
+#: the previous behaviour of ignoring maintenance entirely.
+DEFAULT_WRITE_WEIGHT = 0.1
+
 #: Relation kinds an index can be created on: ordinary tables, materialized
 #: views and partitioned tables. A view is not one of them — it has no storage
 #: of its own, and the index belongs on the tables underneath it.
@@ -115,6 +129,9 @@ class IndexRecommendationAnalysis:
     individual_recommendation_cost: float
     queries: list[str]
     definition: str
+    #: What this index will be maintained for: the writes on its table that
+    #: touch every index, and the share of updates currently avoiding them.
+    write_load: dict[str, float] = field(default_factory=dict)
 
     @property
     def table(self) -> str:
@@ -188,6 +205,8 @@ class IndexTuningBase(ABC):
         # Sizes HypoPG actually measured, which beat the fallback formula.
         self._measured_size_cache: dict[tuple[str, frozenset[str]], int] = {}
         self._table_size_cache = {}
+        # Index-touching writes per table, from pg_stat_user_tables.
+        self._write_load_cache: dict[str, dict[str, float]] = {}
         self._estimate_table_size_cache = {}
         self._explain_plans_cache = {}
         self._sql_bind_params = SqlBindParams(self.sql_driver)
@@ -547,6 +566,64 @@ class IndexTuningBase(ABC):
         )
         return [dict(row.cells) for row in result] if result else []
 
+    async def write_load(self, table: str) -> dict[str, float]:
+        """How many writes on this table every index has to be maintained for.
+
+        An insert adds an entry to every index; a delete marks one dead in
+        every index. An update usually does both — but not always: a *HOT*
+        update, one that changes no indexed column and finds room on the same
+        page, updates no index at all. Counting plain updates would therefore
+        overstate the cost on exactly the tables PostgreSQL is already
+        optimising, so the HOT ones are subtracted.
+
+        Returns:
+            ``index_writes`` — the total an index would be maintained for —
+            alongside the counters it came from, and ``hot_ratio``, the share
+            of updates that currently avoid the indexes altogether.
+        """
+        if table in self._write_load_cache:
+            return self._write_load_cache[table]
+
+        schema, name = split_table_reference(table)
+        query = """
+            SELECT
+                n_tup_ins AS inserts,
+                n_tup_upd AS updates,
+                n_tup_del AS deletes,
+                n_tup_hot_upd AS hot_updates
+            FROM pg_stat_user_tables
+            WHERE relname = {}
+        """
+        params: list[Any] = [name]
+        if schema:
+            query += " AND schemaname = {}"
+            params.append(schema)
+
+        load: dict[str, float] = {"inserts": 0, "updates": 0, "deletes": 0, "hot_updates": 0, "index_writes": 0, "hot_ratio": 0.0}
+        try:
+            rows = await SafeSqlDriver.execute_param_query(self.sql_driver, query, params)
+            if rows:
+                cells = rows[0].cells
+                inserts = int(cells["inserts"] or 0)
+                updates = int(cells["updates"] or 0)
+                deletes = int(cells["deletes"] or 0)
+                hot = int(cells["hot_updates"] or 0)
+                load = {
+                    "inserts": inserts,
+                    "updates": updates,
+                    "deletes": deletes,
+                    "hot_updates": hot,
+                    "index_writes": inserts + deletes + max(updates - hot, 0),
+                    "hot_ratio": round(hot / updates, 3) if updates else 0.0,
+                }
+        except Exception as e:
+            # A workload is still worth tuning against a server that will not
+            # say how much it is written to; the search just loses that term.
+            logger.debug(f"Could not read the write load of {table}: {e}")
+
+        self._write_load_cache[table] = load
+        return load
+
     async def indexable_tables(self, tables: Iterable[str]) -> set[str]:
         """Keep the names that refer to something an index can be created on.
 
@@ -768,6 +845,7 @@ class IndexTuningBase(ABC):
                     individual_recommendation_cost=individual_cost,
                     queries=[q for q, _, _ in query_weights],
                     definition=index_config.definition,
+                    write_load=await self.write_load(index_config.table),
                 )
                 progressive_base_cost = progressive_cost
                 recommendations.append(rec)

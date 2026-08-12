@@ -20,7 +20,7 @@ without an MCP client in the loop.
 - **Data model review** — foreign keys with no index behind them, keys whose two sides are different types, tables with no primary key, columns ordered so alignment padding costs bytes on every row, and types that do not mean what they look like. Each finding says whether it is proven from the catalog or inferred from statistics, and carries the DDL that fixes it.
 - **Health checks** — invalid/duplicate/bloated/unused indexes, table bloat, connection utilization, transaction ID wraparound risk, autovacuum backlog and what is holding the vacuum horizon, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints, statistics freshness.
 - **Top queries** — the most expensive queries recorded by `pg_stat_statements`, ranked by resource blend or by execution time, cumulatively or sampled over an interval.
-- **Index tuning** — recommend indexes for your recorded workload or for a specific set of queries, with before/after planner costs and the size HypoPG measures for each candidate.
+- **Index tuning** — recommend indexes for your recorded workload or for a specific set of queries, with before/after planner costs, the size HypoPG measures for each candidate, and what each one will cost to keep up to date.
 - **Access modes** — run unrestricted, or in a `restricted` mode that parses each statement, rejects anything that is not read-only, and runs it in a read-only transaction with a statement timeout.
 
 ## Install
@@ -128,6 +128,19 @@ the estimate cannot see is the *spread* of a variable-width column, since
 `pg_stats` records only an average — such a table reads a few percent bloated
 when it is not. `pgstattuple` gives the exact figure at the cost of scanning
 the table.
+
+Index tuning weighs what an index costs to maintain, not only what it saves.
+Every insert, every delete and every update that changes an indexed column has
+to maintain each index on the table — but a *HOT* update, one that changes no
+indexed column, updates no index at all, so those are subtracted rather than
+counted. Each recommendation reports the writes it will be maintained for, and
+warns when a table's updates are mostly HOT today, because an index over the
+wrong column gives that up.
+
+The same figure feeds the search's objective, at a deliberately small weight:
+it breaks ties between candidates of similar benefit in favour of the quieter
+table, and does not overrule a real improvement. `write_weight=0` restores the
+previous behaviour of ignoring maintenance entirely.
 
 `config` reviews the server's settings, but argues every finding from a counter
 this server is already keeping rather than from a table of recommended values.

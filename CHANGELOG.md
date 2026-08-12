@@ -39,6 +39,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   six-column table used in testing. A table is reported only when it wastes at
   least 100 MB *and* at least 20% of its size, so ordinary free space in a large
   table is not flagged.
+- Index tuning now weighs what an index costs to maintain. Every insert,
+  delete and non-HOT update on a table has to maintain each index on it, and
+  those counters are already kept — HOT updates are subtracted, since one
+  changes no indexed column and updates no index at all. Each recommendation
+  reports the writes it will be maintained for, and warns where a table's
+  updates are mostly HOT today, because an index over the wrong column gives
+  that up.
+
+  The figure also feeds the search's objective, at a weight chosen by testing
+  rather than assumed: the term moves the objective by log(2) when the first
+  index is added to a table, which at weight 1.0 outweighs a 20% improvement in
+  query time and vetoed indexes plainly worth having. At the 0.1 default it
+  breaks ties towards the quieter table without overruling a real improvement.
+  `write_weight=0` restores the previous behaviour.
 - `pg-debug config` and `PgDebug.review_configuration()`, which review the
   server's settings against what it is actually doing rather than against a
   table of recommended values. `work_mem` is raised only where queries have
