@@ -1,0 +1,101 @@
+[project]
+name = "pg-debug"
+version = "0.1.0"
+description = "PostgreSQL inspection, health and index tuning as a Python library with a CLI"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "psycopg[binary]>=3.3.2",
+    "humanize>=4.15.0",
+    "pglast==7.11",
+    "attrs>=25.4.0",
+    "psycopg-pool>=3.3.0",
+    "pydantic>=2.0",
+]
+license = "mit"
+license-files = ["LICENSE"]
+keywords = ["postgres", "postgresql", "database", "index", "tuning", "explain", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Database :: Database Engines/Servers",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+llm = ["instructor>=1.14.4"]
+
+[project.scripts]
+pg-debug = "pg_debug.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pg_debug"]
+
+[tool.pytest.ini_options]
+pythonpath = ["./src", "./tests"]
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "docker>=7.1.0",
+    "pyright==1.1.408",
+    "pytest-asyncio>=1.3.0",
+    "pytest>=9.0.2",
+    "python-dotenv>=1.0.0",
+    "ruff==0.14.13",
+]
+
+[tool.ruff]
+line-length = 150
+target-version = "py312"
+exclude = [".venv*"]
+
+lint.select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "W",   # pycodestyle warnings
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "RUF"  # ruff-specific rules
+]
+
+lint.ignore = [
+    "UP006",  # Use `list` instead of `List` for type annotations
+    "UP035",  # Import from `collections.abc` instead of `typing`
+    "UP045",  # Use `X | None` instead of `Optional[X]`
+    "RUF059", # Unused unpacked variable
+    "RUF100", # Unused noqa directive
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+force-single-line = true
+known-first-party = ["pg_debug"]
+
+[tool.pyright]
+typeCheckingMode = "standard"
+pythonVersion = "3.12"
+reportMissingTypeStubs = false
+reportPrivateUsage = true
+reportUntypedFunctionDecorator = true
+reportMissingTypeArgument = true
+reportInvalidTypeVarUse = true
+reportUnnecessaryCast = true

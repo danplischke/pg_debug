@@ -1,0 +1,380 @@
+"""High-level client for inspecting and tuning a PostgreSQL database."""
+
+from __future__ import annotations
+
+import logging
+import os
+from enum import Enum
+from typing import Any
+from typing import Dict
+from typing import Iterable
+from typing import List
+from typing import Literal
+from typing import Optional
+
+from .artifacts import ErrorResult
+from .artifacts import ExplainPlanArtifact
+from .database_health import DatabaseHealthTool
+from .database_health import HealthType
+from .errors import ConnectionFailedError
+from .errors import ExplainPlanError
+from .errors import ExtensionRequiredError
+from .errors import InvalidArgumentError
+from .explain import ExplainPlanTool
+from .index.dta_calc import DatabaseTuningAdvisor
+from .index.index_opt_base import MAX_NUM_INDEX_TUNING_QUERIES
+from .index.llm_opt import LLMOptimizerTool
+from .index.presentation import TextPresentation
+from .schema import ObjectType
+from .schema import SchemaInspector
+from .sql import DbConnPool
+from .sql import SafeSqlDriver
+from .sql import SqlDriver
+from .sql import check_hypopg_installation_status
+from .sql import obfuscate_password
+from .top_queries import TopQueriesCalc
+
+logger = logging.getLogger(__name__)
+
+#: Environment variables consulted, in order, when no database URL is passed.
+DATABASE_URL_ENV_VARS = ("DATABASE_URI", "DATABASE_URL")
+
+#: Default statement timeout, in seconds, applied in restricted mode.
+DEFAULT_RESTRICTED_TIMEOUT = 30
+
+TuningMethod = Literal["dta", "llm"]
+SortBy = Literal["resources", "mean_time", "total_time"]
+
+
+class AccessMode(str, Enum):
+    """How much the client is allowed to do to the database.
+
+    Attributes:
+        UNRESTRICTED: Any statement runs as-is, including writes and DDL.
+        RESTRICTED: Statements are parsed and only read-only ones are allowed,
+            run inside a read-only transaction with a statement timeout.
+    """
+
+    UNRESTRICTED = "unrestricted"
+    RESTRICTED = "restricted"
+
+
+def resolve_database_url(database_url: Optional[str] = None) -> str:
+    """Return the database URL to connect to.
+
+    Falls back to the ``DATABASE_URI`` then ``DATABASE_URL`` environment
+    variables.
+
+    Raises:
+        InvalidArgumentError: If no URL was given and neither variable is set.
+    """
+    if database_url:
+        return database_url
+
+    for var in DATABASE_URL_ENV_VARS:
+        value = os.environ.get(var)
+        if value:
+            return value
+
+    raise InvalidArgumentError(
+        "No database URL provided. Pass one explicitly or set the " + " or ".join(DATABASE_URL_ENV_VARS) + " environment variable."
+    )
+
+
+class PgDebug:
+    """Inspect, diagnose and tune a PostgreSQL database.
+
+    The client owns a connection pool and exposes the analysis tools on top of
+    it. It connects lazily on first use, so the pool is only opened if a query
+    is actually run.
+
+    Example:
+        ```python
+        import asyncio
+        from pg_debug import AccessMode, PgDebug
+
+        async def main():
+            async with PgDebug("postgresql://localhost/mydb", access_mode=AccessMode.RESTRICTED) as pg:
+                for schema in await pg.list_schemas():
+                    print(schema["schema_name"])
+
+        asyncio.run(main())
+        ```
+    """
+
+    def __init__(
+        self,
+        database_url: Optional[str] = None,
+        access_mode: AccessMode | str = AccessMode.UNRESTRICTED,
+        timeout: int = DEFAULT_RESTRICTED_TIMEOUT,
+        pool: Optional[DbConnPool] = None,
+    ):
+        """
+        Args:
+            database_url: PostgreSQL connection URL. Defaults to the
+                ``DATABASE_URI`` or ``DATABASE_URL`` environment variable.
+            access_mode: ``unrestricted`` (default) allows any statement;
+                ``restricted`` allows only read-only statements.
+            timeout: Statement timeout in seconds, applied in restricted mode.
+            pool: An existing connection pool to use. When given, the client
+                does not close it on exit; its owner stays responsible for it.
+        """
+        self._database_url = database_url
+        self.access_mode = AccessMode(access_mode)
+        self.timeout = timeout
+        self._pool = pool if pool is not None else DbConnPool()
+        self._owns_pool = pool is None
+
+    @property
+    def database_url(self) -> str:
+        """The resolved connection URL."""
+        return resolve_database_url(self._database_url)
+
+    @property
+    def pool(self) -> DbConnPool:
+        """The underlying connection pool."""
+        return self._pool
+
+    async def connect(self) -> PgDebug:
+        """Open the connection pool and verify the database is reachable.
+
+        Calling this is optional; the client connects on first use. It is
+        useful to fail fast on a bad URL.
+
+        Raises:
+            ConnectionFailedError: If the database could not be reached.
+        """
+        try:
+            await self._pool.pool_connect(self.database_url)
+        except InvalidArgumentError:
+            raise
+        except Exception as e:
+            raise ConnectionFailedError(f"Could not connect to database: {obfuscate_password(str(e))}") from e
+        return self
+
+    async def close(self) -> None:
+        """Close the connection pool, unless it was supplied by the caller."""
+        if self._owns_pool:
+            await self._pool.close()
+
+    async def __aenter__(self) -> PgDebug:
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.close()
+
+    async def sql_driver(self) -> SqlDriver | SafeSqlDriver:
+        """Return a SQL driver appropriate for the configured access mode.
+
+        In restricted mode the driver rejects anything that is not read-only
+        and applies the configured statement timeout.
+        """
+        if not self._pool.is_valid:
+            await self.connect()
+
+        base_driver = SqlDriver(conn=self._pool)
+        if self.access_mode == AccessMode.RESTRICTED:
+            logger.debug("Using SafeSqlDriver with restrictions (RESTRICTED mode)")
+            return SafeSqlDriver(sql_driver=base_driver, timeout=self.timeout)
+
+        logger.debug("Using unrestricted SqlDriver (UNRESTRICTED mode)")
+        return base_driver
+
+    # -- Schema introspection ------------------------------------------------
+
+    async def list_schemas(self) -> List[Dict[str, Any]]:
+        """List all schemas in the database."""
+        return await SchemaInspector(await self.sql_driver()).list_schemas()
+
+    async def list_objects(self, schema_name: str, object_type: str | ObjectType = ObjectType.TABLE) -> List[Dict[str, Any]]:
+        """List objects of a given type (table, view, sequence, extension)."""
+        return await SchemaInspector(await self.sql_driver()).list_objects(schema_name, object_type)
+
+    async def get_object_details(
+        self,
+        schema_name: str,
+        object_name: str,
+        object_type: str | ObjectType = ObjectType.TABLE,
+    ) -> Dict[str, Any]:
+        """Describe a single database object, including columns and indexes."""
+        return await SchemaInspector(await self.sql_driver()).get_object_details(schema_name, object_name, object_type)
+
+    # -- Query execution -----------------------------------------------------
+
+    async def execute_sql(self, sql: str) -> List[Dict[str, Any]]:
+        """Run a SQL statement and return its rows.
+
+        Args:
+            sql: The statement to run. In restricted mode anything that is not
+                read-only is rejected.
+
+        Returns:
+            One dict per row. Statements that produce no result set (DDL, for
+            example) return an empty list.
+        """
+        driver = await self.sql_driver()
+        rows = await driver.execute_query(sql)  # type: ignore[arg-type]
+        return [row.cells for row in rows] if rows else []
+
+    async def explain_query(
+        self,
+        sql: str,
+        analyze: bool = False,
+        hypothetical_indexes: Optional[List[Dict[str, Any]]] = None,
+    ) -> ExplainPlanArtifact:
+        """Return the execution plan for a query.
+
+        Args:
+            sql: The query to explain.
+            analyze: Run the query and report real execution statistics rather
+                than estimates. Slower, but more accurate.
+            hypothetical_indexes: Indexes to simulate without creating them,
+                each a dict with ``table``, ``columns`` and optionally ``using``
+                (default ``btree``). Requires the HypoPG extension and cannot be
+                combined with ``analyze``.
+
+        Returns:
+            The plan, whose ``to_text()`` renders a readable summary and whose
+            ``plan_tree`` exposes the parsed nodes.
+
+        Raises:
+            InvalidArgumentError: If ``analyze`` and ``hypothetical_indexes``
+                are combined.
+            ExtensionRequiredError: If hypothetical indexes are requested but
+                HypoPG is not installed.
+            ExplainPlanError: If PostgreSQL could not plan the query.
+        """
+        driver = await self.sql_driver()
+        explain_tool = ExplainPlanTool(sql_driver=driver)
+
+        if hypothetical_indexes:
+            if analyze:
+                raise InvalidArgumentError("Cannot use analyze and hypothetical indexes together.")
+
+            is_hypopg_installed, hypopg_message = await check_hypopg_installation_status(driver)
+            if not is_hypopg_installed:
+                raise ExtensionRequiredError("hypopg", hypopg_message)
+
+            result = await explain_tool.explain_with_hypothetical_indexes(sql, hypothetical_indexes)
+        elif analyze:
+            result = await explain_tool.explain_analyze(sql)
+        else:
+            result = await explain_tool.explain(sql)
+
+        if isinstance(result, ExplainPlanArtifact):
+            return result
+
+        message = result.to_text() if isinstance(result, ErrorResult) else "Error processing explain plan"
+        raise ExplainPlanError(message)
+
+    # -- Diagnostics ---------------------------------------------------------
+
+    async def analyze_db_health(
+        self,
+        health_type: str | HealthType | Iterable[str | HealthType] = HealthType.ALL,
+    ) -> Dict[str, str]:
+        """Run database health checks.
+
+        Args:
+            health_type: Which checks to run: ``index``, ``connection``,
+                ``vacuum``, ``sequence``, ``replication``, ``buffer``,
+                ``constraint`` or ``all`` (default). Accepts a comma-separated
+                string or an iterable.
+
+        Returns:
+            A mapping of check name to its finding.
+
+        Raises:
+            InvalidArgumentError: If an unknown health type is requested.
+        """
+        health_tool = DatabaseHealthTool(await self.sql_driver())
+        return await health_tool.run_checks(health_type)
+
+    async def get_top_queries(self, sort_by: SortBy = "resources", limit: int = 10) -> List[Dict[str, Any]]:
+        """Report the most expensive queries recorded by pg_stat_statements.
+
+        Args:
+            sort_by: ``resources`` (default) ranks by a blend of execution
+                time, buffer access and WAL volume; ``mean_time`` and
+                ``total_time`` rank by execution time.
+            limit: Number of queries to return. Ignored when ranking by
+                ``resources``, which reports every query above its threshold.
+
+        Returns:
+            One dict of statistics per query.
+
+        Raises:
+            InvalidArgumentError: If ``sort_by`` is not a valid criterion.
+            ExtensionRequiredError: If pg_stat_statements is not installed.
+        """
+        top_queries_tool = TopQueriesCalc(sql_driver=await self.sql_driver())
+
+        if sort_by == "resources":
+            return await top_queries_tool.get_top_resource_queries()
+        if sort_by in ("mean_time", "total_time"):
+            return await top_queries_tool.get_top_queries_by_time(limit=limit, sort_by="mean" if sort_by == "mean_time" else "total")
+
+        raise InvalidArgumentError("Invalid sort criteria. Please use 'resources', 'mean_time' or 'total_time'.")
+
+    # -- Index tuning --------------------------------------------------------
+
+    async def analyze_workload_indexes(self, max_index_size_mb: int = 10000, method: TuningMethod = "dta") -> Dict[str, Any]:
+        """Recommend indexes for the workload recorded by pg_stat_statements.
+
+        Args:
+            max_index_size_mb: Total size budget for recommended indexes.
+            method: ``dta`` (default) searches index combinations against the
+                planner; ``llm`` asks a language model for candidates and
+                requires the ``llm`` extra.
+
+        Returns:
+            A dict with ``summary``, ``recommendations`` and ``query_impact``,
+            or an ``error`` key when the analysis could not be completed.
+        """
+        presentation = await self._index_tuning_presentation(method)
+        return await presentation.analyze_workload(max_index_size_mb=max_index_size_mb)
+
+    async def analyze_query_indexes(
+        self,
+        queries: List[str],
+        max_index_size_mb: int = 10000,
+        method: TuningMethod = "dta",
+    ) -> Dict[str, Any]:
+        """Recommend indexes for a specific list of queries.
+
+        Args:
+            queries: The queries to tune for, at most
+                ``MAX_NUM_INDEX_TUNING_QUERIES``.
+            max_index_size_mb: Total size budget for recommended indexes.
+            method: ``dta`` (default) or ``llm``.
+
+        Returns:
+            A dict with ``summary``, ``recommendations`` and ``query_impact``,
+            or an ``error`` key when the analysis could not be completed.
+
+        Raises:
+            InvalidArgumentError: If no queries are given, or too many.
+        """
+        if not queries:
+            raise InvalidArgumentError("Please provide a non-empty list of queries to analyze.")
+        if len(queries) > MAX_NUM_INDEX_TUNING_QUERIES:
+            raise InvalidArgumentError(f"Please provide a list of up to {MAX_NUM_INDEX_TUNING_QUERIES} queries to analyze.")
+
+        presentation = await self._index_tuning_presentation(method)
+        return await presentation.analyze_queries(queries=queries, max_index_size_mb=max_index_size_mb)
+
+    async def _index_tuning_presentation(self, method: TuningMethod) -> TextPresentation:
+        if method not in ("dta", "llm"):
+            raise InvalidArgumentError(f"Unknown index tuning method: {method}. Valid values are: dta, llm.")
+
+        driver = await self.sql_driver()
+        index_tuning = DatabaseTuningAdvisor(driver) if method == "dta" else LLMOptimizerTool(driver)
+        return TextPresentation(driver, index_tuning)
+
+
+__all__ = [
+    "DATABASE_URL_ENV_VARS",
+    "AccessMode",
+    "PgDebug",
+    "resolve_database_url",
+]

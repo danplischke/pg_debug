@@ -1,0 +1,191 @@
+# pg_debug
+
+PostgreSQL inspection, health checks and index tuning — as an async Python library with a CLI.
+
+`pg_debug` is an extraction of the analysis engine behind
+[crystaldba/postgres-mcp](https://github.com/crystaldba/postgres-mcp). The database
+work is the same; the MCP server layer has been replaced by a plain Python API and a
+`pg-debug` command, so the tooling can be used from scripts, tests, CI and the shell
+without an MCP client in the loop.
+
+## What it does
+
+- **Schema introspection** — list schemas, tables, views, sequences and extensions; describe an object's columns, constraints and indexes.
+- **Explain plans** — plan or `EXPLAIN ANALYZE` a query, including plans against *hypothetical* indexes that are never created (via [HypoPG](https://github.com/HypoPG/hypopg)).
+- **Health checks** — invalid/duplicate/bloated/unused indexes, connection utilization, transaction ID wraparound risk, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints.
+- **Top queries** — the most expensive queries recorded by `pg_stat_statements`, ranked by resource blend or by execution time.
+- **Index tuning** — recommend indexes for your recorded workload or for a specific set of queries, with estimated size and before/after planner costs.
+- **Access modes** — run unrestricted, or in a `restricted` mode that parses each statement, rejects anything that is not read-only, and runs it in a read-only transaction with a statement timeout.
+
+## Install
+
+```bash
+pip install pg-debug            # library + CLI
+pip install 'pg-debug[llm]'     # adds the optional LLM index tuning method
+```
+
+Requires Python 3.12+ and PostgreSQL 12+.
+
+Some features need server-side extensions: index tuning and hypothetical-index plans
+need `hypopg`, and workload analysis and `top-queries` need `pg_stat_statements`. The
+library tells you which one is missing and how to install it.
+
+## CLI
+
+```bash
+export DATABASE_URI=postgresql://user:pass@localhost:5432/mydb   # or pass -d/--database-url
+
+pg-debug schemas
+pg-debug objects public --type table
+pg-debug describe public.orders
+
+pg-debug execute "SELECT count(*) FROM orders"
+pg-debug explain "SELECT * FROM orders WHERE user_id = 42"
+pg-debug explain "SELECT * FROM orders WHERE user_id = 42" -i 'orders(user_id)'
+pg-debug explain --analyze "SELECT * FROM orders LIMIT 10"
+
+pg-debug health
+pg-debug health --type index,vacuum
+pg-debug top-queries --sort-by mean_time --limit 5
+
+pg-debug tune-queries "SELECT * FROM orders WHERE user_id = 42"
+pg-debug tune-workload --max-index-size-mb 500
+```
+
+Global options:
+
+| Option | Meaning |
+| --- | --- |
+| `-d, --database-url` | Connection URL. Defaults to `$DATABASE_URI`, then `$DATABASE_URL`. |
+| `--access-mode` | `unrestricted` (default) or `restricted` (read-only statements only). |
+| `--timeout` | Statement timeout in seconds, applied in restricted mode (default 30). |
+| `--json` | Emit raw JSON instead of formatted text. |
+| `-v, --verbose` | Log at INFO, or DEBUG when repeated. |
+
+SQL arguments accept `-` to read the statement from stdin:
+
+```bash
+pg-debug --json explain - < slow_query.sql | jq '.Plan."Total Cost"'
+```
+
+Exit status is `0` on success, `1` on error, `2` on a usage error.
+
+## Library
+
+Everything is async and returns plain Python data structures.
+
+```python
+import asyncio
+from pg_debug import AccessMode, PgDebug
+
+async def main():
+    async with PgDebug("postgresql://localhost/mydb", access_mode=AccessMode.RESTRICTED) as pg:
+        for schema in await pg.list_schemas():
+            print(schema["schema_name"], schema["schema_type"])
+
+        plan = await pg.explain_query(
+            "SELECT * FROM orders WHERE user_id = $1",
+            hypothetical_indexes=[{"table": "orders", "columns": ["user_id"]}],
+        )
+        print(plan.to_text())          # readable summary
+        print(plan.plan_tree.total_cost)  # parsed plan nodes
+
+        for check, finding in (await pg.analyze_db_health("index,vacuum")).items():
+            print(f"{check}: {finding}")
+
+        result = await pg.analyze_query_indexes(["SELECT * FROM orders WHERE user_id = 42"])
+        for rec in result["recommendations"]:
+            print(rec["index_definition"], rec["index_estimated_size"])
+
+asyncio.run(main())
+```
+
+The client connects lazily on first use; `await pg.connect()` up front fails fast on a
+bad URL instead.
+
+### Return values
+
+| Method | Returns |
+| --- | --- |
+| `list_schemas()` | `list[dict]` — one per schema |
+| `list_objects(schema, object_type="table")` | `list[dict]` — one per object |
+| `get_object_details(schema, name, object_type="table")` | `dict` with `basic`, `columns`, `constraints`, `indexes` |
+| `execute_sql(sql)` | `list[dict]` — one per row, empty for statements with no result set |
+| `explain_query(sql, analyze=False, hypothetical_indexes=None)` | `ExplainPlanArtifact` |
+| `analyze_db_health(health_type="all")` | `dict[str, str]` — check name to finding |
+| `get_top_queries(sort_by="resources", limit=10)` | `list[dict]` — one per query |
+| `analyze_workload_indexes(...)` / `analyze_query_indexes(queries, ...)` | `dict` with `summary`, `recommendations`, `query_impact` |
+
+Failures raise instead of returning error strings. All exceptions derive from
+`PgDebugError`: `ConnectionFailedError`, `InvalidArgumentError`,
+`ExtensionRequiredError` (carries the missing `extension` name),
+`ExplainPlanError`, `QueryError`, `MissingDependencyError`.
+
+### Using the tools directly
+
+If you already manage your own connection, the underlying tools take a `SqlDriver` and
+can be used without `PgDebug`:
+
+```python
+from pg_debug import DatabaseHealthTool, SchemaInspector, SqlDriver, TopQueriesCalc
+from pg_debug.explain import ExplainPlanTool
+from pg_debug.index import DatabaseTuningAdvisor, TextPresentation
+
+driver = SqlDriver(engine_url="postgresql://localhost/mydb")
+checks = await DatabaseHealthTool(driver).run_checks("buffer")
+```
+
+### Known limitations
+
+- Index tuning resolves table names through the connection's `search_path`. To
+  tune queries against tables in another schema, put that schema on the
+  `search_path` (for example
+  `postgresql://host/db?options=-csearch_path%3Dreporting,public`) — a
+  schema-qualified name alone yields no candidates.
+- `analyze_query_indexes` (and `tune-queries`) accepts at most
+  `MAX_NUM_INDEX_TUNING_QUERIES` (10) queries. `analyze_workload_indexes`
+  (`tune-workload`) selects from `pg_stat_statements` instead: up to 100
+  queries with at least 50 calls and a mean execution time of 5 ms or more.
+
+### Environment variables
+
+| Variable | Effect |
+| --- | --- |
+| `DATABASE_URI`, `DATABASE_URL` | Default connection URL. |
+| `PG_DEBUG_INCLUDE_TRACE` | Set to `true` to include the index advisor's internal trace under `_trace` in tuning results. |
+| `OPENAI_API_KEY` | Used by the optional `llm` index tuning method. |
+
+## Development
+
+```bash
+uv sync --all-extras          # install into .venv
+uv run ruff check .
+uv run pytest tests/unit      # unit tests, no database needed
+uv run pytest tests/integration   # spins up PostgreSQL containers, needs Docker
+```
+
+Some tests under `tests/unit` also start containers (`test_explain_plan_real_db.py`,
+`test_db_conn_pool.py`); see `tests/README.md`.
+
+## Relationship to postgres-mcp
+
+The database logic — safe SQL parsing, the explain tooling, health calculators and the
+Database Tuning Advisor — comes from
+[crystaldba/postgres-mcp](https://github.com/crystaldba/postgres-mcp) (MIT, Copyright (c)
+2025 Crystal Corp.) and is redistributed here under the same license. Changes made
+during extraction:
+
+- The MCP server, its tool registrations and transports are gone; `PgDebug` and the
+  `pg-debug` command take their place.
+- Tools return structured data instead of MCP text content, and raise exceptions
+  instead of returning `"Error: ..."` strings.
+- `TopQueriesCalc` returns rows rather than a stringified list; `DatabaseHealthTool`
+  gained `run_checks()`, which returns one entry per check (`health()` still renders
+  the same text report).
+- The LLM tuning method's dependencies moved to the optional `llm` extra.
+- `POSTGRES_MCP_INCLUDE_LANGFUSE_TRACE` became `PG_DEBUG_INCLUDE_TRACE`, and now
+  defaults to off.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
