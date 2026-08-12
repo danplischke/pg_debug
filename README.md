@@ -142,6 +142,20 @@ measures with, so the two cannot disagree: a table it calls optimally packed is
 one the bloat check will not accuse of padding. On a table of fixed-width
 columns its prediction is exact, page for page.
 
+Every statement pg_debug issues is prefixed with a `/* pg_debug */` comment,
+in both access modes, and its own reports exclude anything carrying it —
+`top-queries` and index tuning report the workload, not the tool looking at it.
+This applies to statements you run *through* pg_debug as well: a query sent
+with `pg-debug execute` or `explain` is the operator poking at the database,
+not the application, and it is excluded on the same grounds.
+
+The marker identifies a statement rather than partitioning one.
+`pg_stat_statements` groups by a hash of the parsed statement, and comments are
+no part of that hash, so a query pg_debug and your application both run shares
+a single entry whose recorded text is whichever of the two ran first. In
+practice this only reaches queries as generic as `SELECT 1`; pg_debug's
+catalog reads are not ones an application issues.
+
 Index tuning reads its workload from `pg_stat_statements`, where not every
 entry is usable: a role that is neither a superuser nor a member of
 `pg_read_all_stats` sees `<insufficient privilege>` in place of other roles'

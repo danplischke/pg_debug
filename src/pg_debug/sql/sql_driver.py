@@ -22,6 +22,17 @@ from typing_extensions import LiteralString
 
 logger = logging.getLogger(__name__)
 
+#: Prefixed to every statement this library issues, so its own bookkeeping can
+#: be told apart from the workload it is reporting on. PostgreSQL keeps a
+#: leading comment in the text ``pg_stat_statements`` records, which is what
+#: makes this work at all.
+#:
+#: It identifies a statement; it does not partition one. ``pg_stat_statements``
+#: groups by a hash of the parsed statement, and comments are no part of that,
+#: so a query pg_debug and the application both run shares a single entry whose
+#: recorded text is whichever of the two arrived first.
+QUERY_MARKER = "/* pg_debug */"
+
 
 def obfuscate_password(text: str | None) -> str | None:
     """
@@ -85,10 +96,10 @@ def build_session_setup(
         if schemas:
             # Identifier quotes each schema, which is also correct for the
             # special "$user" entry.
-            statements.append(SQL("SET search_path TO {}").format(SQL(", ").join(Identifier(s) for s in schemas)))
+            statements.append(SQL(QUERY_MARKER + " SET search_path TO {}").format(SQL(", ").join(Identifier(s) for s in schemas)))
 
     if statement_timeout is not None:
-        statements.append(SQL("SET statement_timeout = {}").format(Literal(f"{int(statement_timeout)}s")))
+        statements.append(SQL(QUERY_MARKER + " SET statement_timeout = {}").format(Literal(f"{int(statement_timeout)}s")))
 
     return statements or None
 
@@ -157,7 +168,7 @@ class DbConnPool:
             # Test the connection pool by executing a simple query
             async with self.pool.connection() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute("SELECT 1")
+                    await cursor.execute(f"{QUERY_MARKER} SELECT 1")
 
             self._is_valid = True
             self._last_error = None
@@ -301,6 +312,8 @@ class SqlDriver:
                 if self.conn is None:
                     raise ValueError("Connection not established")
 
+            query = self.tagged(query)
+
             # Inside session(), every statement goes to the pinned connection.
             if self._pinned_connection is not None:
                 try:
@@ -336,6 +349,19 @@ class SqlDriver:
                 self.conn = None
 
             raise e
+
+    @staticmethod
+    def tagged(query: LiteralString) -> LiteralString:
+        """Mark a statement as this library's own.
+
+        Applied to everything the driver issues, in both access modes: a
+        statement pg_debug ran to answer a question about the workload is not
+        part of that workload, and without the marker there is no way to tell
+        the two apart afterwards.
+        """
+        if QUERY_MARKER in query:
+            return query
+        return f"{QUERY_MARKER} {query}"
 
     async def _reset_pinned_transaction(self) -> None:
         """Clear an aborted transaction so the pinned session stays usable."""

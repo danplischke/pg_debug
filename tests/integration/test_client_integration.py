@@ -11,6 +11,8 @@ not need Docker, so they can run against any server you already have:
 import asyncio
 import json
 import os
+from typing import LiteralString
+from typing import cast
 
 import psycopg
 import pytest
@@ -648,9 +650,12 @@ async def test_top_queries_sampling_measures_only_the_interval(pg, tuning_table)
     marker = f"SELECT count(*) FROM {tuning_table} WHERE status = 'sampled'"
 
     async def keep_running(stop: asyncio.Event):
-        async with PgDebug(DATABASE_URI) as worker:
+        # A plain connection, not the client: everything pg_debug runs is
+        # marked as its own and excluded from its own reports, so driving the
+        # workload through it would measure nothing.
+        async with await psycopg.AsyncConnection.connect(DATABASE_URI or "") as worker:
             while not stop.is_set():
-                await worker.execute_sql(marker)
+                await worker.execute(cast(LiteralString, marker))
 
     stop = asyncio.Event()
     workload = asyncio.create_task(keep_running(stop))
@@ -1063,3 +1068,69 @@ async def test_hypothetical_indexes_survive_a_failed_statement(pg):
         remaining = await driver.execute_query("SELECT count(*) AS n FROM hypopg()")
         assert remaining is not None
         assert remaining[0].cells["n"] == 1
+
+
+# -- Telling our own queries apart from the workload ------------------------
+
+
+@pytest.mark.asyncio
+async def test_our_own_queries_are_marked_in_pg_stat_statements(pg):
+    """A leading comment survives into the text pg_stat_statements records,
+    which is the whole basis for telling pg_debug's queries from the workload.
+    """
+    if not await has_extension(pg, "pg_stat_statements"):
+        pytest.skip("pg_stat_statements is not installed")
+
+    await pg.execute_sql("SELECT pg_stat_statements_reset()")
+    await pg.analyze_db_health("table")
+
+    rows = await pg.execute_sql("SELECT count(*) FILTER (WHERE query LIKE '/* pg\\_debug */%') AS tagged, count(*) AS total FROM pg_stat_statements")
+
+    assert rows[0]["tagged"] > 0, "the health check's own queries should be marked"
+    # Nothing should carry the marker twice, in either access mode.
+    doubled = await pg.execute_sql("SELECT count(*) AS n FROM pg_stat_statements WHERE query LIKE '/* pg\\_debug */ /* pg\\_debug */%'")
+    assert doubled[0]["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_restricted_mode_marks_queries_exactly_once(pg):
+    if not await has_extension(pg, "pg_stat_statements"):
+        pytest.skip("pg_stat_statements is not installed")
+
+    await pg.execute_sql("SELECT pg_stat_statements_reset()")
+    async with PgDebug(DATABASE_URI, access_mode=AccessMode.RESTRICTED) as restricted:
+        await restricted.analyze_db_health("table")
+
+    rows = await pg.execute_sql("SELECT count(*) AS n FROM pg_stat_statements WHERE query LIKE '/* pg\\_debug */ /* pg\\_debug */%'")
+
+    assert rows[0]["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_top_queries_reports_the_workload_and_not_pg_debug(pg):
+    """Without this the tool's own catalog reads take up slots in its own
+    top-N, and inflate the denominator every resource fraction is measured
+    against."""
+    if not await has_extension(pg, "pg_stat_statements"):
+        pytest.skip("pg_stat_statements is not installed")
+
+    await pg.execute_sql("SELECT pg_stat_statements_reset()")
+
+    # An application, on its own connection: anything run through the client is
+    # marked as ours, which is the point — a query pg_debug ran to answer a
+    # question about the workload is not part of that workload.
+    async with await psycopg.AsyncConnection.connect(DATABASE_URI or "") as app:
+        workload_query = f"SELECT count(*) FROM {SCHEMA}.orders WHERE status = 'paid'"
+        for _ in range(3):
+            await app.execute(workload_query)
+
+    # ...and a good deal of pg_debug's own traffic on top of it.
+    await pg.analyze_db_health("table")
+    await pg.review_data_model(schema=SCHEMA)
+
+    top = await pg.get_top_queries(sort_by="total_time", limit=20)
+    queries = [row["query"] for row in top]
+
+    assert any(f"{SCHEMA}.orders" in query for query in queries), "the workload query should be reported"
+    assert not any("/* pg_debug */" in query for query in queries), "our own queries should not be"
+    assert not any(query.strip().upper().startswith(("BEGIN", "COMMIT", "ROLLBACK")) for query in queries)

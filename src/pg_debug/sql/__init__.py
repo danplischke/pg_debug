@@ -12,8 +12,8 @@ from .extension_utils import reset_postgres_version_cache
 from .index import IndexDefinition
 from .index import split_table_reference
 from .index import table_identifier
-from .safe_sql import QUERY_MARKER
 from .safe_sql import SafeSqlDriver
+from .sql_driver import QUERY_MARKER
 from .sql_driver import DbConnPool
 from .sql_driver import SqlDriver
 from .sql_driver import obfuscate_password

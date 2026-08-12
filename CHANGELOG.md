@@ -136,6 +136,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Every statement pg_debug issues now carries the `/* pg_debug */` marker, in
+  both access modes. Only `SafeSqlDriver` applied it before, so in the default
+  unrestricted mode the tool's own catalog reads were indistinguishable from
+  the workload — and `top-queries` duly reported them. The marker moves to
+  `SqlDriver`, where everything passes through, and `SafeSqlDriver` no longer
+  adds a second one.
+- `top-queries` excludes marked statements and transaction control in the
+  statement rather than after it, so pg_debug's own queries can neither take up
+  slots in a `LIMIT 10` nor inflate the denominator each resource fraction is
+  measured against. Note that statements run *through* pg_debug — `pg-debug
+  execute`, `explain` — are marked too, and so no longer appear in
+  `top-queries`.
 - The `llm` tuning method's model can be set with `--llm-model`, the
   `llm_model` client argument, or per call, in addition to
   `PG_DEBUG_LLM_MODEL`.

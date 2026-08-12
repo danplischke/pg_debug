@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from pg_debug.sql import QUERY_MARKER
 from pg_debug.sql import DbConnPool
 from pg_debug.sql import SafeSqlDriver
 from pg_debug.sql import SqlDriver
@@ -44,9 +45,11 @@ class RecordingDriver(SqlDriver):
     def __init__(self, conn):
         super().__init__(conn=conn)
         self.connections_used = []
+        self.executed = []
 
     async def _execute_with_connection(self, connection, query, params, force_readonly):
         self.connections_used.append(connection)
+        self.executed.append(query)
         return None
 
 
@@ -167,7 +170,8 @@ class FailingDriver(SqlDriver):
         self.rollbacks = 0
 
     async def _execute_with_connection(self, connection, query, params, force_readonly):
-        if query == self.failing_query:
+        # The statement arrives tagged, so match on what the caller asked for.
+        if self.failing_query in query:
             raise RuntimeError("operator does not exist: information_schema.character_data = integer")
         return None
 
@@ -216,3 +220,39 @@ async def test_a_failure_outside_a_session_needs_no_reset():
         await driver.execute_query("BOOM")
 
     assert driver.rollbacks == 0
+
+
+# -- Tagging ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_every_statement_is_tagged_as_ours(driver):
+    """Unrestricted mode is the default, and a statement pg_debug ran to answer
+    a question about the workload is not part of that workload."""
+    await driver.execute_query("SELECT 1")
+
+    assert driver.executed == ["/* pg_debug */ SELECT 1"]
+
+
+@pytest.mark.asyncio
+async def test_a_statement_is_not_tagged_twice(driver):
+    """SafeSqlDriver used to tag, and delegates to this driver, which now does."""
+    await driver.execute_query("/* pg_debug */ SELECT 1")
+
+    assert driver.executed == ["/* pg_debug */ SELECT 1"]
+
+
+@pytest.mark.asyncio
+async def test_restricted_mode_tags_exactly_once():
+    inner = RecordingDriver(RotatingConnPool())
+    safe = SafeSqlDriver(sql_driver=inner)
+
+    await safe.execute_query("SELECT 1")
+
+    assert inner.executed == ["/* pg_debug */ SELECT 1"]
+
+
+def test_the_marker_leads_the_statement():
+    """PostgreSQL keeps a leading comment in the text pg_stat_statements
+    records; a marker placed elsewhere would be harder to match on."""
+    assert SqlDriver.tagged("SELECT 1").startswith(QUERY_MARKER)

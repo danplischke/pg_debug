@@ -193,6 +193,12 @@ yesterday means the counters are young, not that the index is dead — check
 `metrics.max_scans` and how long statistics have been accumulating. Cache hit
 rate on an idle test database is meaningless.
 
+pg_debug marks every statement it runs with a `/* pg_debug */` comment and
+excludes marked statements from `top-queries` and from index tuning, so its own
+catalog reads never appear in its own reports. Queries you run *through* it —
+`pg-debug execute`, `explain` — are marked too, so do not expect them to turn
+up in `top-queries` afterwards.
+
 ### When tuning reports fewer queries than expected
 
 The workload comes from `pg_stat_statements` and not every entry can be used.

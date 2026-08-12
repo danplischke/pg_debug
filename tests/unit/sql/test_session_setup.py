@@ -5,12 +5,18 @@ import pytest
 
 from pg_debug import AccessMode
 from pg_debug import PgDebug
+from pg_debug.sql import QUERY_MARKER
 from pg_debug.sql.sql_driver import DbConnPool
 from pg_debug.sql.sql_driver import build_session_setup
 
 
 def rendered(statements):
-    return [statement.as_string(None) for statement in statements or []]
+    """The statements as SQL, without the marker every statement carries.
+
+    Tagging is asserted on its own below; these tests are about what the
+    settings render to.
+    """
+    return [statement.as_string(None).replace(f"{QUERY_MARKER} ", "") for statement in statements or []]
 
 
 def test_no_session_setup_by_default():
@@ -59,7 +65,7 @@ async def test_pool_configures_each_connection():
 
     await pool._configure_connection(conn)
 
-    assert [call.args[0].as_string(None) for call in conn.execute.call_args_list] == [
+    assert rendered([call.args[0] for call in conn.execute.call_args_list]) == [
         'SET search_path TO "reporting"',
         "SET statement_timeout = '5s'",
     ]
@@ -105,3 +111,11 @@ def test_client_does_not_reconfigure_a_supplied_pool():
     assert pg.pool is supplied
     assert supplied.search_path is None
     assert supplied.statement_timeout is None
+
+
+def test_session_setup_is_marked_as_ours():
+    """These run on every pooled connection; unmarked they look like workload."""
+    statements = build_session_setup(search_path="public", statement_timeout=5)
+
+    assert statements is not None
+    assert all(statement.as_string(None).startswith(QUERY_MARKER) for statement in statements)

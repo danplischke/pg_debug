@@ -23,6 +23,21 @@ PG_STAT_STATEMENTS = "pg_stat_statements"
 #: Statement keywords that only ever describe transaction bookkeeping.
 _TRANSACTION_CONTROL = frozenset({"BEGIN", "COMMIT", "ROLLBACK", "END", "START", "SAVEPOINT", "RELEASE"})
 
+
+def _workload_only() -> str:
+    """SQL for "this row is the workload, not pg_debug's own bookkeeping".
+
+    Applied in the statement rather than after it, so that pg_debug's own
+    queries cannot take up half of a ``LIMIT 10``. The marker covers everything
+    the driver runs; transaction control has to be matched by keyword, because
+    a bare BEGIN issued by the driver carries no comment of its own.
+    """
+    # An underscore is a LIKE wildcard, and the marker contains one.
+    marker = QUERY_MARKER.replace("_", r"\_")
+    keywords = ", ".join(f"'{keyword}'" for keyword in sorted(_TRANSACTION_CONTROL))
+    return f"query NOT LIKE '{marker}%' AND upper(split_part(btrim(query), ' ', 1)) NOT IN ({keywords})"
+
+
 install_pg_stat_statements_message = (
     "The pg_stat_statements extension is required to "
     "report slow queries, but it is not currently "
@@ -154,12 +169,11 @@ class TopQueriesCalc:
         pg_version = await get_postgres_version(self.sql_driver)
         cols = _get_pg_stat_statements_columns(pg_version)
 
-        # Marked so the snapshot query itself can be filtered out of its own
-        # results; SafeSqlDriver marks everything it runs the same way.
+        # The driver marks this — and everything else it runs — so the snapshot
+        # query is filtered out of its own results by _is_own_bookkeeping.
         query = cast(
             LiteralString,
             f"""
-            {QUERY_MARKER}
             SELECT
                 queryid,
                 userid,
@@ -281,6 +295,7 @@ class TopQueriesCalc:
                     {cols.mean_time},
                     rows
                 FROM pg_stat_statements
+                WHERE {_workload_only()}
                 ORDER BY {order_by_column} DESC
                 LIMIT {{}};
             """,
@@ -345,6 +360,9 @@ class TopQueriesCalc:
                             AS shared_blks_dirtied_frac,
                         {cols.wal_bytes_frac}
                     FROM pg_stat_statements
+                    -- Before the window functions: our own queries in the
+                    -- denominator would dilute every fraction below.
+                    WHERE {_workload_only()}
                 )
                 SELECT
                     query,
