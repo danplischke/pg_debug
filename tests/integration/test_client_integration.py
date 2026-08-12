@@ -299,6 +299,48 @@ async def test_table_bloat_leaves_a_freshly_loaded_table_alone(pg):
 
 
 @pytest.mark.asyncio
+async def test_table_bloat_accounts_for_alignment_padding(pg):
+    """Column order changes the row width, and the estimate has to follow it.
+
+    Every column here is a fixed width, so a correct estimate matches the
+    table exactly. Summing the column widths instead of laying them out would
+    miss the padding between them and report this table as bloated.
+    """
+    table = f"{SCHEMA}.padded"
+    await pg.execute_sql(
+        f"""
+        CREATE TABLE {table} (
+            a text,          -- short varlena: unaligned
+            b timestamptz,   -- forces padding up to an 8-byte boundary
+            c integer,
+            d bigint,        -- and again
+            e boolean,
+            f text
+        )
+        """
+    )
+    await pg.execute_sql(f"INSERT INTO {table} SELECT repeat('x', 40), now(), i, i, i % 2 = 0, repeat('y', 12) FROM generate_series(1, 40000) i")
+    await pg.execute_sql(f"ANALYZE {table}")
+
+    check = await TableBloatCalc(await pg.sql_driver()).table_bloat_check(min_bloat_bytes=0, min_bloat_percent=0.0)
+
+    assert not [f for f in check.findings if f["table"] == "padded"], "a table with no dead space was reported as bloated"
+
+
+@pytest.mark.asyncio
+async def test_table_bloat_respects_a_non_default_fillfactor(pg):
+    """Deliberately leaving 30% of each page free is not 30% bloat."""
+    table = f"{SCHEMA}.roomy"
+    await pg.execute_sql(f"CREATE TABLE {table} (a bigint, b timestamptz, c integer) WITH (fillfactor = 70)")
+    await pg.execute_sql(f"INSERT INTO {table} SELECT i, now(), i FROM generate_series(1, 60000) i")
+    await pg.execute_sql(f"ANALYZE {table}")
+
+    check = await TableBloatCalc(await pg.sql_driver()).table_bloat_check(min_bloat_bytes=0, min_bloat_percent=0.0)
+
+    assert not [f for f in check.findings if f["table"] == "roomy"]
+
+
+@pytest.mark.asyncio
 async def test_table_bloat_check_runs_in_restricted_mode(pg):
     """The estimate is a plain SELECT, so it has to pass the safe-SQL parser."""
     restricted = PgDebug(DATABASE_URI, access_mode="restricted")

@@ -34,9 +34,12 @@ logger = logging.getLogger(__name__)
 # default to EXECUTE for PUBLIC, and hypopg() exposes both columns needed here.
 HYPOTHETICAL_INDEX_SIZES_SQL = "SELECT indexname AS index_name, hypopg_relation_size(indexrelid) AS index_size FROM hypopg();"
 
-# --- Data Classes ---
+#: Below this average width, an unbounded text column holds short strings — a
+#: status flag, a country code — and warning that its index rows might not fit
+#: would put a meaningless warning on nearly every text column.
+MIN_TEXT_WIDTH_TO_WARN = 16
 
-logger = logging.getLogger(__name__)
+# --- Data Classes ---
 
 
 class DatabaseTuningAdvisor(IndexTuningBase):
@@ -494,13 +497,21 @@ class DatabaseTuningAdvisor(IndexTuningBase):
 
             # A row can answer for more than one candidate table reference, for
             # example when a query mentions both "orders" and "public.orders".
+            if not potential_long:
+                continue
+
             for table in self._matching_references(references, row.cells["table_schema"], row.cells["table_name"]):
-                # Use avg_width from pg_stats as a heuristic - if it's high, likely contains long text
-                if potential_long and (avg_width is None or avg_width > max_text_length * 0.4):
+                # avg_width from pg_stats is the heuristic: the column's type
+                # allows arbitrarily long values, but what matters is whether
+                # the values actually are long.
+                if avg_width is None or avg_width > max_text_length * 0.4:
                     problematic_columns.add((table, column))
                     logger.debug(f"Identified potentially long text column: {table}.{column} (avg_width: {avg_width})")
-                elif potential_long:
+                elif avg_width > MIN_TEXT_WIDTH_TO_WARN:
                     potential_problematic_columns.add((table, column))
+                # Anything narrower is a short string in an unbounded column —
+                # a status flag, a country code. Warning about those would put
+                # a warning on nearly every text column and mean nothing.
 
         # Filter candidates based on column information
         filtered_candidates = []

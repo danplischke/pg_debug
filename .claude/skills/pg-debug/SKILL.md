@@ -180,8 +180,10 @@ pg-debug --json health | jq 'to_entries | map(select(.value.healthy == false))'
 
 `table` estimates bloat from `pg_stats` and `pg_class`, so it needs no
 extension, and reports a table only when it wastes at least 100 MB *and* at
-least 20% of its size. The estimate ignores inter-column padding and so reads a
-few percent high; `bloat_percent` in the 20-30% range on a busy table is
+least 20% of its size. It models column alignment and `fillfactor`, so a
+healthy table estimates exactly — but it reads a few percent high on tables
+with variable-width columns (`text`, `numeric`), where `pg_stats` records only
+an average width. `bloat_percent` in the 20-30% range on a busy table is
 usually normal churn, not a reason to `VACUUM FULL`. Confirm with `pgstattuple`
 before recommending a rewrite, and check the vacuum settings first — bloat that
 keeps coming back is an autovacuum problem, not a one-off cleanup.

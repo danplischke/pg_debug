@@ -192,9 +192,10 @@ class TextPresentation:
             }
             if rec.potential_problematic_reason == "long_text_column":
                 rec_dict["warning"] = (
-                    "This index is potentially problematic because it includes a long text column. "
-                    "You might not be able to create this index if the index row size becomes too large "
-                    "(i.e., more than 8191 bytes)."
+                    "This index includes a text column with no length limit. A btree entry has to fit "
+                    "in roughly 2704 bytes — about a third of a page — so CREATE INDEX will fail on any "
+                    "row whose values are longer than that. Consider indexing an expression over the "
+                    "column instead, such as left(col, 100) or md5(col)."
                 )
             elif rec.potential_problematic_reason:
                 rec_dict["warning"] = f"This index is potentially problematic because it includes a {rec.potential_problematic_reason} column."

@@ -93,6 +93,36 @@ def test_only_ordinary_and_materialized_relations_are_measured():
     assert "c.relkind IN ('r', 'm')" in TABLE_BLOAT_SQL
 
 
+def test_columns_are_laid_out_in_order_rather_than_summed():
+    """Summing widths ignores the padding between columns and invents bloat."""
+    assert "WITH RECURSIVE" in TABLE_BLOAT_SQL
+    assert "ORDER BY a.attnum" in TABLE_BLOAT_SQL
+    assert "t.typalign" in TABLE_BLOAT_SQL
+    # Each column is padded forward to its own alignment boundary.
+    assert "ceil(l.data_end / c.align_to) * c.align_to" in TABLE_BLOAT_SQL
+
+
+def test_a_short_varlena_is_treated_as_unaligned():
+    """PostgreSQL stores one with a 1-byte header and no padding."""
+    assert "t.typlen = -1" in TABLE_BLOAT_SQL
+    assert "THEN 1" in TABLE_BLOAT_SQL
+
+
+def test_fillfactor_is_taken_from_the_table_options():
+    """A table set to fill 70% of each page is not 30% bloated."""
+    assert "fillfactor=%" in TABLE_BLOAT_SQL
+    assert "e.fillfactor / 100" in TABLE_BLOAT_SQL
+
+
+def test_a_page_holds_whole_rows_only():
+    assert "floor((e.block_size" in TABLE_BLOAT_SQL
+
+
+def test_tables_with_an_unanalyzed_column_are_skipped():
+    """Their width would be a guess, and the guess would read as bloat."""
+    assert "HAVING bool_and(analyzed)" in TABLE_BLOAT_SQL
+
+
 def test_table_is_one_of_the_health_types():
     assert HealthType.TABLE in HealthType.parse("all")
     assert HealthType.parse("table") == {HealthType.TABLE}

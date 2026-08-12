@@ -103,11 +103,15 @@ Health checks are `index`, `connection`, `vacuum`, `sequence`, `replication`,
 `buffer`, `constraint`, `statistics`, `table` and `all`.
 
 `table` estimates how much of each table's heap holds no live rows, from
-`pg_stats` and `pg_class` — no extension needed. A table is reported only when
-it wastes at least 100 MB *and* at least 20% of its size, so ordinary free
-space in a large table is not flagged. The estimate does not model the padding
-between columns, so it reads a few percent high even on a freshly loaded table;
-`pgstattuple` gives the exact figure at the cost of scanning the table.
+`pg_stats` and `pg_class` — no extension needed. It builds a row the way
+PostgreSQL does, padding each column forward to its type's alignment boundary
+and honouring the table's `fillfactor`, so a table with nothing wrong estimates
+exactly. A table is reported only when it wastes at least 100 MB *and* at least
+20% of its size, so ordinary free space in a large table is not flagged. What
+the estimate cannot see is the *spread* of a variable-width column, since
+`pg_stats` records only an average — such a table reads a few percent bloated
+when it is not. `pgstattuple` gives the exact figure at the cost of scanning
+the table.
 
 A hypothetical index `SPEC` is `table(column, ...)` with an optional method —
 `orders(user_id)`, `orders(user_id, created_at):btree`,

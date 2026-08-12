@@ -30,9 +30,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A complete CLI command reference and an "LLM tuning method" section in the
   README.
 - A `table` health check estimating how much of each table's heap holds no live
-  rows, from `pg_stats` and `pg_class` — no extension required. A table is
-  reported only when it wastes at least 100 MB *and* at least 20% of its size,
-  so ordinary free space in a large table is not flagged.
+  rows, from `pg_stats` and `pg_class` — no extension required. It builds a row
+  the way PostgreSQL does, walking the columns in `attnum` order and padding
+  each one forward to its type's alignment boundary, and it honours the table's
+  `fillfactor`, so a table with nothing wrong estimates exactly. Summing column
+  widths instead — as most catalog bloat queries do — understates the row width
+  and invents bloat on healthy tables: 11 bytes a row, a phantom 7.5%, on a
+  six-column table used in testing. A table is reported only when it wastes at
+  least 100 MB *and* at least 20% of its size, so ordinary free space in a large
+  table is not flagged.
 - `SqlDriver.session()`, an async context manager that pins one pooled
   connection so session state — hypothetical indexes, `SET`, temp tables,
   advisory locks — survives across calls. `SafeSqlDriver` proxies it, and index
@@ -53,7 +59,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `IndexRecommendation.__eq__` read an attribute that does not exist, so
   comparing two recommendations raised `AttributeError` instead of comparing
   them.
-
+- The "long text column" warning on index recommendations fired for every
+  `text` column, however short its values, which made it meaningless. It now
+  applies only where the values are actually long enough to matter. Its text
+  also cited the wrong limit: a btree entry has to fit in about 2704 bytes, not
+  8191.
 - The CLI rejected expression indexes: `-i 'users(lower(email))'` and anything
   with a comma inside a function call or quoted string failed to parse. The
   spec parser is now parenthesis- and quote-aware, so index columns accept the

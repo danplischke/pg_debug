@@ -484,6 +484,44 @@ async def test_filter_long_text_columns(async_sql_driver, create_dta):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "avg_width,expected_reason",
+    [
+        (5, None),  # 'open' / 'paid' — a status flag, not a long text column
+        (15, None),
+        (20, "long_text_column"),
+        (39, "long_text_column"),
+    ],
+)
+async def test_only_columns_that_hold_long_values_are_flagged(async_sql_driver, create_dta, avg_width, expected_reason):
+    """A text column is not a problem just for being a text column.
+
+    Warning on every one of them would put a warning on almost every
+    recommendation and so tell the reader nothing.
+    """
+    async_sql_driver.execute_query = AsyncMock(
+        return_value=[
+            MockCell(
+                {
+                    "table_schema": "public",
+                    "table_name": "users",
+                    "column_name": "label",
+                    "data_type": "text",
+                    "character_maximum_length": None,
+                    "avg_width": avg_width,
+                    "potential_long_text": True,
+                }
+            )
+        ]
+    )
+
+    filtered = await create_dta._filter_long_text_columns([IndexRecommendation("users", ("label",))], max_text_length=100)
+
+    assert len(filtered) == 1, "a column this narrow should still be indexable"
+    assert filtered[0].potential_problematic_reason == expected_reason
+
+
+@pytest.mark.asyncio
 async def test_basic_workload_analysis(async_sql_driver):
     """Test basic workload analysis functionality."""
     dta = DatabaseTuningAdvisor(
