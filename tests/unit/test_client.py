@@ -14,6 +14,7 @@ from pg_debug.errors import ConnectionFailedError
 from pg_debug.errors import ExplainPlanError
 from pg_debug.errors import ExtensionRequiredError
 from pg_debug.errors import InvalidArgumentError
+from pg_debug.model import RuleId
 from pg_debug.sql import DbConnPool
 from pg_debug.sql import SafeSqlDriver
 from pg_debug.sql import SqlDriver
@@ -213,6 +214,36 @@ async def test_explain_query_with_hypothetical_indexes(pg):
 
 
 # -- Health and top queries -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_review_data_model_passes_its_options_through(pg):
+    with (
+        patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
+        patch("pg_debug.client.ModelReviewer") as reviewer_cls,
+    ):
+        reviewer_cls.return_value.review = AsyncMock(return_value=[])
+
+        assert await pg.review_data_model(rules="naive_timestamp", schema="reporting", min_rows=50, proven_only=True) == []
+        reviewer_cls.return_value.review.assert_awaited_once_with(
+            rules="naive_timestamp",
+            schema="reporting",
+            min_rows=50,
+            proven_only=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_review_data_model_reviews_every_rule_by_default(pg):
+    with (
+        patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
+        patch("pg_debug.client.ModelReviewer") as reviewer_cls,
+    ):
+        reviewer_cls.return_value.review = AsyncMock(return_value=[])
+
+        await pg.review_data_model()
+
+        assert reviewer_cls.return_value.review.call_args.kwargs["rules"] is RuleId.ALL
 
 
 @pytest.mark.asyncio

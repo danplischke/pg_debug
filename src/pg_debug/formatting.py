@@ -14,6 +14,8 @@ from typing import List
 from typing import Mapping
 from typing import Sequence
 
+import humanize
+
 MAX_CELL_WIDTH = 60
 
 
@@ -210,6 +212,45 @@ def render_index_recommendations(result: Mapping[str, Any]) -> str:
     return "\n".join(lines).rstrip()
 
 
+def render_model_findings(findings: Sequence[Any]) -> str:
+    """Render a data-model review, grouped by the table each finding is about.
+
+    A finding is only worth reading if it can be acted on, so each one shows
+    its evidence and the statements that fix it. Candidates are marked as such
+    and carry the query that confirms them first.
+    """
+    if not findings:
+        return "No data model findings."
+
+    lines: List[str] = []
+    current_table = None
+    for finding in findings:
+        if finding.qualified_table != current_table:
+            current_table = finding.qualified_table
+            lines.append("")
+            lines.append(current_table)
+
+        marker = "" if finding.confidence.value == "proven" else "  (candidate)"
+        lines.append(f"  [{finding.severity.value}] {finding.rule.value}{marker}")
+        lines.append(f"    {finding.summary}")
+        lines.append(f"    {finding.detail}")
+        if finding.impact_bytes:
+            lines.append(f"    saves: {humanize.naturalsize(finding.impact_bytes)}")
+        if finding.verify:
+            lines.append(f"    verify: {finding.verify}")
+        for statement in finding.remediation:
+            lines.append(f"    {statement}")
+
+    counts: Dict[str, int] = {}
+    for finding in findings:
+        counts[finding.severity.value] = counts.get(finding.severity.value, 0) + 1
+    summary = ", ".join(f"{count} {severity}" for severity, count in counts.items())
+    lines.append("")
+    lines.append(f"{len(findings)} findings ({summary})")
+
+    return "\n".join(lines).strip("\n")
+
+
 __all__ = [
     "format_duration",
     "render_activity",
@@ -217,6 +258,7 @@ __all__ = [
     "render_health_checks",
     "render_index_recommendations",
     "render_mapping",
+    "render_model_findings",
     "render_object_details",
     "render_rows",
     "render_vacuum_progress",

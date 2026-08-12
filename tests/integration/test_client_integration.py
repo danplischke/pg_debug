@@ -683,3 +683,279 @@ def test_cli_reports_connection_failures(capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "secret" not in captured.err
+
+
+# -- Data model review ------------------------------------------------------
+
+MODEL_SCHEMA = "pgdebug_model_test"
+CLEAN_SCHEMA = "pgdebug_model_clean"
+
+
+@pytest_asyncio.fixture
+async def model_pg():
+    """Two schemas: one with exactly one instance of each defect, one with none.
+
+    The clean schema is the more important half. A rule that fires on a
+    well-built model is worse than no rule at all, so every rule has to stay
+    silent there while finding its own target next door.
+    """
+    client = PgDebug(DATABASE_URI)
+    for schema in (MODEL_SCHEMA, CLEAN_SCHEMA):
+        await client.execute_sql(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        await client.execute_sql(f"CREATE SCHEMA {schema}")
+
+    # The flawed model.
+    await client.execute_sql(f"CREATE TABLE {MODEL_SCHEMA}.parent (id bigint PRIMARY KEY, code text, UNIQUE (id, code))")
+    await client.execute_sql(f"INSERT INTO {MODEL_SCHEMA}.parent SELECT i, 'code' || i FROM generate_series(1, 1000) i")
+
+    # unindexed_foreign_key, and the four shapes that must not be flagged.
+    await client.execute_sql(f"CREATE TABLE {MODEL_SCHEMA}.fk_unindexed (id int PRIMARY KEY, parent_id bigint REFERENCES {MODEL_SCHEMA}.parent(id))")
+    # Rows, spread over the parents, so that whether the check scans them all is
+    # a question with an answer: pointing every row at one parent would make a
+    # sequential scan genuinely cheaper and the plan comparison meaningless.
+    await client.execute_sql(f"INSERT INTO {MODEL_SCHEMA}.fk_unindexed SELECT i, 1 + i %% 1000 FROM generate_series(1, 20000) i".replace("%%", "%"))
+    await client.execute_sql(f"CREATE TABLE {MODEL_SCHEMA}.fk_indexed (id int PRIMARY KEY, parent_id bigint REFERENCES {MODEL_SCHEMA}.parent(id))")
+    await client.execute_sql(f"CREATE INDEX ON {MODEL_SCHEMA}.fk_indexed (parent_id)")
+    await client.execute_sql(
+        f"CREATE TABLE {MODEL_SCHEMA}.fk_prefixed (id int PRIMARY KEY, parent_id bigint REFERENCES {MODEL_SCHEMA}.parent(id), at timestamptz)"
+    )
+    await client.execute_sql(f"CREATE INDEX ON {MODEL_SCHEMA}.fk_prefixed (parent_id, at)")
+    await client.execute_sql(
+        f"CREATE TABLE {MODEL_SCHEMA}.fk_reversed "
+        f"(id int PRIMARY KEY, a bigint, c text, FOREIGN KEY (a, c) REFERENCES {MODEL_SCHEMA}.parent(id, code))"
+    )
+    await client.execute_sql(f"CREATE INDEX ON {MODEL_SCHEMA}.fk_reversed (c, a)")
+
+    # foreign_key_type_mismatch: integer referencing bigint.
+    await client.execute_sql(f"CREATE TABLE {MODEL_SCHEMA}.fk_mismatched (id int PRIMARY KEY, parent_id int REFERENCES {MODEL_SCHEMA}.parent(id))")
+    await client.execute_sql(f"CREATE INDEX ON {MODEL_SCHEMA}.fk_mismatched (parent_id)")
+
+    # missing_primary_key.
+    await client.execute_sql(f"CREATE TABLE {MODEL_SCHEMA}.no_key (a int, b text)")
+
+    # naive_timestamp and blank_padded_char.
+    await client.execute_sql(f"CREATE TABLE {MODEL_SCHEMA}.naive (id int PRIMARY KEY, at timestamp, code char(10))")
+
+    # column_order_padding: boolean between bigints, seven bytes a row each time.
+    # Enough rows that the saving crosses the rule's minimum — below that it is
+    # not worth a table rewrite and the rule is right to stay quiet.
+    await client.execute_sql(f"CREATE TABLE {MODEL_SCHEMA}.unpacked (a boolean, b bigint, c boolean, d bigint, e boolean, f bigint)")
+    await client.execute_sql(f"INSERT INTO {MODEL_SCHEMA}.unpacked SELECT true, i, false, i, true, i FROM generate_series(1, 100000) i")
+
+    # nullable_never_null and low_cardinality_text.
+    await client.execute_sql(
+        f"""
+        CREATE TABLE {MODEL_SCHEMA}.stats_driven (
+            id int PRIMARY KEY,
+            parent_id bigint REFERENCES {MODEL_SCHEMA}.parent(id),
+            status text
+        )
+        """
+    )
+    await client.execute_sql(f"CREATE INDEX ON {MODEL_SCHEMA}.stats_driven (parent_id)")
+    await client.execute_sql(
+        f"""
+        INSERT INTO {MODEL_SCHEMA}.stats_driven
+        SELECT i, 1, (ARRAY['open', 'paid', 'void'])[1 + i %% 3] FROM generate_series(1, 20000) i
+        """.replace("%%", "%")
+    )
+
+    # The clean model: keyed, indexed, packed, with types that mean what they say.
+    await client.execute_sql(f"CREATE TABLE {CLEAN_SCHEMA}.parent (id bigint PRIMARY KEY, created_at timestamptz NOT NULL, name text NOT NULL)")
+    await client.execute_sql(
+        f"""
+        CREATE TABLE {CLEAN_SCHEMA}.child (
+            id bigint PRIMARY KEY,
+            parent_id bigint NOT NULL REFERENCES {CLEAN_SCHEMA}.parent(id),
+            created_at timestamptz NOT NULL,
+            body text NOT NULL
+        )
+        """
+    )
+    await client.execute_sql(f"CREATE INDEX ON {CLEAN_SCHEMA}.child (parent_id)")
+    await client.execute_sql(f"INSERT INTO {CLEAN_SCHEMA}.parent SELECT i, now(), 'name ' || i FROM generate_series(1, 20000) i")
+    await client.execute_sql(f"INSERT INTO {CLEAN_SCHEMA}.child SELECT i, i, now(), 'body ' || i FROM generate_series(1, 20000) i")
+
+    for schema in (MODEL_SCHEMA, CLEAN_SCHEMA):
+        await client.execute_sql(f"ANALYZE {schema}.parent")
+    await client.execute_sql(f"ANALYZE {MODEL_SCHEMA}.fk_unindexed")
+    await client.execute_sql(f"ANALYZE {MODEL_SCHEMA}.unpacked")
+    await client.execute_sql(f"ANALYZE {MODEL_SCHEMA}.stats_driven")
+    await client.execute_sql(f"ANALYZE {CLEAN_SCHEMA}.child")
+
+    try:
+        yield client
+    finally:
+        for schema in (MODEL_SCHEMA, CLEAN_SCHEMA):
+            await client.execute_sql(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        await client.close()
+
+
+def tables_for(findings, rule):
+    return {f.table for f in findings if f.rule.value == rule}
+
+
+@pytest.mark.asyncio
+async def test_a_clean_model_produces_no_findings_at_all(model_pg):
+    """The one that matters. Every rule below fires next door; none may fire here."""
+    findings = await model_pg.review_data_model(schema=CLEAN_SCHEMA, min_rows=100)
+
+    assert findings == []
+
+
+@pytest.mark.asyncio
+async def test_system_schemas_are_never_reviewed(model_pg):
+    assert await model_pg.review_data_model(schema="pg_catalog") == []
+    assert await model_pg.review_data_model(schema="information_schema") == []
+
+
+@pytest.mark.asyncio
+async def test_an_unindexed_foreign_key_is_found_and_the_indexed_ones_are_not(model_pg):
+    findings = await model_pg.review_data_model(schema=MODEL_SCHEMA, rules="unindexed_foreign_key")
+
+    assert tables_for(findings, "unindexed_foreign_key") == {"fk_unindexed"}
+
+
+@pytest.mark.asyncio
+async def test_the_recommended_index_actually_removes_the_scan(model_pg):
+    """The rule's whole claim is that checking this key scans the child table.
+
+    A DELETE's own plan does not show it — the check runs inside a trigger — so
+    this plans the query that trigger runs. Without the index it is a sequential
+    scan of the child; with the index the rule recommends it must not be.
+    """
+    (finding,) = await model_pg.review_data_model(schema=MODEL_SCHEMA, rules="unindexed_foreign_key")
+    ri_lookup = f"EXPLAIN SELECT 1 FROM {MODEL_SCHEMA}.fk_unindexed x WHERE parent_id OPERATOR(pg_catalog.=) 1::bigint FOR KEY SHARE OF x"
+
+    before = " ".join(row["QUERY PLAN"] for row in await model_pg.execute_sql(ri_lookup))
+    for statement in finding.remediation:
+        # CONCURRENTLY cannot run inside a transaction block, and execute_sql
+        # wraps each statement in one.
+        await model_pg.execute_sql(statement.replace("CONCURRENTLY ", ""))
+    await model_pg.execute_sql(f"ANALYZE {MODEL_SCHEMA}.fk_unindexed")
+    after = " ".join(row["QUERY PLAN"] for row in await model_pg.execute_sql(ri_lookup))
+
+    assert "Seq Scan" in before
+    assert "Seq Scan" not in after
+    assert "fk_unindexed_parent_id_idx" in after
+    assert await model_pg.review_data_model(schema=MODEL_SCHEMA, rules="unindexed_foreign_key") == []
+
+
+@pytest.mark.asyncio
+async def test_a_type_mismatch_is_found_and_the_matching_keys_are_not(model_pg):
+    findings = await model_pg.review_data_model(schema=MODEL_SCHEMA, rules="foreign_key_type_mismatch")
+
+    assert tables_for(findings, "foreign_key_type_mismatch") == {"fk_mismatched"}
+    assert findings[0].remediation == [f"ALTER TABLE {MODEL_SCHEMA}.fk_mismatched ALTER COLUMN parent_id TYPE bigint;"]
+
+
+@pytest.mark.asyncio
+async def test_a_table_with_no_primary_key_is_found(model_pg):
+    findings = await model_pg.review_data_model(schema=MODEL_SCHEMA, rules="missing_primary_key")
+
+    assert tables_for(findings, "missing_primary_key") == {"no_key", "unpacked"}
+
+
+@pytest.mark.asyncio
+async def test_the_type_rules_find_their_columns_and_no_others(model_pg):
+    findings = await model_pg.review_data_model(schema=MODEL_SCHEMA, rules="naive_timestamp,blank_padded_char")
+
+    assert {(f.rule.value, f.table, f.columns[0]) for f in findings} == {
+        ("naive_timestamp", "naive", "at"),
+        ("blank_padded_char", "naive", "code"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_column_order_padding_predicts_the_real_saving(model_pg):
+    """Run the CREATE TABLE it generates, copy the rows in, and compare the page
+    counts against the prediction. This is the only way to know the rule is
+    right, and it is how the estimate behind it was corrected in the first place.
+    """
+    (finding,) = [
+        f for f in await model_pg.review_data_model(schema=MODEL_SCHEMA, rules="column_order_padding", min_rows=100) if f.table == "unpacked"
+    ]
+
+    assert finding.confidence.value == "proven", "every column is fixed-width, so the saving is exact"
+
+    create = next(statement for statement in finding.remediation if statement.startswith("CREATE TABLE"))
+    await model_pg.execute_sql(create)
+    packed_columns = ", ".join(f'"{column}"' for column in finding.columns)
+    await model_pg.execute_sql(f"INSERT INTO {MODEL_SCHEMA}.unpacked_packed SELECT {packed_columns} FROM {MODEL_SCHEMA}.unpacked")
+    # relpages is bookkeeping, not a live count: ANALYZE is what sets it.
+    await model_pg.execute_sql(f"ANALYZE {MODEL_SCHEMA}.unpacked_packed")
+
+    rows = await model_pg.execute_sql(
+        f"SELECT relname, relpages FROM pg_class WHERE relname IN ('unpacked', 'unpacked_packed') AND relnamespace = '{MODEL_SCHEMA}'::regnamespace"
+    )
+    pages = {row["relname"]: row["relpages"] for row in rows}
+
+    assert pages["unpacked"] == finding.evidence["current_pages"]
+    assert pages["unpacked_packed"] == finding.evidence["packed_pages"]
+
+
+@pytest.mark.asyncio
+async def test_the_statistics_driven_rules_are_candidates_that_carry_their_proof(model_pg):
+    findings = await model_pg.review_data_model(schema=MODEL_SCHEMA, rules="nullable_never_null,low_cardinality_text", min_rows=100)
+
+    assert findings, "the fixture holds one of each"
+    for finding in findings:
+        assert finding.confidence.value == "candidate"
+        assert finding.verify, "a candidate has to say how to settle it"
+        # And the query it offers has to run.
+        await model_pg.execute_sql(finding.verify.rstrip(";"))
+
+
+@pytest.mark.asyncio
+async def test_a_never_null_foreign_key_is_found_but_ordinary_columns_are_not(model_pg):
+    """Restricted to key columns on purpose: most columns hold no NULLs, and
+    reporting all of them would bury the review."""
+    findings = await model_pg.review_data_model(schema=MODEL_SCHEMA, rules="nullable_never_null", min_rows=100)
+
+    # Two foreign keys that are optional in the schema and populated in every
+    # row, and one column of a unique index that NULLs could have slipped past.
+    assert {(f.table, f.columns[0]) for f in findings} == {
+        ("stats_driven", "parent_id"),
+        ("fk_unindexed", "parent_id"),
+        ("parent", "code"),
+    }
+    by_column = {f.columns[0]: f for f in findings}
+    assert by_column["parent_id"].evidence["in_foreign_key"]
+    assert by_column["code"].evidence["in_unique_index"]
+
+
+@pytest.mark.asyncio
+async def test_a_low_cardinality_column_reports_the_values_it_saw(model_pg):
+    findings = await model_pg.review_data_model(schema=MODEL_SCHEMA, rules="low_cardinality_text", min_rows=100)
+
+    (finding,) = findings
+    assert finding.columns == ["status"]
+    assert finding.evidence["sampled_values"] == ["open", "paid", "void"]
+
+
+@pytest.mark.asyncio
+async def test_proven_only_drops_the_inferred_findings(model_pg):
+    everything = await model_pg.review_data_model(schema=MODEL_SCHEMA, min_rows=100)
+    proven = await model_pg.review_data_model(schema=MODEL_SCHEMA, min_rows=100, proven_only=True)
+
+    assert {f.confidence.value for f in proven} == {"proven"}
+    assert len(proven) < len(everything)
+
+
+@pytest.mark.asyncio
+async def test_the_review_runs_in_restricted_mode(model_pg):
+    """Every rule is a read, so the safe-SQL parser has to accept all of them."""
+    async with PgDebug(DATABASE_URI, access_mode=AccessMode.RESTRICTED) as restricted:
+        findings = await restricted.review_data_model(schema=MODEL_SCHEMA, min_rows=100)
+
+    unrestricted = await model_pg.review_data_model(schema=MODEL_SCHEMA, min_rows=100)
+    assert [f.summary for f in findings] == [f.summary for f in unrestricted]
+
+
+def test_cli_model_command_against_a_real_database(capsys, monkeypatch, model_pg):
+    monkeypatch.setenv("DATABASE_URI", DATABASE_URI or "")
+
+    assert cli.main(["--json", "model", "--schema", CLEAN_SCHEMA]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+    assert cli.main(["model", "--schema", MODEL_SCHEMA, "--exit-code"]) == cli.UNHEALTHY_EXIT_CODE

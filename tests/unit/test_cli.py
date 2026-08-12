@@ -10,6 +10,10 @@ from pg_debug.artifacts import ExplainPlanArtifact
 from pg_debug.artifacts import PlanNode
 from pg_debug.database_health import HealthCheckResult
 from pg_debug.errors import ExtensionRequiredError
+from pg_debug.model import Confidence
+from pg_debug.model import ModelFinding
+from pg_debug.model import RuleId
+from pg_debug.model import Severity
 
 
 @pytest.fixture
@@ -231,6 +235,90 @@ def test_health_without_exit_code_flag_always_succeeds(pg_client):
     pg_client.analyze_db_health = AsyncMock(return_value=health_results(("Connection health", False, "too many connections", {})))
 
     assert run(["health"])[0] == 0
+
+
+def model_findings(*findings):
+    """Build the list review_data_model returns."""
+    return [
+        ModelFinding(
+            rule=rule,
+            confidence=confidence,
+            severity=severity,
+            schema="public",
+            table=table,
+            columns=[],
+            summary=f"{table} summary",
+            detail="detail",
+            remediation=["ALTER TABLE public.x ADD PRIMARY KEY (id);"],
+        )
+        for rule, confidence, severity, table in findings
+    ]
+
+
+def test_model_passes_its_options(pg_client):
+    pg_client.review_data_model = AsyncMock(return_value=[])
+
+    assert run(["model", "--schema", "reporting", "--rule", "naive_timestamp", "--proven-only", "--min-rows", "50"])[0] == 0
+    pg_client.review_data_model.assert_awaited_once_with(
+        rules="naive_timestamp",
+        schema="reporting",
+        min_rows=50,
+        proven_only=True,
+    )
+
+
+def test_model_reports_a_clean_schema_plainly(pg_client):
+    pg_client.review_data_model = AsyncMock(return_value=[])
+
+    code, out, _ = run(["model"])
+
+    assert code == 0
+    assert out.strip() == "No data model findings."
+
+
+def test_model_groups_findings_by_table_and_shows_the_fix(pg_client):
+    pg_client.review_data_model = AsyncMock(
+        return_value=model_findings(
+            (RuleId.MISSING_PRIMARY_KEY, Confidence.PROVEN, Severity.HIGH, "events"),
+            (RuleId.NAIVE_TIMESTAMP, Confidence.CANDIDATE, Severity.LOW, "orders"),
+        )
+    )
+
+    code, out, _ = run(["model"])
+
+    assert code == 0
+    assert "public.events" in out
+    assert "[high] missing_primary_key" in out
+    assert "(candidate)" in out
+    assert "ALTER TABLE public.x ADD PRIMARY KEY (id);" in out
+    assert "2 findings (1 high, 1 low)" in out
+
+
+def test_model_json_serializes_each_finding(pg_client):
+    pg_client.review_data_model = AsyncMock(return_value=model_findings((RuleId.MISSING_PRIMARY_KEY, Confidence.PROVEN, Severity.HIGH, "events")))
+
+    code, out, _ = run(["--json", "model"])
+
+    assert code == 0
+    payload = json.loads(out)
+    assert payload[0]["rule"] == "missing_primary_key"
+    assert payload[0]["severity"] == "high"
+    assert payload[0]["remediation"] == ["ALTER TABLE public.x ADD PRIMARY KEY (id);"]
+
+
+def test_model_exit_code_fires_only_on_high_severity(pg_client):
+    """A gate that fires on advice is a gate somebody turns off."""
+    pg_client.review_data_model = AsyncMock(return_value=model_findings((RuleId.NAIVE_TIMESTAMP, Confidence.PROVEN, Severity.MEDIUM, "orders")))
+    assert run(["model", "--exit-code"])[0] == 0
+
+    pg_client.review_data_model = AsyncMock(return_value=model_findings((RuleId.MISSING_PRIMARY_KEY, Confidence.PROVEN, Severity.HIGH, "events")))
+    assert run(["model", "--exit-code"])[0] == cli.UNHEALTHY_EXIT_CODE
+
+
+def test_model_without_exit_code_flag_always_succeeds(pg_client):
+    pg_client.review_data_model = AsyncMock(return_value=model_findings((RuleId.MISSING_PRIMARY_KEY, Confidence.PROVEN, Severity.HIGH, "events")))
+
+    assert run(["model"])[0] == 0
 
 
 def test_top_queries_passes_options(pg_client):

@@ -26,12 +26,16 @@ from .formatting import render_activity
 from .formatting import render_column_stats
 from .formatting import render_health_checks
 from .formatting import render_index_recommendations
+from .formatting import render_model_findings
 from .formatting import render_object_details
 from .formatting import render_rows
 from .formatting import render_vacuum_progress
 from .formatting import to_json
 from .index.index_opt_base import MAX_NUM_INDEX_TUNING_QUERIES
 from .index.llm_opt import DEFAULT_LLM_MODEL
+from .model import DEFAULT_MIN_ROWS
+from .model import RuleId
+from .model import Severity
 from .schema import ObjectType
 from .sql import obfuscate_password
 
@@ -254,6 +258,33 @@ def build_parser() -> argparse.ArgumentParser:
     column_stats.add_argument("table", help="Table name, optionally schema-qualified")
     column_stats.set_defaults(func=cmd_column_stats)
 
+    model = subparsers.add_parser("model", help="Review the data model and report what to change")
+    model.add_argument("-s", "--schema", help="Restrict the review to one schema (default: every user schema).")
+    model.add_argument(
+        "-r",
+        "--rule",
+        dest="rules",
+        default=RuleId.ALL.value,
+        help="Comma-separated rules to run: " + ", ".join(sorted(r.value for r in RuleId)) + " (default: all).",
+    )
+    model.add_argument(
+        "--proven-only",
+        action="store_true",
+        help="Report only what the catalog proves, dropping the candidates inferred from sampled statistics.",
+    )
+    model.add_argument(
+        "--min-rows",
+        type=int,
+        default=DEFAULT_MIN_ROWS,
+        help=f"Rules that reason from sampled statistics ignore tables smaller than this (default: {DEFAULT_MIN_ROWS}).",
+    )
+    model.add_argument(
+        "--exit-code",
+        action="store_true",
+        help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any high-severity finding is reported, for use in CI.",
+    )
+    model.set_defaults(func=cmd_model)
+
     activity = subparsers.add_parser("activity", help="Show what the server is doing right now")
     activity.add_argument("-a", "--all", dest="include_idle", action="store_true", help="Include idle backends and idle auxiliary processes.")
     activity.add_argument(
@@ -385,6 +416,15 @@ async def cmd_health(pg: PgDebug, args: argparse.Namespace) -> Any:
     return await pg.analyze_db_health(args.health_type)
 
 
+async def cmd_model(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.review_data_model(
+        rules=args.rules,
+        schema=args.schema,
+        min_rows=args.min_rows,
+        proven_only=args.proven_only,
+    )
+
+
 async def cmd_top_queries(pg: PgDebug, args: argparse.Namespace) -> Any:
     return await pg.get_top_queries(sort_by=args.sort_by, limit=args.limit, interval_seconds=args.interval)
 
@@ -421,6 +461,8 @@ def format_result(command: str, result: Any, as_json: bool) -> str:
     if as_json:
         if command == "health":
             return to_json({name: check.to_dict() for name, check in result.items()})
+        if command == "model":
+            return to_json([finding.to_dict() for finding in result])
         return to_json(result)
 
     if command == "activity":
@@ -433,6 +475,8 @@ def format_result(command: str, result: Any, as_json: bool) -> str:
         return render_object_details(result)
     if command == "health":
         return render_health_checks(result)
+    if command == "model":
+        return render_model_findings(result)
     if command in ("tune-workload", "tune-queries"):
         return render_index_recommendations(result)
     return render_rows(result)
@@ -463,6 +507,11 @@ async def run(args: argparse.Namespace) -> int:
 
     if args.command == "health" and getattr(args, "exit_code", False):
         return UNHEALTHY_EXIT_CODE if any(not check.healthy for check in result.values()) else 0
+
+    if args.command == "model" and getattr(args, "exit_code", False):
+        # Only high severity fails a build. The rest is advice, and a gate that
+        # fires on advice gets turned off.
+        return UNHEALTHY_EXIT_CODE if any(finding.severity is Severity.HIGH for finding in result) else 0
 
     # Index tuning reports a failure in its payload rather than raising, so the
     # exit status has to be derived from the result.

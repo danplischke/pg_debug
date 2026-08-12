@@ -44,6 +44,11 @@ from .index import MAX_NUM_INDEX_TUNING_QUERIES
 from .index import DatabaseTuningAdvisor
 from .index import IndexRecommendation
 from .index import LLMOptimizerTool
+from .model import Confidence
+from .model import ModelFinding
+from .model import ModelReviewer
+from .model import RuleId
+from .model import Severity
 from .schema import ObjectType
 from .schema import SchemaInspector
 from .sql import DbConnPool
@@ -61,6 +66,7 @@ __all__ = [
     "MAX_NUM_INDEX_TUNING_QUERIES",
     "AccessMode",
     "ActivityInspector",
+    "Confidence",
     "ConnectionFailedError",
     "DatabaseHealthTool",
     "DatabaseTuningAdvisor",
@@ -77,14 +83,18 @@ __all__ = [
     "InvalidArgumentError",
     "LLMOptimizerTool",
     "MissingDependencyError",
+    "ModelFinding",
+    "ModelReviewer",
     "NotConnectedError",
     "ObjectType",
     "PgDebug",
     "PgDebugError",
     "PlanNode",
     "QueryError",
+    "RuleId",
     "SafeSqlDriver",
     "SchemaInspector",
+    "Severity",
     "SqlDriver",
     "StatisticsInspector",
     "SyncPgDebug",

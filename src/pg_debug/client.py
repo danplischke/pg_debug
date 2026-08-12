@@ -27,6 +27,10 @@ from .index.dta_calc import DatabaseTuningAdvisor
 from .index.index_opt_base import MAX_NUM_INDEX_TUNING_QUERIES
 from .index.llm_opt import LLMOptimizerTool
 from .index.presentation import TextPresentation
+from .model import DEFAULT_MIN_ROWS
+from .model import ModelFinding
+from .model import ModelReviewer
+from .model import RuleId
 from .schema import ObjectType
 from .schema import SchemaInspector
 from .sql import DbConnPool
@@ -324,6 +328,47 @@ class PgDebug:
         underestimates rows for correlated multi-column predicates.
         """
         return await StatisticsInspector(await self.sql_driver()).extended_statistics(table)
+
+    # -- Data model ----------------------------------------------------------
+
+    async def review_data_model(
+        self,
+        rules: str | RuleId | Iterable[str | RuleId] = RuleId.ALL,
+        schema: Optional[str] = None,
+        min_rows: int = DEFAULT_MIN_ROWS,
+        proven_only: bool = False,
+    ) -> List[ModelFinding]:
+        """Review the data model for defects, and say how to fix each one.
+
+        Where the other diagnostics ask what the server is doing, this asks
+        whether the schema is built the way the data behaves: foreign keys with
+        no index behind them, keys whose two sides are different types, tables
+        with no primary key, columns ordered so that alignment padding costs
+        bytes on every row, and types that do not mean what they appear to.
+
+        Needs no extension, and every rule is one set-based query over the
+        catalog, so it is cheap enough to run against a production database.
+
+        Args:
+            rules: Which rules to run: a :class:`RuleId`, a comma-separated
+                string, or an iterable. ``all`` by default.
+            schema: Restrict to one schema. Every user schema by default.
+            min_rows: Rules that reason from sampled statistics ignore tables
+                smaller than this.
+            proven_only: Keep only what the catalog proves, dropping the
+                findings inferred from statistics.
+
+        Returns:
+            :class:`~pg_debug.model.ModelFinding` objects, most severe first,
+            each carrying the evidence behind it and the statements that fix
+            it. A finding whose ``confidence`` is ``candidate`` was inferred
+            from a sample and carries a ``verify`` query to settle it first.
+
+        Raises:
+            InvalidArgumentError: If an unknown rule is requested.
+        """
+        reviewer = ModelReviewer(await self.sql_driver())
+        return await reviewer.review(rules=rules, schema=schema, min_rows=min_rows, proven_only=proven_only)
 
     # -- Live activity -------------------------------------------------------
 

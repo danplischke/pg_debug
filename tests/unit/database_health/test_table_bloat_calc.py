@@ -7,11 +7,13 @@ import pytest
 
 from pg_debug.database_health import DatabaseHealthTool
 from pg_debug.database_health import HealthType
+from pg_debug.database_health.table_bloat_calc import _RELATION_FILTER
 from pg_debug.database_health.table_bloat_calc import DEFAULT_MIN_BLOAT_BYTES
 from pg_debug.database_health.table_bloat_calc import DEFAULT_MIN_BLOAT_PERCENT
 from pg_debug.database_health.table_bloat_calc import TABLE_BLOAT_SQL
 from pg_debug.database_health.table_bloat_calc import TableBloatCalc
 from pg_debug.sql import SqlDriver
+from pg_debug.tuple_layout import row_layout_ctes
 
 
 def row(**cells):
@@ -93,19 +95,15 @@ def test_only_ordinary_and_materialized_relations_are_measured():
     assert "c.relkind IN ('r', 'm')" in TABLE_BLOAT_SQL
 
 
-def test_columns_are_laid_out_in_order_rather_than_summed():
-    """Summing widths ignores the padding between columns and invents bloat."""
-    assert "WITH RECURSIVE" in TABLE_BLOAT_SQL
-    assert "ORDER BY a.attnum" in TABLE_BLOAT_SQL
-    assert "t.typalign" in TABLE_BLOAT_SQL
-    # Each column is padded forward to its own alignment boundary.
-    assert "ceil(l.data_end / c.align_to) * c.align_to" in TABLE_BLOAT_SQL
+def test_the_row_width_comes_from_the_shared_layout():
+    """Summing widths ignores the padding between columns and invents bloat.
 
-
-def test_a_short_varlena_is_treated_as_unaligned():
-    """PostgreSQL stores one with a 1-byte header and no padding."""
-    assert "t.typlen = -1" in TABLE_BLOAT_SQL
-    assert "THEN 1" in TABLE_BLOAT_SQL
+    The layout itself is tested in tests/unit/test_tuple_layout.py; what
+    matters here is that this check takes its row width from there rather than
+    computing its own, so the two can never disagree.
+    """
+    assert row_layout_ctes(_RELATION_FILTER) in TABLE_BLOAT_SQL
+    assert "s.row_bytes" in TABLE_BLOAT_SQL
 
 
 def test_fillfactor_is_taken_from_the_table_options():

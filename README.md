@@ -15,6 +15,7 @@ without an MCP client in the loop.
 - **Live activity** — what every backend is doing right now, what it is waiting on, and which process is blocking it.
 - **Vacuum progress** — running vacuums, their phase and how far through the heap they are.
 - **Planner statistics** — the per-column numbers behind a plan's row estimates, the extended statistics defined on a table, and which tables the planner is reasoning about with stale numbers.
+- **Data model review** — foreign keys with no index behind them, keys whose two sides are different types, tables with no primary key, columns ordered so alignment padding costs bytes on every row, and types that do not mean what they look like. Each finding says whether it is proven from the catalog or inferred from statistics, and carries the DDL that fixes it.
 - **Health checks** — invalid/duplicate/bloated/unused indexes, table bloat, connection utilization, transaction ID wraparound risk, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints, statistics freshness.
 - **Top queries** — the most expensive queries recorded by `pg_stat_statements`, ranked by resource blend or by execution time, cumulatively or sampled over an interval.
 - **Index tuning** — recommend indexes for your recorded workload or for a specific set of queries, with before/after planner costs and the size HypoPG measures for each candidate.
@@ -60,6 +61,10 @@ pg-debug health
 pg-debug health --type index,vacuum
 pg-debug column-stats orders             # why the planner estimates what it does
 
+pg-debug model                           # review the schema itself
+pg-debug model --schema public --proven-only
+pg-debug --json model | jq '.[] | select(.severity == "high")'
+
 pg-debug top-queries --sort-by mean_time --limit 5
 pg-debug top-queries --interval 10       # measure the next 10 seconds instead
 
@@ -95,6 +100,7 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `vacuum-progress` | — |
 | `column-stats TABLE` | — |
 | `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--exit-code` |
+| `model` | `-s, --schema SCHEMA`, `-r, --rule RULES` (comma-separated, default `all`), `--proven-only`, `--min-rows N` (default 1000), `--exit-code` |
 | `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10, ignored for cumulative `resources`), `-i, --interval SECONDS` |
 | `tune-workload` | `--max-index-size-mb MB` (default 10000), `--method {dta,llm}` (default `dta`) |
 | `tune-queries QUERY...` | up to 10 queries, same options as `tune-workload` |
@@ -113,6 +119,29 @@ the estimate cannot see is the *spread* of a variable-width column, since
 when it is not. `pgstattuple` gives the exact figure at the cost of scanning
 the table.
 
+`model` reviews the data model rather than the running server, and needs no
+extension. Its rules are `unindexed_foreign_key`, `foreign_key_type_mismatch`,
+`missing_primary_key`, `column_order_padding`, `naive_timestamp`,
+`blank_padded_char`, `nullable_never_null`, `low_cardinality_text` and `all`.
+
+Each finding carries a confidence. A **proven** finding is read from the
+catalog and cannot be wrong: a foreign key either has an index behind it or it
+does not. A **candidate** is inferred from sampled planner statistics — a
+column with no NULLs in the sample may still have one — so it carries a
+`verify` query that settles the question before any DDL is applied.
+`--proven-only` drops the candidates.
+
+Severity comes from the evidence, not from the rule: an unindexed foreign key
+on a 4 GB child whose parent has recorded deletes is `high`, the same key on a
+40-row lookup table is `low`. Findings are ordered by severity and then by each
+rule's own measure of impact — deliberately not by a single score across rules,
+since a byte count and a lock risk have no common scale.
+
+`column_order_padding` reuses the tuple layout the `table` health check
+measures with, so the two cannot disagree: a table it calls optimally packed is
+one the bloat check will not accuse of padding. On a table of fixed-width
+columns its prediction is exact, page for page.
+
 A hypothetical index `SPEC` is `table(column, ...)` with an optional method —
 `orders(user_id)`, `orders(user_id, created_at):btree`,
 `reporting.orders(status):hash`. Columns may be expressions, as in
@@ -127,14 +156,16 @@ SQL arguments accept `-` to read the statement from stdin:
 pg-debug --json explain - < slow_query.sql | jq '.Plan."Total Cost"'
 ```
 
-`health` can gate a CI job on the result:
+`health` and `model` can gate a CI job on the result:
 
 ```bash
 pg-debug health --type index,vacuum --exit-code
+pg-debug model --exit-code               # fails only on a high-severity finding
 ```
 
 Exit status is `0` on success, `1` on error, `2` on a usage error, and `3` for
-`health --exit-code` when a check reports a problem.
+`health --exit-code` when a check reports a problem or `model --exit-code` when
+a high-severity finding is reported.
 
 `python -m pg_debug` works the same as the `pg-debug` command.
 
@@ -186,12 +217,19 @@ bad URL instead.
 | `vacuum_progress()` | `list[dict]` — one per running vacuum |
 | `column_stats(table)` / `extended_statistics(table)` | `list[dict]` — planner statistics |
 | `analyze_db_health(health_type="all")` | `dict[str, HealthCheckResult]` — check name to result |
+| `review_data_model(rules="all", schema=None, min_rows=1000, proven_only=False)` | `list[ModelFinding]` — most severe first |
 | `get_top_queries(sort_by="resources", limit=10, interval_seconds=None)` | `list[dict]` — one per query |
 | `analyze_workload_indexes(...)` / `analyze_query_indexes(queries, ...)` | `dict` with `summary`, `recommendations`, `query_impact` |
 
 Each `HealthCheckResult` carries `healthy`, a text `summary`, the flagged
 `findings` (one dict per object) and the `metrics` behind the verdict, and has
 `to_dict()` for serialization.
+
+Each `ModelFinding` carries its `rule`, `confidence` (`proven` or `candidate`),
+`severity`, the `schema`/`table`/`columns` it is about, a `summary` and
+`detail`, the `evidence` behind it, `remediation` (SQL statements, ready to
+run), an optional `verify` query for candidates, and `impact_bytes` where the
+cost is a size. It has `to_dict()` for serialization.
 
 Failures raise instead of returning error strings. All exceptions derive from
 `PgDebugError`: `ConnectionFailedError`, `InvalidArgumentError`,

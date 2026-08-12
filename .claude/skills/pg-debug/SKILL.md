@@ -1,6 +1,6 @@
 ---
 name: pg-debug
-description: Diagnose and tune a PostgreSQL database with the pg_debug library and its pg-debug CLI — inspect schemas and tables, read EXPLAIN plans, test hypothetical indexes without creating them, see what every backend is doing right now and which one is blocking the others, track vacuum progress, check planner statistics behind bad row estimates, run health checks (bloated/duplicate/unused indexes, table bloat, vacuum wraparound, sequence exhaustion, replication, cache hit rates, invalid constraints, stale statistics), find the most expensive queries from pg_stat_statements, and get index recommendations. Use this skill whenever the user asks why a Postgres query is slow, why the database is stuck or blocked, whether an index would help, what indexes to add, whether their database is healthy, what tables or columns exist, or wants to script any of that in Python — even if they never mention pg_debug by name. Also use it when writing code against the pg_debug package.
+description: Diagnose and tune a PostgreSQL database with the pg_debug library and its pg-debug CLI — inspect schemas and tables, read EXPLAIN plans, test hypothetical indexes without creating them, see what every backend is doing right now and which one is blocking the others, track vacuum progress, check planner statistics behind bad row estimates, run health checks (bloated/duplicate/unused indexes, table bloat, vacuum wraparound, sequence exhaustion, replication, cache hit rates, invalid constraints, stale statistics), find the most expensive queries from pg_stat_statements, get index recommendations, and review the data model itself for design defects (unindexed foreign keys, mismatched key types, missing primary keys, wasteful column order, misleading column types). Use this skill whenever the user asks why a Postgres query is slow, why the database is stuck or blocked, whether an index would help, what indexes to add, whether their database is healthy, how to improve or review their schema or data model, what tables or columns exist, or wants to script any of that in Python — even if they never mention pg_debug by name. Also use it when writing code against the pg_debug package.
 ---
 
 # pg_debug
@@ -193,6 +193,51 @@ yesterday means the counters are young, not that the index is dead — check
 `metrics.max_scans` and how long statistics have been accumulating. Cache hit
 rate on an idle test database is meaningless.
 
+## Reviewing the data model
+
+Everything else here asks what the server is doing. This asks whether the
+schema is built the way the data behaves.
+
+```bash
+pg-debug model                           # every rule, every user schema
+pg-debug model --schema public
+pg-debug model --rule unindexed_foreign_key
+pg-debug model --proven-only             # drop what was inferred from statistics
+pg-debug --json model                    # structured, with the DDL to apply
+pg-debug model --exit-code               # exit 3 on a high-severity finding (CI)
+```
+
+Rules: `unindexed_foreign_key`, `foreign_key_type_mismatch`,
+`missing_primary_key`, `column_order_padding`, `naive_timestamp`,
+`blank_padded_char`, `nullable_never_null`, `low_cardinality_text`, `all`.
+Needs no extension, and each rule is one catalog query, so it is safe to point
+at production.
+
+**Read the `confidence` field before acting on anything.** A `proven` finding
+is a catalog fact — a foreign key either has an index behind it or it does not.
+A `candidate` is inferred from sampled statistics and can be wrong: a column
+with no NULLs in the sample may still have one, and an enum built from sampled
+values will fail to apply if the sample missed a value. Every candidate carries
+a `verify` query. Run it and report what it returns before proposing the DDL —
+do not present a candidate as a fact.
+
+`severity` already accounts for the evidence, so do not re-rank by rule name.
+An unindexed foreign key is `high` only when the child table is large *and* the
+parent has recorded deletes; on a small table the same finding is `low` and is
+not worth interrupting anyone about. `remediation` is ready to run, but read it
+first: several rules emit statements that rewrite the table under an ACCESS
+EXCLUSIVE lock, and they say so in `detail`.
+
+`column_order_padding` is the one whose numbers can be checked. It predicts the
+page count of the reordered table exactly when every column is fixed-width, and
+`evidence` carries `current_pages` and `packed_pages` so the claim can be
+tested rather than believed. Its remediation is a `CREATE TABLE` sketch, not a
+migration: constraints, defaults, indexes and triggers are not reproduced, and
+saying so is part of relaying it honestly.
+
+An empty result means the model has nothing wrong with it that these rules can
+see — say that, rather than reaching for something to report.
+
 ## Finding expensive queries
 
 ```bash
@@ -264,6 +309,12 @@ async def main():
             if not check.healthy:
                 print(name, check.findings)
 
+        for finding in await pg.review_data_model(schema="public"):
+            print(finding.severity.value, finding.summary)
+            if finding.confidence.value == "candidate":
+                print("  confirm first:", finding.verify)
+            print("  fix:", *finding.remediation, sep="\n    ")
+
 asyncio.run(main())
 ```
 
@@ -286,13 +337,16 @@ problems as an `error` key in its result dict.
 
 Returns: `list[dict]` for schemas/objects/rows/top-queries/activity/vacuum
 progress/column statistics, `dict` for `get_object_details` and the tuning
-results, `ExplainPlanArtifact` for plans, and `dict[str, HealthCheckResult]`
-for health.
+results, `ExplainPlanArtifact` for plans, `dict[str, HealthCheckResult]` for
+health, and `list[ModelFinding]` for the data model review.
 
 The live-activity and statistics methods mirror the commands:
 `list_activity(include_idle=, min_duration_seconds=, blocked_only=)`,
 `vacuum_progress()`, `column_stats(table)`, `extended_statistics(table)`, and
-`get_top_queries(..., interval_seconds=)` for sampling.
+`get_top_queries(..., interval_seconds=)` for sampling. The model review is
+`review_data_model(rules=, schema=, min_rows=, proven_only=)`; each
+`ModelFinding` has `rule`, `confidence`, `severity`, `summary`, `detail`,
+`evidence`, `remediation`, `verify` and `impact_bytes`, plus `to_dict()`.
 
 Each `execute_sql` call may land on a different pooled connection, so session
 state does not carry over: a `SET`, a temp table, an advisory lock or a

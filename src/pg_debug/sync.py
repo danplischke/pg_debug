@@ -26,6 +26,9 @@ from .client import SortBy
 from .client import TuningMethod
 from .database_health import HealthCheckResult
 from .database_health import HealthType
+from .model import DEFAULT_MIN_ROWS
+from .model import ModelFinding
+from .model import RuleId
 from .schema import ObjectType
 from .sql import DbConnPool
 
@@ -178,6 +181,24 @@ class SyncPgDebug:
     def extended_statistics(self, table: str) -> List[Dict[str, Any]]:
         """List the extended statistics objects defined on a table."""
         return self._call(self._client.extended_statistics, table)
+
+    # -- Data model ----------------------------------------------------------
+
+    def review_data_model(
+        self,
+        rules: str | RuleId | Iterable[str | RuleId] = RuleId.ALL,
+        schema: Optional[str] = None,
+        min_rows: int = DEFAULT_MIN_ROWS,
+        proven_only: bool = False,
+    ) -> List[ModelFinding]:
+        """Review the data model for defects, and say how to fix each one."""
+        return self._call(
+            self._client.review_data_model,
+            rules=rules,
+            schema=schema,
+            min_rows=min_rows,
+            proven_only=proven_only,
+        )
 
     # -- Live activity -------------------------------------------------------
 

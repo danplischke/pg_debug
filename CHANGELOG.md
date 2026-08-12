@@ -39,6 +39,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   six-column table used in testing. A table is reported only when it wastes at
   least 100 MB *and* at least 20% of its size, so ordinary free space in a large
   table is not flagged.
+- `pg-debug model` and `PgDebug.review_data_model()`, a review of the data
+  model rather than of what the server is doing: foreign keys with no index
+  behind them, keys whose two sides are different types, tables with no primary
+  key, columns ordered so that alignment padding costs bytes on every row,
+  `timestamp without time zone`, `character(n)`, key columns that are nullable
+  but never null, and text columns holding a handful of distinct values. Needs
+  no extension, and each rule is one catalog query.
+
+  Every finding says how much of it is fact. A *proven* finding is read from
+  the catalog and cannot be wrong; a *candidate* is inferred from sampled
+  planner statistics and carries the query that settles it, because a column
+  with no NULLs in the sample may still have one. Severity comes from the
+  evidence rather than the rule — an unindexed foreign key on a large child
+  whose parent has recorded deletes is not the same finding as one on a
+  40-row lookup table — and findings are ordered by severity and then by each
+  rule's own measure of impact, deliberately not by a single score across
+  rules. `--exit-code` gates a CI job on high-severity findings only.
+- `pg_debug.tuple_layout`, the row layout the table bloat check was built on,
+  extracted so the column-order rule shares it. The two therefore cannot
+  disagree: a table the review calls optimally packed is one the bloat check
+  will not accuse of padding. On a table of fixed-width columns the review
+  predicts the reordered page count exactly, which the integration tests
+  verify by rebuilding the table and counting.
 - `SqlDriver.session()`, an async context manager that pins one pooled
   connection so session state — hypothetical indexes, `SET`, temp tables,
   advisory locks — survives across calls. `SafeSqlDriver` proxies it, and index
