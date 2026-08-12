@@ -1,6 +1,6 @@
 ---
 name: pg-debug
-description: Diagnose and tune a PostgreSQL database with the pg_debug library and its pg-debug CLI — inspect schemas and tables, read EXPLAIN plans, test hypothetical indexes without creating them, run health checks (bloated/duplicate/unused indexes, vacuum wraparound, sequence exhaustion, replication, cache hit rates, invalid constraints), find the most expensive queries from pg_stat_statements, and get index recommendations. Use this skill whenever the user asks why a Postgres query is slow, whether an index would help, what indexes to add, whether their database is healthy, what tables or columns exist, or wants to script any of that in Python — even if they never mention pg_debug by name. Also use it when writing code against the pg_debug package.
+description: Diagnose and tune a PostgreSQL database with the pg_debug library and its pg-debug CLI — inspect schemas and tables, read EXPLAIN plans, test hypothetical indexes without creating them, see what every backend is doing right now and which one is blocking the others, track vacuum progress, check planner statistics behind bad row estimates, run health checks (bloated/duplicate/unused indexes, vacuum wraparound, sequence exhaustion, replication, cache hit rates, invalid constraints, stale statistics), find the most expensive queries from pg_stat_statements, and get index recommendations. Use this skill whenever the user asks why a Postgres query is slow, why the database is stuck or blocked, whether an index would help, what indexes to add, whether their database is healthy, what tables or columns exist, or wants to script any of that in Python — even if they never mention pg_debug by name. Also use it when writing code against the pg_debug package.
 ---
 
 # pg_debug
@@ -89,6 +89,59 @@ Two things routinely surprise people:
 means a suitable index already exists or the planner does not think one helps.
 Check `pg-debug describe <table>` before assuming something went wrong.
 
+## Something is wrong right now
+
+When the complaint is "the database is stuck" rather than "this query is slow",
+start with what is actually running:
+
+```bash
+pg-debug activity                    # everything doing something
+pg-debug activity --blocked          # only backends waiting on a lock
+pg-debug activity --min-duration 30  # anything stuck in its current state 30s+
+pg-debug vacuum-progress             # is that vacuum going to finish?
+```
+
+`activity` hides idle backends by default and excludes its own connection.
+Each row carries `blocked_by` — the pids holding the lock it is waiting for —
+so a lock pile-up reads directly off the output: find the backend with an empty
+`blocked_by` that others point at, and that is the one to deal with.
+
+`wait_event_type` says what kind of wait it is: `Lock` means another backend,
+`IO` means storage, `Timeout` usually means the query is deliberately sleeping,
+and `LWLock` means internal contention. A long-running `active` query with no
+wait event is simply working.
+
+`vacuum-progress` pairs with the vacuum health check: the check tells you
+wraparound is approaching, this tells you whether the vacuum fixing it is
+moving. Watch `percent_scanned` across two calls rather than guessing from one.
+
+## Why the planner got it wrong
+
+When `explain --analyze` shows estimated rows far from actual rows, no index
+will fix it — the planner is working from bad numbers. Look at them:
+
+```bash
+pg-debug column-stats orders
+pg-debug health --type statistics
+```
+
+`column-stats` shows what the planner believes per column: `null_frac`,
+`n_distinct` (negative means a multiple of the row count, so `-1` is unique),
+`correlation` (how closely physical order tracks the column, which decides
+whether an index scan looks cheap) and how many most-common values it tracks.
+It also lists any extended statistics on the table.
+
+Two common findings, and what they mean:
+
+- **Stale or missing statistics.** `health --type statistics` flags tables
+  never analyzed, or where a large fraction of rows changed since. The fix is
+  `ANALYZE <table>`, and it is worth doing before any index work.
+- **Correlated columns.** If a two-column predicate estimates far too few rows
+  and each column's own statistics look right, the planner is multiplying
+  independent selectivities for columns that are not independent. That is what
+  `CREATE STATISTICS ... ON a, b FROM t` fixes — check `column-stats` first to
+  see whether such an object already exists.
+
 ## Health checks
 
 ```bash
@@ -100,7 +153,8 @@ pg-debug health --exit-code              # exit 3 if anything is unhealthy (CI)
 
 Checks: `index` (invalid, duplicate, bloated, unused), `connection`, `vacuum`
 (transaction ID wraparound), `sequence` (approaching maximum), `replication`,
-`buffer` (cache hit rates), `constraint` (invalid constraints), `all`.
+`buffer` (cache hit rates), `constraint` (invalid constraints), `statistics`
+(never analyzed or drifted), `all`.
 
 In JSON each check has `healthy`, `summary`, `findings` (the flagged objects)
 and `metrics` (the numbers and thresholds behind the verdict). Filter on
@@ -121,13 +175,21 @@ rate on an idle test database is meaningless.
 pg-debug top-queries                                  # blended resource cost
 pg-debug top-queries --sort-by mean_time --limit 5    # slowest per call
 pg-debug top-queries --sort-by total_time --limit 5   # biggest total consumer
+pg-debug top-queries --interval 10                    # measure the next 10s only
 ```
 
 `resources` blends execution time, buffer access and WAL volume, and reports
-everything above a threshold — `--limit` does not apply to it. Use `mean_time`
-to find individually slow queries and `total_time` to find what the database
-actually spends its life doing; they often disagree, and the disagreement is
-the interesting part.
+everything above a threshold — `--limit` does not apply to it in cumulative
+mode. Use `mean_time` to find individually slow queries and `total_time` to
+find what the database actually spends its life doing; they often disagree, and
+the disagreement is the interesting part.
+
+**Prefer `--interval` when the question is about now.** Without it the counters
+are cumulative since statistics were last reset, so the ranking is often
+dominated by a migration or a bulk load that ran once, months ago. Sampling
+takes two snapshots and reports the difference — the live workload, with
+`mean_exec_time` recomputed over the interval. A few seconds is enough on a
+busy server; on a quiet one, sample longer or you will rank noise.
 
 Needs `pg_stat_statements`. Query text comes back normalized (`$1` for
 literals), which is what you feed to `tune-queries`.
@@ -198,9 +260,15 @@ the specific subclass — `ConnectionFailedError`, `InvalidArgumentError`,
 `MissingDependencyError`. The one exception is index tuning, which reports
 problems as an `error` key in its result dict.
 
-Returns: `list[dict]` for schemas/objects/rows/top-queries, `dict` for
-`get_object_details` and the tuning results, `ExplainPlanArtifact` for plans,
-and `dict[str, HealthCheckResult]` for health.
+Returns: `list[dict]` for schemas/objects/rows/top-queries/activity/vacuum
+progress/column statistics, `dict` for `get_object_details` and the tuning
+results, `ExplainPlanArtifact` for plans, and `dict[str, HealthCheckResult]`
+for health.
+
+The live-activity and statistics methods mirror the commands:
+`list_activity(include_idle=, min_duration_seconds=, blocked_only=)`,
+`vacuum_progress()`, `column_stats(table)`, `extended_statistics(table)`, and
+`get_top_queries(..., interval_seconds=)` for sampling.
 
 ## The LLM tuning method
 

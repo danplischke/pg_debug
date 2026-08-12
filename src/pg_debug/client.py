@@ -12,6 +12,7 @@ from typing import List
 from typing import Literal
 from typing import Optional
 
+from .activity import ActivityInspector
 from .artifacts import ErrorResult
 from .artifacts import ExplainPlanArtifact
 from .database_health import DatabaseHealthTool
@@ -33,6 +34,7 @@ from .sql import SafeSqlDriver
 from .sql import SqlDriver
 from .sql import check_hypopg_installation_status
 from .sql import obfuscate_password
+from .statistics import StatisticsInspector
 from .top_queries import TopQueriesCalc
 
 logger = logging.getLogger(__name__)
@@ -296,6 +298,60 @@ class PgDebug:
         message = result.to_text() if isinstance(result, ErrorResult) else "Error processing explain plan"
         raise ExplainPlanError(message)
 
+    # -- Planner statistics --------------------------------------------------
+
+    async def column_stats(self, table: str) -> List[Dict[str, Any]]:
+        """Report the planner's per-column statistics for a table.
+
+        This is what to look at when ``explain --analyze`` shows estimated rows
+        far from actual rows: the estimate comes from ``null_frac``,
+        ``n_distinct`` and the most common values listed here. ``correlation``
+        decides whether the planner expects an index scan to be cheap.
+
+        Returns an empty list if the table has never been analyzed.
+        """
+        return await StatisticsInspector(await self.sql_driver()).column_stats(table)
+
+    async def extended_statistics(self, table: str) -> List[Dict[str, Any]]:
+        """List the extended statistics objects defined on a table.
+
+        Without them the planner treats columns as independent and
+        underestimates rows for correlated multi-column predicates.
+        """
+        return await StatisticsInspector(await self.sql_driver()).extended_statistics(table)
+
+    # -- Live activity -------------------------------------------------------
+
+    async def list_activity(
+        self,
+        include_idle: bool = False,
+        min_duration_seconds: Optional[float] = None,
+        blocked_only: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Report what the server is doing right now.
+
+        Args:
+            include_idle: Include idle client backends and idle auxiliary
+                processes, which are hidden by default.
+            min_duration_seconds: Only report backends that have held their
+                current state at least this long.
+            blocked_only: Only report backends waiting on a lock another
+                backend holds. Implies ``include_idle``, since a blocked
+                backend can be idle in transaction.
+
+        Returns:
+            One dict per backend, including ``blocked_by`` (the pids blocking
+            it) and the age of its state, query and transaction.
+        """
+        inspector = ActivityInspector(await self.sql_driver())
+        if blocked_only:
+            return await inspector.blocked_backends()
+        return await inspector.list_backends(include_idle=include_idle, min_duration_seconds=min_duration_seconds)
+
+    async def vacuum_progress(self) -> List[Dict[str, Any]]:
+        """Report running vacuums and how far along they are."""
+        return await ActivityInspector(await self.sql_driver()).vacuum_progress()
+
     # -- Diagnostics ---------------------------------------------------------
 
     async def analyze_db_health(
@@ -321,7 +377,12 @@ class PgDebug:
         health_tool = DatabaseHealthTool(await self.sql_driver())
         return await health_tool.run_checks(health_type)
 
-    async def get_top_queries(self, sort_by: SortBy = "resources", limit: int = 10) -> List[Dict[str, Any]]:
+    async def get_top_queries(
+        self,
+        sort_by: SortBy = "resources",
+        limit: int = 10,
+        interval_seconds: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
         """Report the most expensive queries recorded by pg_stat_statements.
 
         Args:
@@ -329,23 +390,34 @@ class PgDebug:
                 time, buffer access and WAL volume; ``mean_time`` and
                 ``total_time`` rank by execution time.
             limit: Number of queries to return. Ignored when ranking by
-                ``resources``, which reports every query above its threshold.
+                ``resources`` over cumulative counters, which reports every
+                query above its threshold.
+            interval_seconds: Sample over this many seconds instead of
+                reporting cumulative totals. Cumulative counters cover
+                everything since statistics were last reset, which is often
+                dominated by a migration or bulk load rather than the live
+                workload; sampling measures what is running now.
 
         Returns:
             One dict of statistics per query.
 
         Raises:
-            InvalidArgumentError: If ``sort_by`` is not a valid criterion.
+            InvalidArgumentError: If ``sort_by`` is not a valid criterion, or
+                the interval is not positive.
             ExtensionRequiredError: If pg_stat_statements is not installed.
         """
+        if sort_by not in ("resources", "mean_time", "total_time"):
+            raise InvalidArgumentError("Invalid sort criteria. Please use 'resources', 'mean_time' or 'total_time'.")
+
         top_queries_tool = TopQueriesCalc(sql_driver=await self.sql_driver())
+
+        if interval_seconds is not None:
+            sample_sort = {"resources": "resources", "mean_time": "mean", "total_time": "total"}[sort_by]
+            return await top_queries_tool.sample(interval_seconds, sort_by=sample_sort, limit=limit)  # type: ignore[arg-type]
 
         if sort_by == "resources":
             return await top_queries_tool.get_top_resource_queries()
-        if sort_by in ("mean_time", "total_time"):
-            return await top_queries_tool.get_top_queries_by_time(limit=limit, sort_by="mean" if sort_by == "mean_time" else "total")
-
-        raise InvalidArgumentError("Invalid sort criteria. Please use 'resources', 'mean_time' or 'total_time'.")
+        return await top_queries_tool.get_top_queries_by_time(limit=limit, sort_by="mean" if sort_by == "mean_time" else "total")
 
     # -- Index tuning --------------------------------------------------------
 

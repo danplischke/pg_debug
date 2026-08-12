@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -8,6 +9,8 @@ from typing import LiteralString
 from typing import cast
 
 from ..errors import ExtensionRequiredError
+from ..errors import InvalidArgumentError
+from ..sql import QUERY_MARKER
 from ..sql import SafeSqlDriver
 from ..sql import SqlDriver
 from ..sql.extension_utils import check_extension
@@ -16,6 +19,9 @@ from ..sql.extension_utils import get_postgres_version
 logger = logging.getLogger(__name__)
 
 PG_STAT_STATEMENTS = "pg_stat_statements"
+
+#: Statement keywords that only ever describe transaction bookkeeping.
+_TRANSACTION_CONTROL = frozenset({"BEGIN", "COMMIT", "ROLLBACK", "END", "START", "SAVEPOINT", "RELEASE"})
 
 install_pg_stat_statements_message = (
     "The pg_stat_statements extension is required to "
@@ -98,6 +104,146 @@ class TopQueriesCalc:
         if not extension_status.is_installed:
             logger.warning(f"Extension {PG_STAT_STATEMENTS} is not installed")
             raise ExtensionRequiredError(PG_STAT_STATEMENTS, install_pg_stat_statements_message)
+
+    async def sample(
+        self,
+        interval_seconds: float,
+        sort_by: Literal["resources", "mean", "total"] = "total",
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Measure query activity over an interval instead of since the last reset.
+
+        pg_stat_statements counters are cumulative, so the usual ranking is
+        dominated by whatever has run most since statistics were last reset —
+        often a migration or a bulk load rather than the live workload. This
+        takes two snapshots and reports the difference, which is what the
+        database is doing *now*.
+
+        Args:
+            interval_seconds: How long to wait between the two snapshots.
+                Longer samples are steadier; a few seconds is enough on a busy
+                server.
+            sort_by: ``total`` (default) or ``mean`` execution time, or
+                ``resources`` to rank by a blend of time, buffer access and WAL
+                volume, as the cumulative report does.
+            limit: Number of queries to return.
+
+        Returns:
+            One dict per query that ran during the interval, with the counters
+            accumulated over it. ``mean_exec_time`` is recomputed from the
+            interval, not carried over from the cumulative view.
+
+        Raises:
+            ExtensionRequiredError: If pg_stat_statements is not installed.
+            InvalidArgumentError: If the interval is not positive.
+        """
+        if interval_seconds <= 0:
+            raise InvalidArgumentError("The sampling interval must be greater than zero seconds.")
+
+        await self._require_pg_stat_statements()
+
+        before = await self._counter_snapshot()
+        await asyncio.sleep(interval_seconds)
+        after = await self._counter_snapshot()
+
+        deltas = self._diff_snapshots(before, after)
+        return self._rank(deltas, sort_by=sort_by, limit=limit)
+
+    async def _counter_snapshot(self) -> Dict[Any, Dict[str, Any]]:
+        """Read the raw per-query counters, keyed by query identity."""
+        pg_version = await get_postgres_version(self.sql_driver)
+        cols = _get_pg_stat_statements_columns(pg_version)
+
+        # Marked so the snapshot query itself can be filtered out of its own
+        # results; SafeSqlDriver marks everything it runs the same way.
+        query = cast(
+            LiteralString,
+            f"""
+            {QUERY_MARKER}
+            SELECT
+                queryid,
+                userid,
+                dbid,
+                query,
+                calls,
+                {cols.total_time} AS total_exec_time,
+                rows,
+                shared_blks_hit,
+                shared_blks_read,
+                shared_blks_dirtied,
+                {cols.wal_bytes_select}
+            FROM pg_stat_statements
+            """,
+        )
+        rows = await SafeSqlDriver.execute_param_query(self.sql_driver, query)
+        return {(r.cells["queryid"], r.cells["userid"], r.cells["dbid"]): dict(r.cells) for r in rows} if rows else {}
+
+    @staticmethod
+    def _is_own_bookkeeping(query: Any) -> bool:
+        """True for statements this library issues rather than the workload.
+
+        Transaction control is filtered too: it is never the answer to "what is
+        expensive", and in restricted mode the read-only transaction wrapper is
+        our own doing.
+        """
+        text = (query or "").strip()
+        if QUERY_MARKER in text:
+            return True
+        return text.upper().rstrip(";").split(" ", 1)[0] in _TRANSACTION_CONTROL
+
+    @staticmethod
+    def _diff_snapshots(before: Dict[Any, Dict[str, Any]], after: Dict[Any, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Subtract two snapshots, keeping only queries that ran in between."""
+        counters = ("calls", "total_exec_time", "rows", "shared_blks_hit", "shared_blks_read", "shared_blks_dirtied", "wal_bytes")
+        deltas: List[Dict[str, Any]] = []
+
+        for key, row in after.items():
+            # Reading the statistics registers queries of its own — the
+            # snapshot itself, and the transaction control around it in
+            # restricted mode. Reporting those back would be noise.
+            if TopQueriesCalc._is_own_bookkeeping(row.get("query")):
+                continue
+
+            baseline = before.get(key)
+            # A query missing from the first snapshot is new; one whose counters
+            # went backwards means pg_stat_statements was reset or the entry was
+            # evicted and reused. Both are measured from zero.
+            if baseline is not None and (row["calls"] or 0) < (baseline["calls"] or 0):
+                logger.debug("pg_stat_statements counters went backwards for %s; treating the entry as new", key)
+                baseline = None
+
+            delta = {"query": row["query"], "queryid": row["queryid"]}
+            for counter in counters:
+                current = row.get(counter) or 0
+                previous = (baseline or {}).get(counter) or 0
+                delta[counter] = current - previous
+
+            if delta["calls"] <= 0:
+                continue
+
+            delta["mean_exec_time"] = delta["total_exec_time"] / delta["calls"] if delta["calls"] else 0.0
+            deltas.append(delta)
+
+        return deltas
+
+    @staticmethod
+    def _rank(deltas: List[Dict[str, Any]], sort_by: str, limit: int) -> List[Dict[str, Any]]:
+        """Order sampled queries by the requested criterion."""
+        if sort_by == "resources":
+            # Mirror the cumulative report: rank by the largest share of any one
+            # resource, so a query that dominates I/O ranks with one that
+            # dominates time.
+            totals = {
+                key: sum(d[key] for d in deltas) or 1
+                for key in ("total_exec_time", "shared_blks_hit", "shared_blks_read", "shared_blks_dirtied", "wal_bytes")
+            }
+            for delta in deltas:
+                delta["resource_fraction"] = max(delta[key] / totals[key] for key in totals)
+            deltas.sort(key=lambda d: d["resource_fraction"], reverse=True)
+        else:
+            deltas.sort(key=lambda d: d["total_exec_time" if sort_by == "total" else "mean_exec_time"], reverse=True)
+
+        return deltas[:limit]
 
     async def get_top_queries_by_time(self, limit: int = 10, sort_by: Literal["total", "mean"] = "mean") -> List[Dict[str, Any]]:
         """Reports the slowest SQL queries based on execution time.

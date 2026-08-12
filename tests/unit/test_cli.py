@@ -237,7 +237,115 @@ def test_top_queries_passes_options(pg_client):
     pg_client.get_top_queries = AsyncMock(return_value=[])
 
     assert run(["top-queries", "--sort-by", "mean_time", "--limit", "3"])[0] == 0
-    pg_client.get_top_queries.assert_awaited_once_with(sort_by="mean_time", limit=3)
+    pg_client.get_top_queries.assert_awaited_once_with(sort_by="mean_time", limit=3, interval_seconds=None)
+
+
+def test_top_queries_sampling_interval(pg_client):
+    pg_client.get_top_queries = AsyncMock(return_value=[])
+
+    assert run(["top-queries", "--interval", "5"])[0] == 0
+    pg_client.get_top_queries.assert_awaited_once_with(sort_by="resources", limit=10, interval_seconds=5.0)
+
+
+def test_activity_defaults(pg_client):
+    pg_client.list_activity = AsyncMock(return_value=[])
+
+    code, out, _ = run(["activity"])
+
+    assert code == 0
+    assert out.strip() == "(nothing running)"
+    pg_client.list_activity.assert_awaited_once_with(include_idle=False, min_duration_seconds=None, blocked_only=False)
+
+
+def test_activity_options(pg_client):
+    pg_client.list_activity = AsyncMock(return_value=[])
+
+    assert run(["activity", "--all", "--min-duration", "30", "--blocked"])[0] == 0
+    pg_client.list_activity.assert_awaited_once_with(include_idle=True, min_duration_seconds=30.0, blocked_only=True)
+
+
+def test_activity_renders_blocking(pg_client):
+    pg_client.list_activity = AsyncMock(
+        return_value=[
+            {
+                "pid": 42,
+                "usename": "app",
+                "state": "active",
+                "backend_type": "client backend",
+                "wait_event_type": "Lock",
+                "wait_event": "transactionid",
+                "state_seconds": 12.5,
+                "blocked_by": [41],
+                "query": "UPDATE orders SET status = 'paid' WHERE id = 1",
+            }
+        ]
+    )
+
+    code, out, _ = run(["activity"])
+
+    assert code == 0
+    assert "Lock:transactionid" in out
+    assert "12.5s" in out
+    assert "41" in out
+    assert "UPDATE orders SET status = 'paid' WHERE id = 1" in out
+
+
+def test_vacuum_progress_when_idle(pg_client):
+    pg_client.vacuum_progress = AsyncMock(return_value=[])
+
+    code, out, _ = run(["vacuum-progress"])
+
+    assert code == 0
+    assert out.strip() == "(no vacuum running)"
+
+
+def test_vacuum_progress_renders_percentage(pg_client):
+    pg_client.vacuum_progress = AsyncMock(
+        return_value=[
+            {
+                "pid": 7,
+                "schema": "public",
+                "table": "orders",
+                "phase": "scanning heap",
+                "heap_blks_total": 100,
+                "heap_blks_scanned": 79,
+                "index_vacuum_count": 0,
+                "percent_scanned": 79.0,
+                "running_seconds": 65.0,
+                "autovacuum": True,
+            }
+        ]
+    )
+
+    code, out, _ = run(["vacuum-progress"])
+
+    assert code == 0
+    assert "public.orders" in out
+    assert "79.0%" in out
+    assert "79/100" in out
+    assert "1m05s" in out
+
+
+def test_column_stats_renders_both_sections(pg_client):
+    pg_client.column_stats = AsyncMock(return_value=[{"column": "user_id", "n_distinct": 500.0, "correlation": 0.01}])
+    pg_client.extended_statistics = AsyncMock(return_value=[{"name": "orders_user_status", "columns": ["user_id", "status"], "kinds": ["d", "f"]}])
+
+    code, out, _ = run(["column-stats", "orders"])
+
+    assert code == 0
+    assert "Column statistics" in out
+    assert "Extended statistics" in out
+    assert "user_id, status" in out
+
+
+def test_column_stats_without_statistics(pg_client):
+    pg_client.column_stats = AsyncMock(return_value=[])
+    pg_client.extended_statistics = AsyncMock(return_value=[])
+
+    code, out, _ = run(["column-stats", "orders"])
+
+    assert code == 0
+    assert "never been analyzed" in out
 
 
 def test_tune_queries_collects_queries(pg_client):

@@ -8,6 +8,7 @@ not need Docker, so they can run against any server you already have:
         uv run pytest tests/integration/test_client_integration.py
 """
 
+import asyncio
 import json
 import os
 
@@ -289,6 +290,152 @@ async def test_explain_with_a_hypothetical_index_on_a_qualified_table(pg):
     )
 
     assert "Index Scan" in plan.to_text()
+
+
+@pytest.mark.asyncio
+async def test_list_activity_sees_a_running_query(pg):
+    """A second connection running a slow query shows up as active."""
+    async with PgDebug(DATABASE_URI) as other:
+        slow = asyncio.create_task(other.execute_sql("SELECT pg_sleep(3)"))
+        try:
+            await asyncio.sleep(0.5)
+            rows = await pg.list_activity()
+            sleeping = [r for r in rows if "pg_sleep" in (r["query"] or "")]
+
+            assert sleeping, "the sleeping backend should be reported"
+            assert sleeping[0]["state"] == "active"
+            assert sleeping[0]["blocked_by"] == []
+            assert sleeping[0]["state_seconds"] > 0
+        finally:
+            await slow
+
+
+@pytest.mark.asyncio
+async def test_list_activity_excludes_the_calling_backend(pg):
+    for row in await pg.list_activity(include_idle=True):
+        assert "pg_stat_activity" not in (row["query"] or ""), "our own query should be excluded"
+
+
+@pytest.mark.asyncio
+async def test_list_activity_reports_who_is_blocking_whom(pg):
+    """One session holds a lock while another waits for it.
+
+    The lock is taken and released inside a single statement: the driver
+    commits after every statement and the pool may hand the next one a
+    different connection, so no session state can be held across calls. A
+    transaction-scoped advisory lock releases itself on that commit, which also
+    means neither task can outlive the test.
+    """
+    lock_id = 8811_2026
+
+    async with PgDebug(DATABASE_URI) as holder, PgDebug(DATABASE_URI) as waiter:
+        held = asyncio.create_task(holder.execute_sql(f"SELECT pg_advisory_xact_lock({lock_id}), pg_sleep(3)"))
+        await asyncio.sleep(0.5)
+        blocked = asyncio.create_task(waiter.execute_sql(f"SELECT pg_advisory_xact_lock({lock_id})"))
+
+        try:
+            await asyncio.sleep(1)
+
+            waiting = await pg.list_activity(blocked_only=True)
+            assert len(waiting) == 1
+            assert waiting[0]["wait_event_type"] == "Lock"
+            assert waiting[0]["blocked_by"], "the blocking pid should be reported"
+        finally:
+            await asyncio.gather(held, blocked)
+
+
+@pytest.mark.asyncio
+async def test_list_activity_min_duration_filters(pg):
+    assert await pg.list_activity(include_idle=True, min_duration_seconds=100_000) == []
+
+
+@pytest.mark.asyncio
+async def test_vacuum_progress_when_nothing_is_vacuuming(pg):
+    rows = await pg.vacuum_progress()
+    assert all("phase" in row for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_column_stats_reflect_the_data(pg):
+    stats = {row["column"]: row for row in await pg.column_stats(f"{SCHEMA}.orders")}
+
+    assert set(stats) >= {"id", "customer_id", "status"}
+    # 500 customers over 5000 rows, and the id column is unique.
+    assert stats["customer_id"]["n_distinct"] > 0
+    assert stats["id"]["n_distinct"] == -1
+    assert stats["status"]["null_frac"] == 0
+
+
+@pytest.mark.asyncio
+async def test_column_stats_for_a_table_without_statistics(pg):
+    await pg.execute_sql(f"CREATE TABLE {SCHEMA}.unanalyzed (id int)")
+    await pg.execute_sql(f"INSERT INTO {SCHEMA}.unanalyzed SELECT generate_series(1, 100)")
+
+    assert await pg.column_stats(f"{SCHEMA}.unanalyzed") == []
+
+
+@pytest.mark.asyncio
+async def test_extended_statistics_round_trip(pg):
+    assert await pg.extended_statistics(f"{SCHEMA}.orders") == []
+
+    await pg.execute_sql(f"CREATE STATISTICS {SCHEMA}.orders_customer_status ON customer_id, status FROM {SCHEMA}.orders")
+
+    (stats,) = await pg.extended_statistics(f"{SCHEMA}.orders")
+    assert stats["name"] == "orders_customer_status"
+    assert sorted(stats["columns"]) == ["customer_id", "status"]
+
+
+@pytest.mark.asyncio
+async def test_statistics_health_flags_a_never_analyzed_table(pg):
+    await pg.execute_sql(f"CREATE TABLE {SCHEMA}.never (id int)")
+    await pg.execute_sql(f"ALTER TABLE {SCHEMA}.never SET (autovacuum_enabled = false)")
+    await pg.execute_sql(f"INSERT INTO {SCHEMA}.never SELECT generate_series(1, 5000)")
+
+    # Statistics arrive asynchronously; give the collector a moment.
+    check = None
+    findings = []
+    for _ in range(20):
+        check = (await pg.analyze_db_health("statistics"))["Statistics health"]
+        findings = [f for f in check.findings if f["table"] == "never"]
+        if findings:
+            break
+        await asyncio.sleep(0.25)
+
+    assert findings, "a table with rows and no ANALYZE should be reported"
+    assert findings[0]["never_analyzed"] is True
+    assert check is not None and check.healthy is False
+
+
+@pytest.mark.asyncio
+async def test_top_queries_sampling_measures_only_the_interval(pg, tuning_table):
+    if not await has_extension(pg, "pg_stat_statements"):
+        pytest.skip("pg_stat_statements is not installed")
+
+    marker = f"SELECT count(*) FROM {tuning_table} WHERE status = 'sampled'"
+
+    async def keep_running(stop: asyncio.Event):
+        async with PgDebug(DATABASE_URI) as worker:
+            while not stop.is_set():
+                await worker.execute_sql(marker)
+
+    stop = asyncio.Event()
+    workload = asyncio.create_task(keep_running(stop))
+    try:
+        sampled = await pg.get_top_queries(sort_by="total_time", limit=5, interval_seconds=2)
+    finally:
+        stop.set()
+        await workload
+
+    queries = [row["query"] for row in sampled]
+    assert any(tuning_table in q for q in queries), "the query running during the sample should be reported"
+    assert all("BEGIN" not in q.upper()[:5] for q in queries), "transaction control is noise"
+    assert all(row["calls"] > 0 for row in sampled)
+
+
+@pytest.mark.asyncio
+async def test_top_queries_sampling_rejects_a_zero_interval(pg):
+    with pytest.raises(InvalidArgumentError):
+        await pg.get_top_queries(interval_seconds=0)
 
 
 def test_cli_against_a_real_database(capsys, monkeypatch):

@@ -167,6 +167,36 @@ class SyncPgDebug:
         """Return the execution plan for a query."""
         return self._call(self._client.explain_query, sql, analyze=analyze, hypothetical_indexes=hypothetical_indexes)
 
+    # -- Planner statistics --------------------------------------------------
+
+    def column_stats(self, table: str) -> List[Dict[str, Any]]:
+        """Report the planner's per-column statistics for a table."""
+        return self._call(self._client.column_stats, table)
+
+    def extended_statistics(self, table: str) -> List[Dict[str, Any]]:
+        """List the extended statistics objects defined on a table."""
+        return self._call(self._client.extended_statistics, table)
+
+    # -- Live activity -------------------------------------------------------
+
+    def list_activity(
+        self,
+        include_idle: bool = False,
+        min_duration_seconds: Optional[float] = None,
+        blocked_only: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Report what the server is doing right now."""
+        return self._call(
+            self._client.list_activity,
+            include_idle=include_idle,
+            min_duration_seconds=min_duration_seconds,
+            blocked_only=blocked_only,
+        )
+
+    def vacuum_progress(self) -> List[Dict[str, Any]]:
+        """Report running vacuums and how far along they are."""
+        return self._call(self._client.vacuum_progress)
+
     # -- Diagnostics ---------------------------------------------------------
 
     def analyze_db_health(
@@ -176,9 +206,14 @@ class SyncPgDebug:
         """Run database health checks."""
         return self._call(self._client.analyze_db_health, health_type)
 
-    def get_top_queries(self, sort_by: SortBy = "resources", limit: int = 10) -> List[Dict[str, Any]]:
+    def get_top_queries(
+        self,
+        sort_by: SortBy = "resources",
+        limit: int = 10,
+        interval_seconds: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
         """Report the most expensive queries recorded by pg_stat_statements."""
-        return self._call(self._client.get_top_queries, sort_by=sort_by, limit=limit)
+        return self._call(self._client.get_top_queries, sort_by=sort_by, limit=limit, interval_seconds=interval_seconds)
 
     # -- Index tuning --------------------------------------------------------
 

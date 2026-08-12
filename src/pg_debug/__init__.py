@@ -20,6 +20,7 @@ The individual tools (:class:`SchemaInspector`, :class:`ExplainPlanTool`,
 :class:`SqlDriver` if you already manage your own connection.
 """
 
+from .activity import ActivityInspector
 from .artifacts import ErrorResult
 from .artifacts import ExplainPlanArtifact
 from .artifacts import PlanNode
@@ -49,6 +50,7 @@ from .sql import DbConnPool
 from .sql import IndexDefinition
 from .sql import SafeSqlDriver
 from .sql import SqlDriver
+from .statistics import StatisticsInspector
 from .sync import SyncPgDebug
 from .top_queries import TopQueriesCalc
 
@@ -58,6 +60,7 @@ __all__ = [
     "DATABASE_URL_ENV_VARS",
     "MAX_NUM_INDEX_TUNING_QUERIES",
     "AccessMode",
+    "ActivityInspector",
     "ConnectionFailedError",
     "DatabaseHealthTool",
     "DatabaseTuningAdvisor",
@@ -83,6 +86,7 @@ __all__ = [
     "SafeSqlDriver",
     "SchemaInspector",
     "SqlDriver",
+    "StatisticsInspector",
     "SyncPgDebug",
     "TopQueriesCalc",
     "__version__",

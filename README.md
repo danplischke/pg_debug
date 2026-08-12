@@ -12,8 +12,11 @@ without an MCP client in the loop.
 
 - **Schema introspection** — list schemas, tables, views, sequences and extensions; describe an object's columns, constraints and indexes.
 - **Explain plans** — plan or `EXPLAIN ANALYZE` a query, including plans against *hypothetical* indexes that are never created (via [HypoPG](https://github.com/HypoPG/hypopg)).
-- **Health checks** — invalid/duplicate/bloated/unused indexes, connection utilization, transaction ID wraparound risk, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints.
-- **Top queries** — the most expensive queries recorded by `pg_stat_statements`, ranked by resource blend or by execution time.
+- **Live activity** — what every backend is doing right now, what it is waiting on, and which process is blocking it.
+- **Vacuum progress** — running vacuums, their phase and how far through the heap they are.
+- **Planner statistics** — the per-column numbers behind a plan's row estimates, the extended statistics defined on a table, and which tables the planner is reasoning about with stale numbers.
+- **Health checks** — invalid/duplicate/bloated/unused indexes, connection utilization, transaction ID wraparound risk, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints, statistics freshness.
+- **Top queries** — the most expensive queries recorded by `pg_stat_statements`, ranked by resource blend or by execution time, cumulatively or sampled over an interval.
 - **Index tuning** — recommend indexes for your recorded workload or for a specific set of queries, with estimated size and before/after planner costs.
 - **Access modes** — run unrestricted, or in a `restricted` mode that parses each statement, rejects anything that is not read-only, and runs it in a read-only transaction with a statement timeout.
 
@@ -44,9 +47,17 @@ pg-debug explain "SELECT * FROM orders WHERE user_id = 42"
 pg-debug explain "SELECT * FROM orders WHERE user_id = 42" -i 'orders(user_id)'
 pg-debug explain --analyze "SELECT * FROM orders LIMIT 10"
 
+pg-debug activity                       # what is running right now
+pg-debug activity --blocked              # only backends waiting on a lock
+pg-debug activity --min-duration 30      # queries running longer than 30s
+pg-debug vacuum-progress
+
 pg-debug health
 pg-debug health --type index,vacuum
+pg-debug column-stats orders             # why the planner estimates what it does
+
 pg-debug top-queries --sort-by mean_time --limit 5
+pg-debug top-queries --interval 10       # measure the next 10 seconds instead
 
 pg-debug tune-queries "SELECT * FROM orders WHERE user_id = 42"
 pg-debug tune-workload --max-index-size-mb 500
@@ -75,13 +86,16 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `describe NAME` | `-s, --schema SCHEMA` (default `public`, ignored if `NAME` is qualified), `-t, --type {table,view,sequence,extension}` |
 | `execute SQL` | — |
 | `explain SQL` | `--analyze`, `-i, --hypothetical-index SPEC` (repeatable) |
+| `activity` | `-a, --all` (include idle), `-m, --min-duration SECONDS`, `-b, --blocked` |
+| `vacuum-progress` | — |
+| `column-stats TABLE` | — |
 | `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--exit-code` |
-| `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10, ignored for `resources`) |
+| `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10, ignored for cumulative `resources`), `-i, --interval SECONDS` |
 | `tune-workload` | `--max-index-size-mb MB` (default 10000), `--method {dta,llm}` (default `dta`) |
 | `tune-queries QUERY...` | up to 10 queries, same options as `tune-workload` |
 
 Health checks are `index`, `connection`, `vacuum`, `sequence`, `replication`,
-`buffer`, `constraint` and `all`.
+`buffer`, `constraint`, `statistics` and `all`.
 
 A hypothetical index `SPEC` is `table(column, ...)` with an optional method —
 `orders(user_id)`, `orders(user_id, created_at):btree`,
@@ -148,8 +162,11 @@ bad URL instead.
 | `get_object_details(schema, name, object_type="table")` | `dict` with `basic`, `columns`, `constraints`, `indexes` |
 | `execute_sql(sql)` | `list[dict]` — one per row, empty for statements with no result set |
 | `explain_query(sql, analyze=False, hypothetical_indexes=None)` | `ExplainPlanArtifact` |
+| `list_activity(include_idle=False, min_duration_seconds=None, blocked_only=False)` | `list[dict]` — one per backend, with `blocked_by` |
+| `vacuum_progress()` | `list[dict]` — one per running vacuum |
+| `column_stats(table)` / `extended_statistics(table)` | `list[dict]` — planner statistics |
 | `analyze_db_health(health_type="all")` | `dict[str, HealthCheckResult]` — check name to result |
-| `get_top_queries(sort_by="resources", limit=10)` | `list[dict]` — one per query |
+| `get_top_queries(sort_by="resources", limit=10, interval_seconds=None)` | `list[dict]` — one per query |
 | `analyze_workload_indexes(...)` / `analyze_query_indexes(queries, ...)` | `dict` with `summary`, `recommendations`, `query_impact` |
 
 Each `HealthCheckResult` carries `healthy`, a text `summary`, the flagged
@@ -230,6 +247,16 @@ The same choice is available from the library:
 ```python
 result = await pg.analyze_query_indexes([query], method="llm")
 ```
+
+### Relationship to pganalyze
+
+The live-activity, vacuum-progress, planner-statistics and interval-sampling
+features were prompted by reading the
+[pganalyze collector](https://github.com/pganalyze/collector), which is a good
+map of which catalog views matter. No code was copied — the queries here were
+written against the PostgreSQL catalogs directly. pg_debug's SQL parsing also
+runs on pganalyze's
+[libpg_query](https://github.com/pganalyze/libpg_query), via `pglast`.
 
 ### Known limitations
 

@@ -20,10 +20,13 @@ from .client import AccessMode
 from .client import PgDebug
 from .database_health import HealthType
 from .errors import PgDebugError
+from .formatting import render_activity
+from .formatting import render_column_stats
 from .formatting import render_health_checks
 from .formatting import render_index_recommendations
 from .formatting import render_object_details
 from .formatting import render_rows
+from .formatting import render_vacuum_progress
 from .formatting import to_json
 from .index.index_opt_base import MAX_NUM_INDEX_TUNING_QUERIES
 from .schema import ObjectType
@@ -146,6 +149,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     explain.set_defaults(func=cmd_explain)
 
+    column_stats = subparsers.add_parser("column-stats", help="Show the planner's statistics for a table")
+    column_stats.add_argument("table", help="Table name, optionally schema-qualified")
+    column_stats.set_defaults(func=cmd_column_stats)
+
+    activity = subparsers.add_parser("activity", help="Show what the server is doing right now")
+    activity.add_argument("-a", "--all", dest="include_idle", action="store_true", help="Include idle backends and idle auxiliary processes.")
+    activity.add_argument(
+        "-m",
+        "--min-duration",
+        dest="min_duration",
+        type=float,
+        metavar="SECONDS",
+        help="Only show backends that have held their current state this long, e.g. 30 for queries running over 30s.",
+    )
+    activity.add_argument("-b", "--blocked", action="store_true", help="Only show backends waiting on a lock another backend holds.")
+    activity.set_defaults(func=cmd_activity)
+
+    vacuum_progress = subparsers.add_parser("vacuum-progress", help="Show running vacuums and how far along they are")
+    vacuum_progress.set_defaults(func=cmd_vacuum_progress)
+
     health = subparsers.add_parser("health", help="Run database health checks")
     health.add_argument(
         "-t",
@@ -170,6 +193,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Ranking criteria (default: resources).",
     )
     top_queries.add_argument("-n", "--limit", type=int, default=10, help="Number of queries to report when ranking by time (default: 10).")
+    top_queries.add_argument(
+        "-i",
+        "--interval",
+        type=float,
+        metavar="SECONDS",
+        help="Sample over this many seconds instead of reporting totals since the last statistics reset.",
+    )
     top_queries.set_defaults(func=cmd_top_queries)
 
     tune_workload = subparsers.add_parser(
@@ -231,12 +261,31 @@ async def cmd_explain(pg: PgDebug, args: argparse.Namespace) -> Any:
     return plan
 
 
+async def cmd_column_stats(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return {
+        "columns": await pg.column_stats(args.table),
+        "extended_statistics": await pg.extended_statistics(args.table),
+    }
+
+
+async def cmd_activity(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.list_activity(
+        include_idle=args.include_idle,
+        min_duration_seconds=args.min_duration,
+        blocked_only=args.blocked,
+    )
+
+
+async def cmd_vacuum_progress(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.vacuum_progress()
+
+
 async def cmd_health(pg: PgDebug, args: argparse.Namespace) -> Any:
     return await pg.analyze_db_health(args.health_type)
 
 
 async def cmd_top_queries(pg: PgDebug, args: argparse.Namespace) -> Any:
-    return await pg.get_top_queries(sort_by=args.sort_by, limit=args.limit)
+    return await pg.get_top_queries(sort_by=args.sort_by, limit=args.limit, interval_seconds=args.interval)
 
 
 async def cmd_tune_workload(pg: PgDebug, args: argparse.Namespace) -> Any:
@@ -273,6 +322,12 @@ def format_result(command: str, result: Any, as_json: bool) -> str:
             return to_json({name: check.to_dict() for name, check in result.items()})
         return to_json(result)
 
+    if command == "activity":
+        return render_activity(result)
+    if command == "column-stats":
+        return render_column_stats(result)
+    if command == "vacuum-progress":
+        return render_vacuum_progress(result)
     if command == "describe":
         return render_object_details(result)
     if command == "health":

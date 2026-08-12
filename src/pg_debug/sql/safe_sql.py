@@ -84,6 +84,10 @@ from .sql_driver import SqlDriver
 
 logger = logging.getLogger(__name__)
 
+#: Marker prefixed to queries this library issues, so they can be recognised in
+#: pg_stat_statements and pg_stat_activity and excluded from its own reports.
+QUERY_MARKER = "/* pg_debug */"
+
 
 class SafeSqlDriver(SqlDriver):
     """A wrapper around any SqlDriver that only allows SELECT, ANALYZE, VACUUM, EXPLAIN SELECT, and
@@ -991,7 +995,7 @@ class SafeSqlDriver(SqlDriver):
             try:
                 async with asyncio.timeout(self.timeout):
                     return await self.sql_driver.execute_query(
-                        f"/* pg_debug */ {query}",
+                        f"{QUERY_MARKER} {query}",
                         params=params,
                         force_readonly=True,
                     )
@@ -1006,7 +1010,7 @@ class SafeSqlDriver(SqlDriver):
                 raise
         else:
             return await self.sql_driver.execute_query(
-                f"/* pg_debug */ {query}",
+                f"{QUERY_MARKER} {query}",
                 params=params,
                 force_readonly=True,
             )

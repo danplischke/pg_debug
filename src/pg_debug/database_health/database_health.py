@@ -15,6 +15,7 @@ from .index_health_calc import IndexHealthCalc
 from .replication_calc import ReplicationCalc
 from .result import HealthCheckResult
 from .sequence_health_calc import SequenceHealthCalc
+from .statistics_health_calc import StatisticsHealthCalc
 from .vacuum_health_calc import VacuumHealthCalc
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ class HealthType(str, Enum):
     REPLICATION = "replication"
     BUFFER = "buffer"
     CONSTRAINT = "constraint"
+    STATISTICS = "statistics"
     ALL = "all"
 
     @classmethod
@@ -111,6 +113,9 @@ class DatabaseHealthTool:
 
         if HealthType.CONSTRAINT in health_types:
             results.append(await ConstraintHealthCalc(self.sql_driver).invalid_constraints_check())
+
+        if HealthType.STATISTICS in health_types:
+            results.append(await StatisticsHealthCalc(self.sql_driver).stale_statistics_check())
 
         return {result.name: result for result in results}
 

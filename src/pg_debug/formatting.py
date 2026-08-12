@@ -25,6 +25,10 @@ def to_json(value: Any, indent: int = 2) -> str:
 def _cell(value: Any, max_width: int = MAX_CELL_WIDTH) -> str:
     if value is None:
         text = ""
+    elif isinstance(value, float):
+        # Raw float repr (332.48437299999995) is noise in a table; the JSON
+        # output keeps full precision for anything that needs it.
+        text = f"{value:.3f}"
     else:
         text = str(value)
     text = " ".join(text.split())
@@ -61,6 +65,79 @@ def render_mapping(mapping: Mapping[str, Any], empty: str = "(nothing to report)
     if not mapping:
         return empty
     return "\n".join(f"{name}: {value}" for name, value in mapping.items())
+
+
+def format_duration(seconds: Any) -> str:
+    """Render a duration in the largest unit that keeps it readable."""
+    if seconds is None:
+        return ""
+    seconds = float(seconds)
+    if seconds < 1:
+        return f"{seconds * 1000:.0f}ms"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m{int(seconds % 60):02d}s"
+    return f"{int(seconds // 3600)}h{int(seconds % 3600 // 60):02d}m"
+
+
+def render_activity(rows: Sequence[Mapping[str, Any]]) -> str:
+    """Render backends as a scannable table, keeping the query text wide."""
+    if not rows:
+        return "(nothing running)"
+
+    projected = [
+        {
+            "pid": row.get("pid"),
+            "user": row.get("usename"),
+            "state": row.get("state") or row.get("backend_type"),
+            "wait": ":".join(p for p in (row.get("wait_event_type"), row.get("wait_event")) if p),
+            "for": format_duration(row.get("state_seconds")),
+            "blocked_by": ",".join(str(pid) for pid in row.get("blocked_by") or []),
+            "query": row.get("query"),
+        }
+        for row in rows
+    ]
+    return render_rows(projected, max_width=80)
+
+
+def render_vacuum_progress(rows: Sequence[Mapping[str, Any]]) -> str:
+    """Render running vacuums with their progress through the heap."""
+    if not rows:
+        return "(no vacuum running)"
+
+    projected = [
+        {
+            "pid": row.get("pid"),
+            "table": ".".join(p for p in (row.get("schema"), row.get("table")) if p),
+            "phase": row.get("phase"),
+            "scanned": f"{row.get('percent_scanned')}%" if row.get("percent_scanned") is not None else "",
+            "heap_blks": f"{row.get('heap_blks_scanned')}/{row.get('heap_blks_total')}",
+            "index_passes": row.get("index_vacuum_count"),
+            "running": format_duration(row.get("running_seconds")),
+            "autovacuum": row.get("autovacuum"),
+        }
+        for row in rows
+    ]
+    return render_rows(projected)
+
+
+def render_column_stats(result: Mapping[str, Any]) -> str:
+    """Render per-column planner statistics, with any extended statistics."""
+    columns = result.get("columns") or []
+    if not columns:
+        return "(no statistics — the table has never been analyzed, or does not exist)"
+
+    sections = ["Column statistics", render_rows(columns)]
+
+    extended = result.get("extended_statistics") or []
+    if extended:
+        sections += [
+            "",
+            "Extended statistics",
+            render_rows([{**row, "columns": ", ".join(row.get("columns") or []), "kinds": ", ".join(row.get("kinds") or [])} for row in extended]),
+        ]
+    return "\n".join(sections)
 
 
 def render_health_checks(results: Mapping[str, Any], empty: str = "No health checks were performed.") -> str:
@@ -134,10 +211,14 @@ def render_index_recommendations(result: Mapping[str, Any]) -> str:
 
 
 __all__ = [
+    "format_duration",
+    "render_activity",
+    "render_column_stats",
     "render_health_checks",
     "render_index_recommendations",
     "render_mapping",
     "render_object_details",
     "render_rows",
+    "render_vacuum_progress",
     "to_json",
 ]

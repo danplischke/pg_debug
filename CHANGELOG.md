@@ -8,6 +8,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `pg-debug activity` and `PgDebug.list_activity()`: what every backend is
+  doing, what it is waiting on, and which pids are blocking it. Idle backends
+  and the client's own connection are excluded by default; `--blocked` and
+  `--min-duration` narrow it further.
+- `pg-debug vacuum-progress` and `PgDebug.vacuum_progress()`, reporting phase
+  and percent scanned, version-gated for the PostgreSQL 17 counter changes.
+- `pg-debug column-stats` and `PgDebug.column_stats()` /
+  `extended_statistics()`: the per-column numbers behind the planner's row
+  estimates, and the extended statistics objects on a table.
+- A `statistics` health check flagging tables never analyzed or whose contents
+  have drifted since the last ANALYZE.
+- `top-queries --interval N` and `get_top_queries(interval_seconds=)`, which
+  sample pg_stat_statements over an interval instead of reporting totals since
+  the last reset. Handles resets and newly appearing queries, and excludes
+  pg_debug's own queries and transaction control from the result.
 - A `pg-debug` project skill (`.claude/skills/pg-debug/SKILL.md`) documenting
   how to drive the tool from Claude Code.
 - `PG_DEBUG_LLM_MODEL`, which overrides the model used by the `llm` tuning
