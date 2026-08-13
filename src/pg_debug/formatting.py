@@ -303,6 +303,36 @@ def render_migration_review(reviews: Sequence[Any]) -> str:
     return "\n".join(lines).strip("\n")
 
 
+def render_plan_findings(findings: Sequence[Any]) -> str:
+    """Render a plan diagnosis, the costliest finding first.
+
+    The percentages are shares of the query's work per finding, and they do not
+    add up to one: two findings can be about the same node, and a bad estimate
+    is charged for the whole subtree it misled. The closing line says so, since
+    a column of percentages otherwise reads as a breakdown.
+    """
+    if not findings:
+        return "Nothing wrong with this plan: the estimates match what the query found, and nothing spilled to disk."
+
+    lines: List[str] = []
+    for finding in findings:
+        where = f" on {finding.relation}" if finding.relation else ""
+        lines.append("")
+        lines.append(f"[{finding.severity.value}] {finding.issue.value} — {finding.node_type}{where}")
+        lines.append(f"    accounts for {finding.share_of_time:.0%} of the query's work ({format_duration(finding.cost_ms / 1000)})")
+        lines.append(f"    {finding.summary}")
+        lines.append(f"    {finding.detail}")
+        if finding.remediation:
+            lines.append("")
+            for statement in finding.remediation:
+                lines.append(f"      {statement}")
+
+    lines.append("")
+    noun = "finding" if len(findings) == 1 else "findings"
+    lines.append(f"{len(findings)} {noun}. Shares are per finding and overlap — they are not a breakdown of the total.")
+    return "\n".join(lines).strip("\n")
+
+
 def render_partition_candidates(candidates: Sequence[Any]) -> str:
     """Render the partitioning verdicts, recommended tables first.
 
@@ -372,6 +402,7 @@ __all__ = [
     "render_model_findings",
     "render_object_details",
     "render_partition_candidates",
+    "render_plan_findings",
     "render_rows",
     "render_vacuum_progress",
     "to_json",

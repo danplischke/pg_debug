@@ -1478,3 +1478,211 @@ def test_cli_partitions_against_a_real_database(capsys, monkeypatch, partition_p
     for candidate in json.loads(capsys.readouterr().out):
         assert candidate["evidence"], f"{candidate['table']} reported with no evidence"
         assert candidate["reasons"], f"{candidate['table']} reported with no reasoning"
+
+
+# -- Plan diagnosis ---------------------------------------------------------
+
+PLAN_SCHEMA = "pgdebug_plan_test"
+
+
+@pytest_asyncio.fixture
+async def plan_pg():
+    """Tables built so that each rule has exactly one thing to find.
+
+    ``visits`` has two perfectly correlated columns, which is the shape the
+    planner gets wrong on its own. ``untouched`` is loaded and never analyzed.
+    Both are big enough that a sort over them will not fit in a default
+    ``work_mem``, which is what makes the spill rules reachable without asking
+    the server to be configured specially.
+    """
+    client = PgDebug(DATABASE_URI)
+    await client.execute_sql(f"DROP SCHEMA IF EXISTS {PLAN_SCHEMA} CASCADE")
+    await client.execute_sql(f"CREATE SCHEMA {PLAN_SCHEMA}")
+
+    await client.execute_sql(
+        f"""
+        CREATE TABLE {PLAN_SCHEMA}.visits AS
+        SELECT g AS id,
+               'c' || (g % 100) AS country,
+               'city' || (g % 100) AS city,
+               (g % 1000) AS bucket,
+               repeat('x', 40) AS payload
+        FROM generate_series(1, 200000) g
+        """
+    )
+    await client.execute_sql(f"CREATE INDEX visits_bucket_idx ON {PLAN_SCHEMA}.visits (bucket)")
+    await client.execute_sql(f"ANALYZE {PLAN_SCHEMA}.visits")
+
+    # Loaded and deliberately not analyzed, with a skew the planner has no way
+    # to guess at: nine rows in ten share one bucket, and without statistics it
+    # falls back to a fixed selectivity that is nowhere near that.
+    # The load and the stats flush have to happen on one connection: a backend
+    # can only flush its own pending counters, and across a pool the load and
+    # the flush would otherwise land on different ones. Without it the table
+    # reads as having no live rows, and a table with no rows is not stale.
+    #
+    # Flushed, not analyzed — no statistics is the state under test.
+    driver = await client.sql_driver()
+    async with driver.session():
+        await driver.execute_query(
+            f"""
+            CREATE TABLE {PLAN_SCHEMA}.untouched AS
+            SELECT g AS id, CASE WHEN g % 10 = 0 THEN g % 97 ELSE 7 END AS bucket
+            FROM generate_series(1, 200000) g
+            """
+        )
+        await driver.execute_query("SELECT pg_stat_force_next_flush()")
+
+    try:
+        yield client
+    finally:
+        await client.execute_sql(f"DROP SCHEMA IF EXISTS {PLAN_SCHEMA} CASCADE")
+        await client.close()
+
+
+CORRELATED_QUERY = f"SELECT count(*) FROM {PLAN_SCHEMA}.visits WHERE country = 'c7' AND city = 'city7'"
+
+
+def issues(findings):
+    return {finding.issue.value for finding in findings}
+
+
+@pytest.mark.asyncio
+async def test_a_wrong_row_estimate_is_found_at_the_node_that_caused_it(plan_pg):
+    findings = await plan_pg.diagnose_query(CORRELATED_QUERY)
+
+    estimate = next(f for f in findings if f.issue.value == "row_estimate")
+    assert estimate.relation == f"{PLAN_SCHEMA}.visits"
+    assert estimate.node_type in ("Seq Scan", "Parallel Seq Scan")
+    assert estimate.evidence["actual_rows"] > estimate.evidence["estimated_rows"] * 10
+
+
+@pytest.mark.asyncio
+async def test_correlated_columns_are_named_and_only_the_real_ones(plan_pg):
+    """The condition PostgreSQL renders is full of casts and qualifiers. Only
+    the table's own columns may come out of it."""
+    findings = await plan_pg.diagnose_query(CORRELATED_QUERY)
+
+    correlated = next(f for f in findings if f.issue.value == "correlated_columns")
+    assert sorted(correlated.evidence["columns"]) == ["city", "country"]
+
+
+@pytest.mark.asyncio
+async def test_the_statistics_it_recommends_actually_move_the_estimate(plan_pg):
+    """The claim the whole rule rests on. Running the tool's own statements has
+    to change the number it complained about — otherwise the advice is wrong,
+    however plausible it reads."""
+    before = await plan_pg.diagnose_query(CORRELATED_QUERY)
+    correlated = next(f for f in before if f.issue.value == "correlated_columns")
+    estimated_before = correlated.evidence["estimated_rows"]
+    actual = correlated.evidence["actual_rows"]
+
+    for statement in correlated.remediation:
+        await plan_pg.execute_sql(cast(LiteralString, statement))
+
+    after = await plan_pg.diagnose_query(CORRELATED_QUERY)
+    assert "correlated_columns" not in issues(after)
+    assert "row_estimate" not in issues(after)
+
+    plan = await plan_pg.explain_query(CORRELATED_QUERY)
+    estimated_after = _scan_rows(plan.plan_tree)
+    assert abs(estimated_after - actual) < abs(estimated_before - actual)
+
+
+def _scan_rows(node):
+    """The estimated rows at the deepest scan of a plan."""
+    if not node.children:
+        return node.plan_rows
+    return min(_scan_rows(child) for child in node.children)
+
+
+@pytest.mark.asyncio
+async def test_a_table_that_was_never_analyzed_is_blamed_for_its_own_estimate(plan_pg):
+    findings = await plan_pg.diagnose_query(f"SELECT count(*) FROM {PLAN_SCHEMA}.untouched WHERE bucket = 7")
+
+    stale = next(f for f in findings if f.issue.value == "stale_statistics")
+    assert stale.relation == f"{PLAN_SCHEMA}.untouched"
+    assert stale.remediation == [f"ANALYZE {PLAN_SCHEMA}.untouched;"]
+
+
+@pytest.mark.asyncio
+async def test_a_scan_that_discards_nearly_everything_is_reported(plan_pg):
+    findings = await plan_pg.diagnose_query(CORRELATED_QUERY)
+
+    discarded = next(f for f in findings if f.issue.value == "discarded_rows")
+    assert discarded.evidence["rows_removed_per_loop"] > 10 * discarded.evidence["rows_returned_per_loop"]
+
+
+@pytest.mark.asyncio
+async def test_a_sort_too_large_for_work_mem_is_reported_as_a_spill(plan_pg):
+    findings = await plan_pg.diagnose_query(f"SELECT payload FROM {PLAN_SCHEMA}.visits ORDER BY payload, id")
+
+    spill = next(f for f in findings if f.issue.value == "sort_spilled")
+    assert spill.evidence["disk_kb"] > 0
+    assert spill.remediation and spill.remediation[0].startswith("SET work_mem")
+
+
+@pytest.mark.asyncio
+async def test_a_well_estimated_query_produces_no_findings_at_all(plan_pg):
+    """The direction that makes an empty result worth something. A rule that
+    fires on a good plan is worse than no rule."""
+    assert await plan_pg.diagnose_query(f"SELECT id FROM {PLAN_SCHEMA}.visits WHERE bucket = 5") == []
+
+
+@pytest.mark.asyncio
+async def test_the_shares_add_up_to_the_work_the_query_did(plan_pg):
+    """Self time has to be attributed per node rather than per subtree, or the
+    root absorbs the whole query and every share is meaningless."""
+    findings = await plan_pg.diagnose_query(CORRELATED_QUERY)
+
+    assert findings
+    assert all(0 < finding.share_of_time <= 1.0 for finding in findings)
+    assert all(finding.cost_ms > 0 for finding in findings)
+
+
+@pytest.mark.asyncio
+async def test_diagnosing_an_update_leaves_the_table_alone(plan_pg):
+    """EXPLAIN ANALYZE runs the statement. For a write that is only acceptable
+    because the transaction is thrown away, so this checks that it is."""
+    await plan_pg.diagnose_query(f"UPDATE {PLAN_SCHEMA}.visits SET payload = 'CHANGED' WHERE bucket < 500")
+
+    rows = await plan_pg.execute_sql(f"SELECT count(*) AS n FROM {PLAN_SCHEMA}.visits WHERE payload = 'CHANGED'")
+    assert rows[0]["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_restricted_mode_refuses_to_run_a_query_to_diagnose_it():
+    """Restricted mode's promise is that nothing executes, and this needs the
+    query to execute. Refusing is the honest answer."""
+    async with PgDebug(DATABASE_URI, access_mode=AccessMode.RESTRICTED) as restricted:
+        with pytest.raises(InvalidArgumentError, match="restricted mode does not run queries"):
+            await restricted.diagnose_query("SELECT 1")
+
+
+def test_cli_diagnose_reports_the_spill_it_finds(capsys, monkeypatch):
+    """The whole path through the CLI and the server.
+
+    cli.main() runs its own event loop, so this stays synchronous and sets up
+    through SyncPgDebug rather than the async fixture.
+    """
+    monkeypatch.setenv("DATABASE_URI", DATABASE_URI or "")
+    table = "pgdebug_diagnose_cli_test"
+
+    with SyncPgDebug(DATABASE_URI) as pg:
+        pg.execute_sql(f"DROP TABLE IF EXISTS {table}")
+        pg.execute_sql(f"CREATE TABLE {table} AS SELECT g AS id, repeat('x', 40) AS payload FROM generate_series(1, 200000) g")
+        pg.execute_sql(f"ANALYZE {table}")
+
+        try:
+            code = cli.main(["diagnose", f"SELECT payload FROM {table} ORDER BY payload, id"])
+            captured = capsys.readouterr()
+
+            assert code == 0, captured.err
+            assert "sort_spilled" in captured.out
+            assert "of the query's work" in captured.out
+
+            assert cli.main(["--json", "diagnose", f"SELECT payload FROM {table} ORDER BY payload, id"]) == 0
+            payload = json.loads(capsys.readouterr().out)
+            assert any(finding["issue"] == "sort_spilled" for finding in payload)
+        finally:
+            pg.execute_sql(f"DROP TABLE IF EXISTS {table}")

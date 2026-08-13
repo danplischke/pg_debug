@@ -8,6 +8,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `pg-debug diagnose` and `PgDebug.diagnose_query()`: run a query and report
+  what is wrong with the plan it produced, rather than only printing it. Nine
+  rules over the parsed plan — the lowest node whose row estimate diverged from
+  what it found, whether that is stale statistics or correlated columns with no
+  `pg_statistic_ext` object covering them, a nested loop re-executing its inner
+  side far more often than planned for, a scan reading rows only to discard
+  them, sorts and hashes and bitmaps that outgrew `work_mem`, and parallel
+  workers planned for but not granted. Findings carry the statement or setting
+  that addresses them, and are ranked by the share of the query's work behind
+  them — a bad estimate charged for the whole subtree it misled rather than for
+  the scan itself. Needs `EXPLAIN ANALYZE`, so `restricted` mode refuses with
+  the reason; a statement that writes is run in a transaction that is rolled
+  back.
+- `SqlDriver.execute_query_and_rollback()`, which runs a statement and keeps
+  only what it returned. `SafeSqlDriver` overrides it to refuse.
+- `PlanNode` now parses the fields the diagnosis reads: rows removed by a
+  filter, sort method and spill size, hash batches, lossy heap blocks, workers
+  planned and launched, index and join conditions, and the schema a relation is
+  in.
 - `pg-debug activity` and `PgDebug.list_activity()`: what every backend is
   doing, what it is waiting on, and which pids are blocking it. Idle backends
   and the client's own connection are excluded by default; `--blocked` and

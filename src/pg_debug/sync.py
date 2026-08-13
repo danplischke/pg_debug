@@ -34,6 +34,8 @@ from .model import RuleId
 from .partition import DEFAULT_MIN_PRUNING_SHARE
 from .partition import DEFAULT_MIN_TABLE_BYTES
 from .partition import PartitionCandidate
+from .plan import DEFAULT_MIN_RATIO
+from .plan import PlanFinding
 from .schema import ObjectType
 from .sql import DbConnPool
 
@@ -176,6 +178,12 @@ class SyncPgDebug:
     ) -> ExplainPlanArtifact:
         """Return the execution plan for a query."""
         return self._call(self._client.explain_query, sql, analyze=analyze, hypothetical_indexes=hypothetical_indexes)
+
+    # -- Plan diagnosis ------------------------------------------------------
+
+    def diagnose_query(self, sql: str, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
+        """Run a query and say what is wrong with the plan it produced."""
+        return self._call(self._client.diagnose_query, sql, min_ratio=min_ratio)
 
     # -- Planner statistics --------------------------------------------------
 

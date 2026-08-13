@@ -12,6 +12,7 @@ without an MCP client in the loop.
 
 - **Schema introspection** — list schemas, tables, views, sequences and extensions; describe an object's columns, constraints and indexes.
 - **Explain plans** — plan or `EXPLAIN ANALYZE` a query, including plans against *hypothetical* indexes that are never created (via [HypoPG](https://github.com/HypoPG/hypopg)).
+- **Plan diagnosis** — read the plan rather than only print it: the node whose row estimate first diverged from what it found, and whether that is stale statistics or two correlated columns nothing has told the planner about; sorts and hashes that outgrew `work_mem`; scans reading rows in order to discard them; parallel workers asked for and not granted. Each finding is ranked by the share of the query's work behind it.
 - **Live activity** — what every backend is doing right now, what it is waiting on, and which process is blocking it.
 - **Vacuum progress** — running vacuums, their phase and how far through the heap they are.
 - **Planner statistics** — the per-column numbers behind a plan's row estimates, the extended statistics defined on a table, and which tables the planner is reasoning about with stale numbers.
@@ -54,6 +55,10 @@ pg-debug execute "SELECT count(*) FROM orders"
 pg-debug explain "SELECT * FROM orders WHERE user_id = 42"
 pg-debug explain "SELECT * FROM orders WHERE user_id = 42" -i 'orders(user_id)'
 pg-debug explain --analyze "SELECT * FROM orders LIMIT 10"
+
+pg-debug diagnose "SELECT * FROM orders WHERE status = 'open' AND region = 'eu'"
+pg-debug diagnose ./slow.sql            # what is wrong with this plan, and why
+pg-debug --json diagnose ./slow.sql | jq '.[] | select(.severity == "high")'
 
 pg-debug activity                       # what is running right now
 pg-debug activity --blocked              # only backends waiting on a lock
@@ -108,6 +113,7 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `describe NAME` | `-s, --schema SCHEMA` (default `public`, ignored if `NAME` is qualified), `-t, --type {table,view,sequence,extension}` |
 | `execute SQL` | — |
 | `explain SQL` | `--analyze`, `-i, --hypothetical-index SPEC` (repeatable) |
+| `diagnose SQL` | a file path, inline SQL, or `-` for stdin; `--min-ratio N` (default 10) |
 | `activity` | `-a, --all` (include idle), `-m, --min-duration SECONDS`, `-b, --blocked` |
 | `vacuum-progress` | — |
 | `column-stats TABLE` | — |
@@ -176,6 +182,33 @@ have to gain the partition key it is recreated rather than copied, because
 `LIKE ... INCLUDING ALL` brings the old key along and PostgreSQL rejects the
 CREATE outright. The monthly boundaries come from the column's histogram, so
 they cover the span the data actually occupies.
+
+`diagnose` reads the plan instead of only printing it. The number it turns on
+is the row estimate: the planner picks a join method, a scan and an order from
+how many rows it expects, so an estimate that is out by two orders of magnitude
+is usually the reason a query is slow, and every plan above the mistake was
+chosen from the wrong number. Only the *lowest* diverging node is reported —
+the error propagates upwards, and listing every node it touched buries the
+cause under its own consequences.
+
+Where a bad estimate has a nameable cause, the finding says which. Statistics
+that no longer describe the table point at `ANALYZE`; several columns of one
+table restricted at once, with nothing in `pg_statistic_ext` covering them,
+point at `CREATE STATISTICS` — the planner multiplies their selectivities as
+though they were independent, which is exactly how an estimate comes out far
+below the truth. The rest is read straight off the plan: a sort or a hash that
+outgrew `work_mem`, a bitmap that went lossy, a scan reading rows to discard
+them, workers planned for and not granted.
+
+Findings are ranked by the share of the query's work behind them, and a bad
+estimate is charged for the whole subtree it misled rather than for the scan
+itself, which is often trivial. The shares overlap and are not a breakdown.
+
+This needs `EXPLAIN ANALYZE`, which runs the query, so `restricted` mode
+refuses outright rather than half-answering — its promise is that nothing
+executes. A statement that writes is run in a transaction that is rolled back,
+which undoes the rows but not a sequence it consumed or a trigger that reached
+outside the database.
 
 `check-migration` answers a different question from the rest: not what the
 database is, but what a change will do to everyone using it while it runs. The
@@ -327,6 +360,7 @@ bad URL instead.
 | `get_object_details(schema, name, object_type="table")` | `dict` with `basic`, `columns`, `constraints`, `indexes` |
 | `execute_sql(sql)` | `list[dict]` — one per row, empty for statements with no result set |
 | `explain_query(sql, analyze=False, hypothetical_indexes=None)` | `ExplainPlanArtifact` |
+| `diagnose_query(sql, min_ratio=10)` | `list[PlanFinding]` — most severe first |
 | `list_activity(include_idle=False, min_duration_seconds=None, blocked_only=False)` | `list[dict]` — one per backend, with `blocked_by` |
 | `vacuum_progress()` | `list[dict]` — one per running vacuum |
 | `column_stats(table)` / `extended_statistics(table)` | `list[dict]` — planner statistics |
@@ -341,6 +375,12 @@ bad URL instead.
 Each `HealthCheckResult` carries `healthy`, a text `summary`, the flagged
 `findings` (one dict per object) and the `metrics` behind the verdict, and has
 `to_dict()` for serialization.
+
+Each `PlanFinding` carries its `issue`, `severity`, the `node_type` and
+`relation` it is about, a `summary` and `detail`, `cost_ms` and
+`share_of_time` for the work behind it, the `evidence`, and `remediation`
+where there is a statement or a setting to change. It has `to_dict()` for
+serialization.
 
 Each `ModelFinding` carries its `rule`, `confidence` (`proven` or `candidate`),
 `severity`, the `schema`/`table`/`columns` it is about, a `summary` and

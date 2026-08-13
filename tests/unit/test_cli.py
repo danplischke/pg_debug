@@ -736,6 +736,84 @@ def test_partitions_json_carries_the_verdict_and_its_evidence(pg_client):
     assert payload[0]["pruning_share"] == 0.9
 
 
+def plan_finding(**overrides):
+    from pg_debug.plan import PlanFinding
+    from pg_debug.plan import PlanIssue
+    from pg_debug.severity import Severity
+
+    base = dict(
+        issue=PlanIssue.ROW_ESTIMATE,
+        severity=Severity.HIGH,
+        node_type="Seq Scan",
+        relation="public.visits",
+        summary="The Seq Scan on public.visits expected 17 rows and found 4,000 — an underestimate of 235x.",
+        detail="Every estimate above this node inherited the error.",
+        cost_ms=940.0,
+        share_of_time=0.87,
+        evidence={"estimated_rows": 17, "actual_rows": 4000},
+        remediation=[],
+    )
+    return PlanFinding(**{**base, **overrides})
+
+
+def test_diagnose_renders_a_finding_with_the_share_behind_it(pg_client):
+    pg_client.diagnose_query = AsyncMock(return_value=[plan_finding()])
+
+    code, out, _ = run(["diagnose", "SELECT 1"])
+
+    assert code == 0
+    assert "[high] row_estimate — Seq Scan on public.visits" in out
+    assert "87% of the query's work" in out
+
+
+def test_diagnose_shows_the_remediation_a_finding_carries(pg_client):
+    pg_client.diagnose_query = AsyncMock(return_value=[plan_finding(remediation=["ANALYZE public.visits;"])])
+
+    code, out, _ = run(["diagnose", "SELECT 1"])
+
+    assert "ANALYZE public.visits;" in out
+
+
+def test_diagnose_says_the_plan_is_fine_when_nothing_is_wrong(pg_client):
+    """An empty result has to read as an answer rather than as a failure."""
+    pg_client.diagnose_query = AsyncMock(return_value=[])
+
+    code, out, _ = run(["diagnose", "SELECT 1"])
+
+    assert code == 0
+    assert "Nothing wrong with this plan" in out
+
+
+def test_diagnose_warns_that_the_shares_are_not_a_breakdown(pg_client):
+    """Two findings can be about the same node, so the percentages overlap.
+    A column of them otherwise reads as adding up to the whole."""
+    pg_client.diagnose_query = AsyncMock(return_value=[plan_finding(), plan_finding()])
+
+    _, out, _ = run(["diagnose", "SELECT 1"])
+
+    assert "not a breakdown of the total" in out
+
+
+def test_diagnose_json_carries_the_evidence(pg_client):
+    pg_client.diagnose_query = AsyncMock(return_value=[plan_finding()])
+
+    code, out, _ = run(["--json", "diagnose", "SELECT 1"])
+
+    payload = json.loads(out)
+    assert code == 0
+    assert payload[0]["issue"] == "row_estimate"
+    assert payload[0]["evidence"]["actual_rows"] == 4000
+    assert payload[0]["share_of_time"] == 0.87
+
+
+def test_diagnose_passes_the_threshold_through(pg_client):
+    pg_client.diagnose_query = AsyncMock(return_value=[])
+
+    run(["diagnose", "SELECT 1", "--min-ratio", "25"])
+
+    pg_client.diagnose_query.assert_awaited_once_with("SELECT 1", min_ratio=25.0)
+
+
 def test_partitions_passes_its_thresholds_through(pg_client):
     pg_client.suggest_partitions = AsyncMock(return_value=[])
 

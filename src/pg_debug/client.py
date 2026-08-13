@@ -39,6 +39,9 @@ from .partition import DEFAULT_MIN_PRUNING_SHARE
 from .partition import DEFAULT_MIN_TABLE_BYTES
 from .partition import PartitionAdvisor
 from .partition import PartitionCandidate
+from .plan import DEFAULT_MIN_RATIO
+from .plan import PlanDiagnoser
+from .plan import PlanFinding
 from .schema import ObjectType
 from .schema import SchemaInspector
 from .sql import DbConnPool
@@ -314,6 +317,44 @@ class PgDebug:
 
         message = result.to_text() if isinstance(result, ErrorResult) else "Error processing explain plan"
         raise ExplainPlanError(message)
+
+    # -- Plan diagnosis ------------------------------------------------------
+
+    async def diagnose_query(self, sql: str, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
+        """Run a query and say what is wrong with the plan it produced.
+
+        Where :meth:`explain_query` hands back the plan, this reads it: the
+        node whose row estimate first diverged from what it found, and whether
+        that is stale statistics or two correlated columns the planner has no
+        way to know are related; a sort or a hash that outgrew ``work_mem``; a
+        scan reading rows in order to discard them; parallel workers asked for
+        and not granted.
+
+        Findings are ranked by the share of the query's work behind them, so a
+        spill that is two percent of the runtime sorts below one that is most
+        of it.
+
+        This needs ``EXPLAIN ANALYZE``, which runs the query. A statement that
+        writes is run inside a transaction that is rolled back — though a
+        sequence it consumed is not given back, and a trigger that reached
+        outside the database has already done so.
+
+        Args:
+            sql: The statement to diagnose. One statement, not a script.
+            min_ratio: How far a row estimate has to be from the truth before
+                it is reported, as a factor.
+
+        Returns:
+            :class:`~pg_debug.plan.PlanFinding` objects, most severe first. An
+            empty list means the plan is a reasonable one.
+
+        Raises:
+            InvalidArgumentError: In restricted mode, which does not run
+                queries, or if more than one statement is passed.
+            ExplainPlanError: If the statement could not be run or its plan
+                could not be read.
+        """
+        return await PlanDiagnoser(await self.sql_driver()).diagnose(sql, min_ratio=min_ratio)
 
     # -- Planner statistics --------------------------------------------------
 

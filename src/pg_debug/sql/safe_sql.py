@@ -1025,6 +1025,20 @@ class SafeSqlDriver(SqlDriver):
                 force_readonly=True,
             )
 
+    async def execute_query_and_rollback(self, query: LiteralString, params: list[Any] | None = None) -> Optional[list[SqlDriver.RowResult]]:
+        """Always refuses. Restricted mode does not run statements to see what they do.
+
+        Inherited unchanged this would be a hole rather than a feature: the base
+        implementation talks to the connection directly and would bypass
+        validation entirely. Rolling a statement back afterwards is not the same
+        promise as never having run it, and restricted mode makes the second
+        one.
+        """
+        raise ValueError(
+            "Restricted mode cannot run a statement in order to observe it. "
+            "Use --access-mode unrestricted, on a database where executing the statement is acceptable."
+        )
+
     @staticmethod
     def sql_to_query(sql: Composable) -> str:
         """Convert a SQL string to a query string."""

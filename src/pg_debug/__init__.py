@@ -57,6 +57,9 @@ from .model import Severity
 from .partition import PartitionAdvisor
 from .partition import PartitionCandidate
 from .partition import Strategy
+from .plan import PlanDiagnoser
+from .plan import PlanFinding
+from .plan import PlanIssue
 from .schema import ObjectType
 from .schema import SchemaInspector
 from .sql import DbConnPool
@@ -103,6 +106,9 @@ __all__ = [
     "PartitionCandidate",
     "PgDebug",
     "PgDebugError",
+    "PlanDiagnoser",
+    "PlanFinding",
+    "PlanIssue",
     "PlanNode",
     "QueryError",
     "RuleId",

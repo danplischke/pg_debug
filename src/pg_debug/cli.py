@@ -32,6 +32,7 @@ from .formatting import render_migration_review
 from .formatting import render_model_findings
 from .formatting import render_object_details
 from .formatting import render_partition_candidates
+from .formatting import render_plan_findings
 from .formatting import render_rows
 from .formatting import render_vacuum_progress
 from .formatting import to_json
@@ -43,6 +44,7 @@ from .model import RuleId
 from .model import Severity
 from .partition import DEFAULT_MIN_PRUNING_SHARE
 from .partition import DEFAULT_MIN_TABLE_BYTES
+from .plan import DEFAULT_MIN_RATIO
 from .schema import ObjectType
 from .sql import obfuscate_password
 
@@ -293,6 +295,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     explain.set_defaults(func=cmd_explain)
 
+    diagnose = subparsers.add_parser("diagnose", help="Run a query and report what is wrong with its plan")
+    diagnose.add_argument("sql", help="Query to diagnose, a file path, or - to read it from stdin")
+    diagnose.add_argument(
+        "--min-ratio",
+        type=float,
+        default=DEFAULT_MIN_RATIO,
+        help=(f"How far a row estimate has to be from what the query found before it is reported, as a factor (default: {DEFAULT_MIN_RATIO:g})."),
+    )
+    diagnose.set_defaults(func=cmd_diagnose)
+
     column_stats = subparsers.add_parser("column-stats", help="Show the planner's statistics for a table")
     column_stats.add_argument("table", help="Table name, optionally schema-qualified")
     column_stats.set_defaults(func=cmd_column_stats)
@@ -477,6 +489,10 @@ async def cmd_explain(pg: PgDebug, args: argparse.Namespace) -> Any:
     return plan
 
 
+async def cmd_diagnose(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.diagnose_query(read_sql(args.sql), min_ratio=args.min_ratio)
+
+
 async def cmd_column_stats(pg: PgDebug, args: argparse.Namespace) -> Any:
     return {
         "columns": await pg.column_stats(args.table),
@@ -569,6 +585,8 @@ def format_result(command: str, result: Any, as_json: bool) -> str:
             return to_json([finding.to_dict() for finding in result])
         if command == "partitions":
             return to_json([candidate.to_dict() for candidate in result])
+        if command == "diagnose":
+            return to_json([finding.to_dict() for finding in result])
         return to_json(result)
 
     if command == "activity":
@@ -589,6 +607,8 @@ def format_result(command: str, result: Any, as_json: bool) -> str:
         return render_configuration_review(result)
     if command == "partitions":
         return render_partition_candidates(result)
+    if command == "diagnose":
+        return render_plan_findings(result)
     if command in ("tune-workload", "tune-queries"):
         return render_index_recommendations(result)
     return render_rows(result)

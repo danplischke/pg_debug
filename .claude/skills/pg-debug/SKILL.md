@@ -1,6 +1,6 @@
 ---
 name: pg-debug
-description: Diagnose and tune a PostgreSQL database with the pg_debug library and its pg-debug CLI — inspect schemas and tables, read EXPLAIN plans, test hypothetical indexes without creating them, see what every backend is doing right now and which one is blocking the others, track vacuum progress, check planner statistics behind bad row estimates, run health checks (bloated/duplicate/unused indexes, table bloat, vacuum wraparound, sequence exhaustion, replication, cache hit rates, invalid constraints, stale statistics), find the most expensive queries from pg_stat_statements, get index recommendations, review the data model itself for design defects (unindexed foreign keys, mismatched key types, missing primary keys, wasteful column order, misleading column types), say whether a table is worth partitioning based on what the workload actually filters on, and review a migration before running it for the locks it takes and whether it rewrites a table. Use this skill whenever the user asks why a Postgres query is slow, why the database is stuck or blocked, whether an index would help, what indexes to add, whether their database is healthy, how to improve or review their schema or data model, whether a migration or ALTER TABLE is safe to run or will lock a table, whether a big table should be partitioned and on what key, what tables or columns exist, or wants to script any of that in Python — even if they never mention pg_debug by name. Also use it when writing code against the pg_debug package.
+description: Diagnose and tune a PostgreSQL database with the pg_debug library and its pg-debug CLI — inspect schemas and tables, read EXPLAIN plans, diagnose a slow query's plan and say which node's row estimate went wrong and why, test hypothetical indexes without creating them, see what every backend is doing right now and which one is blocking the others, track vacuum progress, check planner statistics behind bad row estimates, run health checks (bloated/duplicate/unused indexes, table bloat, vacuum wraparound, sequence exhaustion, replication, cache hit rates, invalid constraints, stale statistics), find the most expensive queries from pg_stat_statements, get index recommendations, review the data model itself for design defects (unindexed foreign keys, mismatched key types, missing primary keys, wasteful column order, misleading column types), say whether a table is worth partitioning based on what the workload actually filters on, and review a migration before running it for the locks it takes and whether it rewrites a table. Use this skill whenever the user asks why a Postgres query is slow, why a query's row estimates are wrong, why a query spilled to disk or ran out of work_mem, why the database is stuck or blocked, whether an index would help, what indexes to add, whether their database is healthy, how to improve or review their schema or data model, whether a migration or ALTER TABLE is safe to run or will lock a table, whether a big table should be partitioned and on what key, what tables or columns exist, or wants to script any of that in Python — even if they never mention pg_debug by name. Also use it when writing code against the pg_debug package.
 ---
 
 # pg_debug
@@ -39,21 +39,40 @@ sequential scan.
 Work outside in — plan first, then indexes, then confirm.
 
 ```bash
-# 1. What is the planner doing?
+# 1. Ask what is wrong with the plan. Start here — it reads the plan for you.
+pg-debug diagnose "SELECT * FROM orders WHERE status = 'open' AND region = 'eu'"
+
+# 2. What is the planner doing?
 pg-debug explain "SELECT * FROM orders WHERE user_id = 42 AND status = 'paid'"
 
-# 2. What would it really do? (runs the query)
+# 3. What would it really do? (runs the query)
 pg-debug explain --analyze "SELECT * FROM orders WHERE user_id = 42"
 
-# 3. Would an index help? Nothing is created — HypoPG simulates it.
+# 4. Would an index help? Nothing is created — HypoPG simulates it.
 pg-debug explain "SELECT * FROM orders WHERE user_id = 42" -i 'orders(user_id)'
 
 # Expressions work too, exactly as CREATE INDEX would take them.
 pg-debug explain "SELECT * FROM users WHERE lower(email) = 'a@b.c'" -i 'users(lower(email))'
 
-# 4. Or let the advisor search for candidates itself.
+# 5. Or let the advisor search for candidates itself.
 pg-debug tune-queries "SELECT * FROM orders WHERE user_id = 42 AND status = 'paid'"
 ```
+
+`diagnose` is the one to reach for first when the question is "why is this
+slow". It runs `EXPLAIN ANALYZE` and reads the result: the lowest node whose
+row estimate diverged from what it found (everything above it inherited that
+error), whether the cause is stale statistics or correlated columns with no
+extended statistics covering them, sorts and hashes that outgrew `work_mem`,
+scans reading rows only to discard them, and parallel workers that were planned
+for and not granted. Findings are ranked by the share of the query's work
+behind them, and each carries the statement or setting that addresses it.
+
+Because it runs the query it needs `--access-mode unrestricted`, and it says so
+rather than half-answering. A statement that writes is run in a transaction
+that is rolled back — which undoes the rows but not a sequence it consumed.
+
+An empty result is a real answer: the estimates matched and nothing spilled.
+Say that, rather than reaching for something else to blame.
 
 `--analyze` executes the query, so do not use it for `UPDATE`/`DELETE` unless
 you mean it. It also cannot be combined with `-i`.
@@ -67,7 +86,8 @@ parsing failure.
 Read the plan for the shape of the problem: a `Seq Scan` with a selective
 `Filter` wants an index; a huge row-estimate error (`Plan Rows` far from
 `Actual Rows`) usually means stale statistics — suggest `ANALYZE` before
-suggesting indexes.
+suggesting indexes. `diagnose` does both of those readings for you and names
+which one applies, so prefer it to eyeballing the plan.
 
 Step 3 is the honest way to answer "would this index help?" — it reports the
 planner's cost with the index in place, without touching the database. Compare

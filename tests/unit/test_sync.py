@@ -12,6 +12,7 @@ from pg_debug.errors import ExtensionRequiredError
 from pg_debug.model import DEFAULT_MIN_ROWS
 from pg_debug.model import RuleId
 from pg_debug.partition import DEFAULT_MIN_TABLE_BYTES
+from pg_debug.plan import DEFAULT_MIN_RATIO
 from pg_debug.sql import DbConnPool
 
 
@@ -155,6 +156,12 @@ def test_review_data_model_delegates_to_the_async_client(pg):
     with patch.object(type(pg.client), "review_data_model", AsyncMock(return_value=[])) as review:
         assert pg.review_data_model(schema="reporting", proven_only=True) == []
         review.assert_awaited_once_with(rules=RuleId.ALL, schema="reporting", min_rows=DEFAULT_MIN_ROWS, proven_only=True)
+
+
+def test_diagnose_query_delegates_to_the_async_client(pg):
+    with patch.object(type(pg.client), "diagnose_query", AsyncMock(return_value=[])) as diagnose:
+        assert pg.diagnose_query("SELECT 1") == []
+        diagnose.assert_awaited_once_with("SELECT 1", min_ratio=DEFAULT_MIN_RATIO)
 
 
 def test_suggest_partitions_delegates_to_the_async_client(pg):

@@ -3,6 +3,7 @@
 import difflib
 import json
 from typing import Any
+from typing import ClassVar
 
 from attrs import define
 from attrs import field
@@ -59,6 +60,72 @@ class PlanNode:
     filter: str | None = field(default=None)
     children: list["PlanNode"] = field(factory=list)
 
+    # Where the node reads from. ``schema_name`` is only reported by EXPLAIN
+    # VERBOSE, and without it a relation name cannot be resolved in the catalog
+    # when the same name exists in two schemas.
+    schema_name: str | None = field(default=None)
+    alias: str | None = field(default=None)
+    index_name: str | None = field(default=None)
+
+    # How this node hangs off its parent: "Outer" is the driving side of a
+    # join, "Inner" the side re-executed once per outer row.
+    parent_relationship: str | None = field(default=None)
+    parallel_aware: bool = field(default=False)
+
+    # Conditions, kept apart because they are evaluated at different points:
+    # an index condition restricts what is read, a filter discards what was
+    # already read, and a recheck re-tests what a lossy bitmap over-fetched.
+    index_cond: str | None = field(default=None)
+    recheck_cond: str | None = field(default=None)
+    join_filter: str | None = field(default=None)
+    hash_cond: str | None = field(default=None)
+    rows_removed_by_filter: int | None = field(default=None)
+    rows_removed_by_join_filter: int | None = field(default=None)
+    rows_removed_by_index_recheck: int | None = field(default=None)
+
+    # Spill evidence. Each of these says work_mem was too small for this node,
+    # and each says it in its own units.
+    sort_method: str | None = field(default=None)
+    sort_space_used: int | None = field(default=None)  # kB
+    sort_space_type: str | None = field(default=None)  # "Memory" or "Disk"
+    hash_batches: int | None = field(default=None)
+    original_hash_batches: int | None = field(default=None)
+    peak_memory_usage: int | None = field(default=None)  # kB
+    exact_heap_blocks: int | None = field(default=None)
+    lossy_heap_blocks: int | None = field(default=None)
+
+    # Parallelism. Planned above launched means the workers were asked for and
+    # not granted, which is a server-wide shortage rather than a query problem.
+    workers_planned: int | None = field(default=None)
+    workers_launched: int | None = field(default=None)
+
+    #: JSON key -> attribute, for the fields that are copied across unchanged.
+    _SIMPLE_FIELDS: ClassVar[dict[str, str]] = {
+        "Relation Name": "relation_name",
+        "Schema": "schema_name",
+        "Alias": "alias",
+        "Index Name": "index_name",
+        "Parent Relationship": "parent_relationship",
+        "Filter": "filter",
+        "Index Cond": "index_cond",
+        "Recheck Cond": "recheck_cond",
+        "Join Filter": "join_filter",
+        "Hash Cond": "hash_cond",
+        "Rows Removed by Filter": "rows_removed_by_filter",
+        "Rows Removed by Join Filter": "rows_removed_by_join_filter",
+        "Rows Removed by Index Recheck": "rows_removed_by_index_recheck",
+        "Sort Method": "sort_method",
+        "Sort Space Used": "sort_space_used",
+        "Sort Space Type": "sort_space_type",
+        "Hash Batches": "hash_batches",
+        "Original Hash Batches": "original_hash_batches",
+        "Peak Memory Usage": "peak_memory_usage",
+        "Exact Heap Blocks": "exact_heap_blocks",
+        "Lossy Heap Blocks": "lossy_heap_blocks",
+        "Workers Planned": "workers_planned",
+        "Workers Launched": "workers_launched",
+    }
+
     @classmethod
     def from_json_data(cls, json_node: dict[str, Any]) -> "PlanNode":
         # Extract basic fields
@@ -83,11 +150,13 @@ class PlanNode:
             node.shared_read_blocks = json_node["Shared Read Blocks"]
             node.shared_written_blocks = json_node["Shared Written Blocks"]
 
-        # Common optional fields
-        if "Relation Name" in json_node:
-            node.relation_name = json_node["Relation Name"]
-        if "Filter" in json_node:
-            node.filter = json_node["Filter"]
+        # Everything else that is present is copied straight across. Which keys
+        # a node carries depends on its type and on the EXPLAIN options, so
+        # absence is normal and never an error.
+        for key, attribute in cls._SIMPLE_FIELDS.items():
+            if key in json_node:
+                setattr(node, attribute, json_node[key])
+        node.parallel_aware = bool(json_node.get("Parallel Aware", False))
 
         # Recursively process child plans
         if "Plans" in json_node:

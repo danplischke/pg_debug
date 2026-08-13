@@ -441,3 +441,61 @@ class SqlDriver:
 
             logger.error(f"Error executing query ({query}): {e}")
             raise e
+
+    async def execute_query_and_rollback(self, query: LiteralString, params: list[Any] | None = None) -> Optional[List[RowResult]]:
+        """Run a statement and undo it, keeping only what it returned.
+
+        This exists for ``EXPLAIN ANALYZE``, which is the only way to learn what
+        a plan really did and which gets there by running the query. For a
+        SELECT that costs nothing; for an UPDATE or a DELETE it would not be
+        acceptable, so the transaction is rolled back whether the statement
+        succeeded or failed.
+
+        What the rollback does *not* undo is anything that lives outside the
+        transaction: a sequence consumed by ``nextval`` stays consumed, and a
+        trigger that wrote to another system has already written. Callers that
+        offer this to a user should say so.
+        """
+        if self.conn is None:
+            self.connect()
+            if self.conn is None:
+                raise ValueError("Connection not established")
+
+        query = self.tagged(query)
+
+        if self._pinned_connection is not None:
+            return await self._execute_rolled_back(self._pinned_connection, query, params)
+        if self.is_pool:
+            pool = await self.conn.pool_connect()
+            async with pool.connection() as connection:
+                return await self._execute_rolled_back(connection, query, params)
+        return await self._execute_rolled_back(self.conn, query, params)
+
+    async def _execute_rolled_back(self, connection, query, params) -> Optional[List[RowResult]]:
+        """Execute on a connection inside a transaction that is always undone."""
+        try:
+            async with connection.cursor(row_factory=dict_row) as cursor:
+                # Without autocommit psycopg has already opened a transaction
+                # for us; with it, nothing is open and there would be nothing
+                # to roll back.
+                if getattr(connection, "autocommit", False):
+                    await cursor.execute("BEGIN")
+
+                if params:
+                    await cursor.execute(query, params)
+                else:
+                    await cursor.execute(query)
+
+                while cursor.nextset():
+                    pass
+
+                if cursor.description is None:
+                    return None
+                rows = await cursor.fetchall()
+                return [SqlDriver.RowResult(cells=dict(row)) for row in rows]
+        finally:
+            try:
+                await connection.rollback()
+            except Exception as rollback_error:
+                # Never let this replace whatever the statement itself raised.
+                logger.error(f"Error rolling back the diagnosed statement: {rollback_error}")

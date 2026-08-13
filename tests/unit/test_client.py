@@ -411,6 +411,19 @@ def test_optimizer_falls_back_to_the_environment(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_diagnose_query_passes_the_threshold_through(pg):
+    with (
+        patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
+        patch("pg_debug.client.PlanDiagnoser") as diagnoser_cls,
+    ):
+        diagnoser_cls.return_value.diagnose = AsyncMock(return_value=[])
+
+        assert await pg.diagnose_query("SELECT 1", min_ratio=25) == []
+
+        diagnoser_cls.return_value.diagnose.assert_awaited_once_with("SELECT 1", min_ratio=25)
+
+
+@pytest.mark.asyncio
 async def test_suggest_partitions_passes_its_thresholds_through(pg):
     with (
         patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
