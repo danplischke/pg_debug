@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The buffer health checks no longer report a cache hit rate taken over too few
+  block accesses to mean anything. A server that has just started, or one whose
+  statistics were just reset, reads every page once and reported "0.0% (below
+  95.0% threshold)" — a false alarm pointing at `shared_buffers` on a server
+  with nothing wrong with it, and one that contradicted `pg-debug config`,
+  which already applied a floor. Both now use the same constant, and the
+  verdict carries the block counts it was taken over.
+- Numeric columns rendered raw in the CLI's tables: the fractions in
+  `top-queries` came back as `Decimal` and printed at full precision
+  (`0.09286047596826878208`), or in scientific notation when a division came
+  out zero (`0E-20`). They are rounded like floats now, while a whole numeric
+  such as `wal_bytes` keeps its whole number.
+
 ### Added
 
 - `pg-debug diagnose` and `PgDebug.diagnose_query()`: run a query and report

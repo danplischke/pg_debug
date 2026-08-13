@@ -14,6 +14,42 @@ def test_to_json_handles_database_types():
     assert json.loads(to_json(value)) == {"total": "1.5", "at": "2026-01-01 00:00:00"}
 
 
+def test_a_numeric_ratio_is_rounded_rather_than_printed_raw():
+    """pg_stat_statements returns these fractions as numeric, and Python prints
+    a Decimal at full precision — 0.09286047596826878208 in a column of a
+    table nobody can read."""
+    rendered = render_rows([{"frac": Decimal("0.09286047596826878208")}])
+
+    assert "0.093" in rendered
+    assert "0.09286047596826878208" not in rendered
+
+
+def test_a_numeric_zero_is_not_printed_in_scientific_notation():
+    """A numeric division that came out zero carries its scale, so str() gives
+    0E-20 — which reads as anything but zero. It is whole, so it prints whole."""
+    rendered = render_rows([{"frac": Decimal("0E-20")}])
+
+    assert "0E-20" not in rendered
+    assert rendered.splitlines()[2].strip() == "0"
+
+
+def test_a_whole_numeric_keeps_its_whole_number():
+    """wal_bytes is a numeric because it can exceed a bigint, not because it
+    has a fractional part. Printing it as 4198.000 would be worse than the raw
+    value."""
+    assert "4198" in render_rows([{"wal_bytes": Decimal("4198")}])
+    assert "4198.000" not in render_rows([{"wal_bytes": Decimal("4198")}])
+
+
+def test_a_boolean_stays_a_boolean():
+    """A bool is an int in Python, so a numeric branch that catches it first
+    turns True into 1."""
+    rendered = render_rows([{"autovacuum": True, "healthy": False}])
+
+    assert "True" in rendered
+    assert "False" in rendered
+
+
 def test_render_rows_aligns_columns():
     rows = [{"name": "orders", "kind": "table"}, {"name": "a", "kind": "view"}]
 

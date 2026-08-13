@@ -7,6 +7,7 @@ it into something readable in a terminal.
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from typing import Any
 from typing import Dict
 from typing import Iterable
@@ -27,10 +28,19 @@ def to_json(value: Any, indent: int = 2) -> str:
 def _cell(value: Any, max_width: int = MAX_CELL_WIDTH) -> str:
     if value is None:
         text = ""
-    elif isinstance(value, float):
-        # Raw float repr (332.48437299999995) is noise in a table; the JSON
+    elif isinstance(value, bool):
+        # Before the numeric branch: a bool is an int, and True would otherwise
+        # print as 1.
+        text = str(value)
+    elif isinstance(value, (float, Decimal)):
+        # Raw repr is noise in a table — a float shows as 332.48437299999995,
+        # and a numeric division that came out zero shows as 0E-20. The JSON
         # output keeps full precision for anything that needs it.
-        text = f"{value:.3f}"
+        #
+        # Integral Decimals are left whole: wal_bytes is a numeric because it
+        # can exceed a bigint, not because it has a fractional part, and
+        # printing it as 4198.000 would be worse than useless.
+        text = str(int(value)) if isinstance(value, Decimal) and value == value.to_integral_value() else f"{value:.3f}"
     else:
         text = str(value)
     text = " ".join(text.split())

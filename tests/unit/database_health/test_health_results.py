@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from pg_debug.configuration import MIN_BLOCK_READS
 from pg_debug.database_health import HealthCheckResult
 from pg_debug.database_health.buffer_health_calc import BufferHealthCalc
 from pg_debug.database_health.connection_health_calc import ConnectionHealthCalc
@@ -47,32 +48,72 @@ def test_result_defaults_to_no_findings():
 # -- Buffer -----------------------------------------------------------------
 
 
+def buffer_row(rate, blocks=1_000_000):
+    """A hit-rate row over enough blocks for the ratio to be worth reading."""
+    return {"rate": rate, "hits": int(blocks * rate), "reads": blocks - int(blocks * rate)}
+
+
 @pytest.mark.asyncio
 async def test_buffer_hit_rate_above_threshold():
-    result = await BufferHealthCalc(make_driver([{"rate": 0.99}])).index_hit_rate()
+    result = await BufferHealthCalc(make_driver([buffer_row(0.99)])).index_hit_rate()
 
     assert result.name == "Buffer health for indexes"
     assert result.healthy is True
-    assert result.summary == "Index cache hit rate: 99.0% (above 95.0% threshold)"
-    assert result.metrics == {"hit_rate_percent": pytest.approx(99.0), "threshold_percent": 95.0}
+    assert result.summary == "Index cache hit rate: 99.0% (above 95.0% threshold) over 1,000,000 blocks"
+    assert result.metrics["hit_rate_percent"] == pytest.approx(99.0)
+    assert result.metrics["threshold_percent"] == 95.0
 
 
 @pytest.mark.asyncio
 async def test_buffer_hit_rate_below_threshold():
-    result = await BufferHealthCalc(make_driver([{"rate": 0.5}])).table_hit_rate()
+    result = await BufferHealthCalc(make_driver([buffer_row(0.5)])).table_hit_rate()
 
     assert result.name == "Buffer health for tables"
     assert result.healthy is False
-    assert result.summary == "Table cache hit rate: 50.0% (below 95.0% threshold)"
+    assert result.summary == "Table cache hit rate: 50.0% (below 95.0% threshold) over 1,000,000 blocks"
     assert result.metrics["hit_rate_percent"] == pytest.approx(50.0)
 
 
 @pytest.mark.asyncio
 async def test_buffer_hit_rate_respects_custom_threshold():
-    result = await BufferHealthCalc(make_driver([{"rate": 0.9}])).index_hit_rate(threshold=0.8)
+    result = await BufferHealthCalc(make_driver([buffer_row(0.9)])).index_hit_rate(threshold=0.8)
 
     assert result.healthy is True
     assert result.metrics["threshold_percent"] == pytest.approx(80.0)
+
+
+@pytest.mark.asyncio
+async def test_a_hit_rate_over_too_few_blocks_is_not_reported_as_a_problem():
+    """A server that has just started reads every page once and reports a
+    terrible hit rate for as long as that takes. Calling it unhealthy sends
+    someone to resize shared_buffers on a server with nothing wrong with it."""
+    result = await BufferHealthCalc(make_driver([buffer_row(0.0, blocks=1082)])).table_hit_rate()
+
+    assert result.healthy is True
+    assert "not enough read to judge" in result.summary
+    assert "1,082 blocks" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_the_withheld_verdict_still_carries_the_numbers_behind_it():
+    """Withholding a verdict is only useful if the reader can see how close it
+    came, and check it again once the server has been up a while."""
+    result = await BufferHealthCalc(make_driver([buffer_row(0.0, blocks=1082)])).table_hit_rate()
+
+    assert result.metrics["blocks_read"] == 1082
+    assert result.metrics["blocks_hit"] == 0
+    assert result.metrics["hit_rate_percent"] == pytest.approx(0.0)
+    assert result.metrics["minimum_blocks_to_judge"] == MIN_BLOCK_READS
+
+
+@pytest.mark.asyncio
+async def test_a_judged_hit_rate_reports_the_blocks_it_was_taken_over():
+    """The same 0% means opposite things over a thousand blocks and over a
+    billion, so the count travels with the ratio."""
+    result = await BufferHealthCalc(make_driver([buffer_row(0.6, blocks=500_000)])).table_hit_rate()
+
+    assert result.metrics["blocks_hit"] + result.metrics["blocks_read"] == 500_000
+    assert "over 500,000 blocks" in result.summary
 
 
 @pytest.mark.asyncio
