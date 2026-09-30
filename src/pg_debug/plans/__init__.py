@@ -1,5 +1,25 @@
 """Execution plans: running EXPLAIN, reading the plan, and planning against indexes that do not exist."""
 
+from .diagnoser import PlanDiagnoser
+from .explain import ExplainPlanTool
 from .hypothetical import IndexDefinition
+from .result import DEFAULT_MIN_RATIO
+from .result import PlanFinding
+from .result import PlanIssue
+from .rules import RuleContext
+from .tree import ErrorResult
+from .tree import ExplainPlanArtifact
+from .tree import PlanNode
 
-__all__ = ["IndexDefinition"]
+__all__ = [
+    "DEFAULT_MIN_RATIO",
+    "ErrorResult",
+    "ExplainPlanArtifact",
+    "ExplainPlanTool",
+    "IndexDefinition",
+    "PlanDiagnoser",
+    "PlanFinding",
+    "PlanIssue",
+    "PlanNode",
+    "RuleContext",
+]

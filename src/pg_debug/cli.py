@@ -45,7 +45,7 @@ from .model import RuleId
 from .model import Severity
 from .partition import DEFAULT_MIN_PRUNING_SHARE
 from .partition import DEFAULT_MIN_TABLE_BYTES
-from .plan import DEFAULT_MIN_RATIO
+from .plans import DEFAULT_MIN_RATIO
 from .schema import ObjectType
 
 logger = logging.getLogger(__name__)

@@ -414,7 +414,7 @@ can be used without `PgDebug`:
 
 ```python
 from pg_debug import DatabaseHealthTool, SchemaInspector, SqlDriver, TopQueriesCalc
-from pg_debug.explain import ExplainPlanTool
+from pg_debug.plans import ExplainPlanTool
 from pg_debug.index import DatabaseTuningAdvisor, TextPresentation
 
 driver = SqlDriver(engine_url="postgresql://localhost/mydb")
@@ -531,7 +531,7 @@ uv run pytest tests/unit      # unit tests, no database needed
 uv run pytest tests/integration   # spins up PostgreSQL containers, needs Docker
 ```
 
-Some tests under `tests/unit` also start containers (`test_explain_plan_real_db.py`,
+Some tests under `tests/unit` also start containers (`test_explain_real_db.py`,
 `test_db_conn_pool.py`); see `tests/README.md`.
 
 ## Relationship to postgres-mcp

@@ -13,8 +13,6 @@ from typing import Literal
 from typing import Optional
 
 from .activity import ActivityInspector
-from .artifacts import ErrorResult
-from .artifacts import ExplainPlanArtifact
 from .configuration import ConfigFinding
 from .configuration import ConfigurationReviewer
 from .database_health import DatabaseHealthTool
@@ -29,7 +27,6 @@ from .errors import ConnectionFailedError
 from .errors import ExplainPlanError
 from .errors import ExtensionRequiredError
 from .errors import InvalidArgumentError
-from .explain import ExplainPlanTool
 from .index.dta_calc import DatabaseTuningAdvisor
 from .index.index_opt_base import MAX_NUM_INDEX_TUNING_QUERIES
 from .index.llm_opt import LLMOptimizerTool
@@ -44,9 +41,12 @@ from .partition import DEFAULT_MIN_PRUNING_SHARE
 from .partition import DEFAULT_MIN_TABLE_BYTES
 from .partition import PartitionAdvisor
 from .partition import PartitionCandidate
-from .plan import DEFAULT_MIN_RATIO
-from .plan import PlanDiagnoser
-from .plan import PlanFinding
+from .plans import DEFAULT_MIN_RATIO
+from .plans import ExplainPlanTool
+from .plans import PlanDiagnoser
+from .plans import PlanFinding
+from .plans.tree import ErrorResult
+from .plans.tree import ExplainPlanArtifact
 from .schema import ObjectType
 from .schema import SchemaInspector
 from .statistics import StatisticsInspector
@@ -345,7 +345,7 @@ class PgDebug:
                 it is reported, as a factor.
 
         Returns:
-            :class:`~pg_debug.plan.PlanFinding` objects, most severe first. An
+            :class:`~pg_debug.plans.PlanFinding` objects, most severe first. An
             empty list means the plan is a reasonable one.
 
         Raises:

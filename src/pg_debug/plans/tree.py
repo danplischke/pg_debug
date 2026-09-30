@@ -1,4 +1,4 @@
-"""Artifacts for the Database Tuning Advisor."""
+"""What EXPLAIN returns: the parsed plan tree, or the error that stood in for it."""
 
 import difflib
 import json

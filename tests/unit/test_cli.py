@@ -6,14 +6,14 @@ from unittest.mock import patch
 import pytest
 
 from pg_debug import cli
-from pg_debug.artifacts import ExplainPlanArtifact
-from pg_debug.artifacts import PlanNode
 from pg_debug.database_health import HealthCheckResult
 from pg_debug.errors import ExtensionRequiredError
 from pg_debug.model import Confidence
 from pg_debug.model import ModelFinding
 from pg_debug.model import RuleId
 from pg_debug.model import Severity
+from pg_debug.plans.tree import ExplainPlanArtifact
+from pg_debug.plans.tree import PlanNode
 
 
 @pytest.fixture
@@ -737,8 +737,8 @@ def test_partitions_json_carries_the_verdict_and_its_evidence(pg_client):
 
 
 def plan_finding(**overrides):
-    from pg_debug.plan import PlanFinding
-    from pg_debug.plan import PlanIssue
+    from pg_debug.plans import PlanFinding
+    from pg_debug.plans import PlanIssue
     from pg_debug.severity import Severity
 
     base = dict(

@@ -9,10 +9,10 @@ from typing import override
 from pglast.ast import SelectStmt
 from pydantic import BaseModel
 
-from pg_debug.artifacts import ErrorResult
 from pg_debug.errors import MissingDependencyError
-from pg_debug.explain.explain_plan import ExplainPlanTool
 from pg_debug.parsing import TableAliasVisitor
+from pg_debug.plans.explain import ExplainPlanTool
+from pg_debug.plans.tree import ErrorResult
 
 from ..db import SqlDriver
 from ..plans.hypothetical import IndexDefinition

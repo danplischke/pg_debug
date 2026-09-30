@@ -21,9 +21,6 @@ The individual tools (:class:`SchemaInspector`, :class:`ExplainPlanTool`,
 """
 
 from .activity import ActivityInspector
-from .artifacts import ErrorResult
-from .artifacts import ExplainPlanArtifact
-from .artifacts import PlanNode
 from .client import DATABASE_URL_ENV_VARS
 from .client import AccessMode
 from .client import PgDebug
@@ -44,7 +41,6 @@ from .errors import MissingDependencyError
 from .errors import NotConnectedError
 from .errors import PgDebugError
 from .errors import QueryError
-from .explain import ExplainPlanTool
 from .index import MAX_NUM_INDEX_TUNING_QUERIES
 from .index import DatabaseTuningAdvisor
 from .index import IndexRecommendation
@@ -60,10 +56,14 @@ from .model import Severity
 from .partition import PartitionAdvisor
 from .partition import PartitionCandidate
 from .partition import Strategy
-from .plan import PlanDiagnoser
-from .plan import PlanFinding
-from .plan import PlanIssue
+from .plans import ExplainPlanTool
+from .plans import PlanDiagnoser
+from .plans import PlanFinding
+from .plans import PlanIssue
 from .plans.hypothetical import IndexDefinition
+from .plans.tree import ErrorResult
+from .plans.tree import ExplainPlanArtifact
+from .plans.tree import PlanNode
 from .schema import ObjectType
 from .schema import SchemaInspector
 from .statistics import StatisticsInspector

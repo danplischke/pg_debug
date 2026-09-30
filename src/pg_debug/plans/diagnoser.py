@@ -6,7 +6,7 @@ and neither can be settled from the plan alone. Whether the table's statistics
 are current, and whether anything already tells the planner that two of its
 columns are related, are facts about the catalog. Those are read here, once for
 the whole plan, and handed to the rules as a
-:class:`~pg_debug.plan.rules.RuleContext`.
+:class:`~pg_debug.plans.rules.RuleContext`.
 
 ``EXPLAIN ANALYZE`` runs the query. That is the entire reason it can report what
 really happened, and it is also why this refuses to work in restricted mode,
@@ -32,8 +32,6 @@ from pglast import ast
 from pglast import parse_sql
 from pglast.parser import ParseError
 
-from ..artifacts import ExplainPlanArtifact
-from ..artifacts import PlanNode
 from ..db import SafeSqlDriver
 from ..db import SqlDriver
 from ..errors import ExplainPlanError
@@ -48,6 +46,8 @@ from .result import DEFAULT_MIN_RATIO
 from .result import PlanFinding
 from .rules import RULES
 from .rules import RuleContext
+from .tree import ExplainPlanArtifact
+from .tree import PlanNode
 
 logger = logging.getLogger(__name__)
 

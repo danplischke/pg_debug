@@ -5,9 +5,9 @@ from unittest.mock import MagicMock
 import pytest
 import pytest_asyncio
 
-from pg_debug.artifacts import ErrorResult
-from pg_debug.artifacts import ExplainPlanArtifact
-from pg_debug.explain import ExplainPlanTool
+from pg_debug.plans import ExplainPlanTool
+from pg_debug.plans.tree import ErrorResult
+from pg_debug.plans.tree import ExplainPlanArtifact
 
 
 class MockCell:
@@ -159,7 +159,7 @@ async def test_explain_with_bind_variables_pg15(mock_sql_driver, monkeypatch):
             return "SELECT * FROM users WHERE id = 42"  # Replaced query
 
     # The correct import path for monkeypatching
-    monkeypatch.setattr("pg_debug.explain.explain_plan.SqlBindParams", MockSqlBindParams)
+    monkeypatch.setattr("pg_debug.plans.explain.SqlBindParams", MockSqlBindParams)
 
     # Set up the mock to return different responses for different queries
     def side_effect(query):
@@ -229,7 +229,7 @@ async def test_explain_analyze_with_bind_variables(mock_sql_driver, monkeypatch)
             return "SELECT * FROM users WHERE id = 42"  # Replaced query
 
     # The correct import path for monkeypatching
-    monkeypatch.setattr("pg_debug.explain.explain_plan.SqlBindParams", MockSqlBindParams)
+    monkeypatch.setattr("pg_debug.plans.explain.SqlBindParams", MockSqlBindParams)
 
     # Set up the mock to return mock plan for the modified query
     def side_effect(query):
@@ -374,7 +374,7 @@ async def test_explain_with_like_and_bind_variables_pg16(mock_sql_driver, monkey
             return "SELECT * FROM users WHERE name LIKE '%John%'"  # Replaced query
 
     # The correct import path for monkeypatching
-    monkeypatch.setattr("pg_debug.explain.explain_plan.SqlBindParams", MockSqlBindParams)
+    monkeypatch.setattr("pg_debug.plans.explain.SqlBindParams", MockSqlBindParams)
 
     # Set up the mock to return different responses for different queries
     def side_effect(query):

@@ -16,7 +16,7 @@ which *node* the time went into.
 node buries the cause under a list of its own consequences. Only the lowest
 diverging node is the cause, and :func:`lowest_misestimates` finds it.
 
-Everything here is a pure function of a :class:`~pg_debug.artifacts.PlanNode`
+Everything here is a pure function of a :class:`~pg_debug.plans.tree.PlanNode`
 tree — no database, no I/O — so the arithmetic that decides every verdict is
 testable without a server.
 """
@@ -29,8 +29,8 @@ from typing import List
 from typing import Optional
 from typing import Tuple
 
-from ..artifacts import PlanNode
 from .result import MIN_MISESTIMATED_ROWS
+from .tree import PlanNode
 
 
 def walk(node: PlanNode) -> Iterator[PlanNode]:
@@ -79,7 +79,7 @@ def total_self_ms(root: PlanNode) -> float:
     that a wall clock does not count twice, and dividing by the wall clock
     would produce shares summing to well over one. Against this total they sum
     to exactly one, and the docstring on
-    :attr:`~pg_debug.plan.result.PlanFinding.share_of_time` says what that
+    :attr:`~pg_debug.plans.result.PlanFinding.share_of_time` says what that
     means.
     """
     return sum(self_ms(node) for node in walk(root))

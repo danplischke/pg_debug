@@ -5,9 +5,9 @@ catalog facts gathered once, so a rule can be fired at a hand-built tree in a
 unit test without a database anywhere near it.
 
 The rules divide into two kinds, and the difference matters when reading the
-output. :data:`~pg_debug.plan.result.PlanIssue.SORT_SPILLED` and its neighbours
+output. :data:`~pg_debug.plans.result.PlanIssue.SORT_SPILLED` and its neighbours
 are read straight off the plan: the server said it sorted on disk, so it sorted
-on disk. :data:`~pg_debug.plan.result.PlanIssue.CORRELATED_COLUMNS` is an
+on disk. :data:`~pg_debug.plans.result.PlanIssue.CORRELATED_COLUMNS` is an
 inference — the estimate was wrong, several columns of one table were
 restricted at once, and nothing in ``pg_statistic_ext`` covers them, which is
 the signature of correlation but is also consistent with other causes. It is
@@ -28,7 +28,6 @@ from typing import Sequence
 from typing import Set
 from typing import Tuple
 
-from ..artifacts import PlanNode
 from ..severity import Severity
 from .metrics import conditions
 from .metrics import inclusive_ms
@@ -42,6 +41,7 @@ from .result import MIN_REPORTABLE_SHARE
 from .result import PlanFinding
 from .result import PlanIssue
 from .result import severity_for_share
+from .tree import PlanNode
 
 #: A scan has to discard at least this many rows, and this many times more than
 #: it returned, before the filter is worth an index.

@@ -7,22 +7,22 @@ destroys that. So most of these assert silence.
 
 import pytest
 
-from pg_debug.artifacts import PlanNode
-from pg_debug.plan.result import PlanIssue
-from pg_debug.plan.result import severity_for_share
-from pg_debug.plan.rules import RULES
-from pg_debug.plan.rules import RuleContext
-from pg_debug.plan.rules import _columns_in
-from pg_debug.plan.rules import _statistics_name
-from pg_debug.plan.rules import correlated_columns
-from pg_debug.plan.rules import discarded_rows
-from pg_debug.plan.rules import hash_spilled
-from pg_debug.plan.rules import lossy_bitmap
-from pg_debug.plan.rules import nested_loop_blowup
-from pg_debug.plan.rules import row_estimate
-from pg_debug.plan.rules import sort_spilled
-from pg_debug.plan.rules import stale_statistics
-from pg_debug.plan.rules import workers_not_launched
+from pg_debug.plans.result import PlanIssue
+from pg_debug.plans.result import severity_for_share
+from pg_debug.plans.rules import RULES
+from pg_debug.plans.rules import RuleContext
+from pg_debug.plans.rules import _columns_in
+from pg_debug.plans.rules import _statistics_name
+from pg_debug.plans.rules import correlated_columns
+from pg_debug.plans.rules import discarded_rows
+from pg_debug.plans.rules import hash_spilled
+from pg_debug.plans.rules import lossy_bitmap
+from pg_debug.plans.rules import nested_loop_blowup
+from pg_debug.plans.rules import row_estimate
+from pg_debug.plans.rules import sort_spilled
+from pg_debug.plans.rules import stale_statistics
+from pg_debug.plans.rules import workers_not_launched
+from pg_debug.plans.tree import PlanNode
 from pg_debug.severity import Severity
 
 
@@ -44,8 +44,8 @@ def node(node_type="Seq Scan", plan_rows=100, actual_rows=100, ms=10.0, loops=1,
 
 def context(root, **kwargs):
     """A context over a real tree, so parents and totals are consistent with it."""
-    from pg_debug.plan.metrics import total_self_ms
-    from pg_debug.plan.metrics import walk_with_parent
+    from pg_debug.plans.metrics import total_self_ms
+    from pg_debug.plans.metrics import walk_with_parent
 
     kwargs.setdefault("parents", {id(n): p for n, p in walk_with_parent(root)})
     kwargs.setdefault("total_ms", total_self_ms(root))

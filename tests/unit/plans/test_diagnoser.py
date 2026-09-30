@@ -14,7 +14,7 @@ from pg_debug.db import SafeSqlDriver
 from pg_debug.db import SqlDriver
 from pg_debug.errors import ExplainPlanError
 from pg_debug.errors import InvalidArgumentError
-from pg_debug.plan.diagnoser import PlanDiagnoser
+from pg_debug.plans.diagnoser import PlanDiagnoser
 
 PLAN = {
     "Plan": {

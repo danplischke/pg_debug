@@ -3,10 +3,10 @@ import logging
 
 import pytest
 
-from pg_debug.artifacts import ErrorResult
-from pg_debug.artifacts import ExplainPlanArtifact
 from pg_debug.db import SqlDriver
-from pg_debug.explain import ExplainPlanTool
+from pg_debug.plans import ExplainPlanTool
+from pg_debug.plans.tree import ErrorResult
+from pg_debug.plans.tree import ExplainPlanArtifact
 
 logger = logging.getLogger(__name__)
 

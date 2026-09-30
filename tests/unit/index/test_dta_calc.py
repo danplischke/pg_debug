@@ -13,11 +13,11 @@ import pytest
 import pytest_asyncio
 from pglast import parse_sql
 
-from pg_debug.artifacts import ExplainPlanArtifact
 from pg_debug.index.dta_calc import ColumnCollector
 from pg_debug.index.dta_calc import ConditionColumnCollector
 from pg_debug.index.dta_calc import DatabaseTuningAdvisor
 from pg_debug.index.dta_calc import IndexRecommendation
+from pg_debug.plans.tree import ExplainPlanArtifact
 
 logger = getLogger(__name__)
 

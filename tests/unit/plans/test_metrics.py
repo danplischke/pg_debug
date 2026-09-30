@@ -6,17 +6,17 @@ the query and says nothing. And a misestimate propagates upwards, so the naive
 reading reports the cause together with a list of its own consequences.
 """
 
-from pg_debug.artifacts import PlanNode
-from pg_debug.plan.metrics import estimate_ratio
-from pg_debug.plan.metrics import inclusive_ms
-from pg_debug.plan.metrics import is_misestimated
-from pg_debug.plan.metrics import lowest_misestimates
-from pg_debug.plan.metrics import qualified_relation
-from pg_debug.plan.metrics import self_ms
-from pg_debug.plan.metrics import shares
-from pg_debug.plan.metrics import total_self_ms
-from pg_debug.plan.metrics import walk
-from pg_debug.plan.metrics import walk_with_parent
+from pg_debug.plans.metrics import estimate_ratio
+from pg_debug.plans.metrics import inclusive_ms
+from pg_debug.plans.metrics import is_misestimated
+from pg_debug.plans.metrics import lowest_misestimates
+from pg_debug.plans.metrics import qualified_relation
+from pg_debug.plans.metrics import self_ms
+from pg_debug.plans.metrics import shares
+from pg_debug.plans.metrics import total_self_ms
+from pg_debug.plans.metrics import walk
+from pg_debug.plans.metrics import walk_with_parent
+from pg_debug.plans.tree import PlanNode
 
 
 def node(node_type="Seq Scan", plan_rows=100, actual_rows=100, ms=None, loops=1, children=(), **kwargs):

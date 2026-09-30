@@ -19,7 +19,6 @@ from typing import List
 from typing import Optional
 from typing import TypeVar
 
-from .artifacts import ExplainPlanArtifact
 from .client import AccessMode
 from .client import PgDebug
 from .client import SortBy
@@ -35,8 +34,9 @@ from .model import RuleId
 from .partition import DEFAULT_MIN_PRUNING_SHARE
 from .partition import DEFAULT_MIN_TABLE_BYTES
 from .partition import PartitionCandidate
-from .plan import DEFAULT_MIN_RATIO
-from .plan import PlanFinding
+from .plans import DEFAULT_MIN_RATIO
+from .plans import PlanFinding
+from .plans.tree import ExplainPlanArtifact
 from .schema import ObjectType
 
 T = TypeVar("T")

@@ -7,12 +7,12 @@ import re
 from typing import TYPE_CHECKING
 from typing import Any
 
-from ..artifacts import ErrorResult
-from ..artifacts import ExplainPlanArtifact
 from ..db import SafeSqlDriver
 from ..db import check_postgres_version_requirement
 from ..parsing import SqlBindParams
-from ..plans.hypothetical import IndexDefinition
+from .hypothetical import IndexDefinition
+from .tree import ErrorResult
+from .tree import ExplainPlanArtifact
 
 logger = logging.getLogger(__name__)
 

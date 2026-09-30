@@ -13,7 +13,7 @@ from pg_debug.errors import ExtensionRequiredError
 from pg_debug.model import DEFAULT_MIN_ROWS
 from pg_debug.model import RuleId
 from pg_debug.partition import DEFAULT_MIN_TABLE_BYTES
-from pg_debug.plan import DEFAULT_MIN_RATIO
+from pg_debug.plans import DEFAULT_MIN_RATIO
 
 
 @pytest.fixture
