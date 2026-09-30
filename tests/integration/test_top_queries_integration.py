@@ -3,7 +3,7 @@ import logging
 import pytest
 import pytest_asyncio
 
-from pg_debug.sql import SqlDriver
+from pg_debug.db import SqlDriver
 from pg_debug.top_queries import PG_STAT_STATEMENTS
 from pg_debug.top_queries import TopQueriesCalc
 
@@ -156,8 +156,8 @@ async def test_extension_not_available(local_sql_driver):
     # Need to patch at the module level for proper mocking
     with pytest.MonkeyPatch().context() as mp:
         # Import the module we'll be monkeypatching
-        import pg_debug.sql.extension_utils
-        from pg_debug.sql.extension_utils import ExtensionStatus
+        import pg_debug.db.extensions
+        from pg_debug.db.extensions import ExtensionStatus
 
         # Define our mock function with the correct type signature
         async def mock_check(*args, **kwargs):

@@ -1,4 +1,4 @@
-from pg_debug.sql import obfuscate_password
+from pg_debug.db import obfuscate_password
 
 
 def test_obfuscate_none_or_empty():

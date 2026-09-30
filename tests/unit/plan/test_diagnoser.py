@@ -10,11 +10,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from pg_debug.db import SafeSqlDriver
+from pg_debug.db import SqlDriver
 from pg_debug.errors import ExplainPlanError
 from pg_debug.errors import InvalidArgumentError
 from pg_debug.plan.diagnoser import PlanDiagnoser
-from pg_debug.sql import SafeSqlDriver
-from pg_debug.sql import SqlDriver
 
 PLAN = {
     "Plan": {

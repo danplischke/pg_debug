@@ -22,6 +22,7 @@ from .client import DATABASE_URL_ENV_VARS
 from .client import AccessMode
 from .client import PgDebug
 from .database_health import HealthType
+from .db import obfuscate_password
 from .errors import PgDebugError
 from .formatting import render_activity
 from .formatting import render_column_stats
@@ -46,7 +47,6 @@ from .partition import DEFAULT_MIN_PRUNING_SHARE
 from .partition import DEFAULT_MIN_TABLE_BYTES
 from .plan import DEFAULT_MIN_RATIO
 from .schema import ObjectType
-from .sql import obfuscate_password
 
 logger = logging.getLogger(__name__)
 

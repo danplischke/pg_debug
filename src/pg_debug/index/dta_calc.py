@@ -12,12 +12,12 @@ from pglast.ast import JoinExpr
 from pglast.ast import Node
 from pglast.ast import SelectStmt
 
-from ..sql import ColumnCollector
-from ..sql import SafeSqlDriver
-from ..sql import SqlDriver
-from ..sql import TableAliasVisitor
-from ..sql import resolve_table_reference
-from ..sql import split_table_reference
+from ..db import SafeSqlDriver
+from ..db import SqlDriver
+from ..db import split_table_reference
+from ..parsing import ColumnCollector
+from ..parsing import TableAliasVisitor
+from ..parsing import resolve_table_reference
 from .index_opt_base import DEFAULT_WRITE_WEIGHT
 from .index_opt_base import IndexRecommendation
 from .index_opt_base import IndexTuningBase

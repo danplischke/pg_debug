@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from pg_debug.db import SqlDriver
 from pg_debug.model import Confidence
 from pg_debug.model import ReviewOptions
 from pg_debug.model import Severity
@@ -17,7 +18,6 @@ from pg_debug.model.columns import blank_padded_chars
 from pg_debug.model.columns import low_cardinality_text
 from pg_debug.model.columns import naive_timestamps
 from pg_debug.model.columns import nullable_never_null
-from pg_debug.sql import SqlDriver
 
 
 def driver_returning(rows):

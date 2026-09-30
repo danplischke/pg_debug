@@ -7,8 +7,8 @@ import pytest_asyncio
 from psycopg.sql import SQL
 from psycopg.sql import Literal
 
-from pg_debug.sql import SafeSqlDriver
-from pg_debug.sql import SqlDriver
+from pg_debug.db import SafeSqlDriver
+from pg_debug.db import SqlDriver
 
 
 @pytest_asyncio.fixture

@@ -8,15 +8,15 @@ from typing import Literal
 from typing import LiteralString
 from typing import cast
 
+from ..db import QUERY_MARKER
+from ..db import TRANSACTION_CONTROL as _TRANSACTION_CONTROL
+from ..db import SafeSqlDriver
+from ..db import SqlDriver
+from ..db import workload_only as _workload_only
+from ..db.extensions import check_extension
+from ..db.extensions import get_postgres_version
 from ..errors import ExtensionRequiredError
 from ..errors import InvalidArgumentError
-from ..sql import QUERY_MARKER
-from ..sql import TRANSACTION_CONTROL as _TRANSACTION_CONTROL
-from ..sql import SafeSqlDriver
-from ..sql import SqlDriver
-from ..sql import workload_only as _workload_only
-from ..sql.extension_utils import check_extension
-from ..sql.extension_utils import get_postgres_version
 
 logger = logging.getLogger(__name__)
 

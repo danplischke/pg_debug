@@ -12,7 +12,7 @@ the whole plan, and handed to the rules as a
 really happened, and it is also why this refuses to work in restricted mode,
 whose promise is that nothing executes. For a statement that writes, the run
 happens inside a transaction that is rolled back — see
-:meth:`~pg_debug.sql.SqlDriver.execute_query_and_rollback` for what that does
+:meth:`~pg_debug.db.SqlDriver.execute_query_and_rollback` for what that does
 and does not undo.
 """
 
@@ -34,11 +34,11 @@ from pglast.parser import ParseError
 
 from ..artifacts import ExplainPlanArtifact
 from ..artifacts import PlanNode
+from ..db import SafeSqlDriver
+from ..db import SqlDriver
 from ..errors import ExplainPlanError
 from ..errors import InvalidArgumentError
-from ..sql import SafeSqlDriver
-from ..sql import SqlBindParams
-from ..sql import SqlDriver
+from ..parsing import SqlBindParams
 from ..statistics import StatisticsInspector
 from .metrics import qualified_relation
 from .metrics import total_self_ms

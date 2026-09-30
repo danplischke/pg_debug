@@ -18,8 +18,8 @@ from typing import Any
 from typing import Dict
 from typing import List
 
-from ..sql import SafeSqlDriver
-from ..sql import SqlDriver
+from ..db import SafeSqlDriver
+from ..db import SqlDriver
 from ..tuple_layout import DECLARED_ORDER
 from ..tuple_layout import PACKED_ORDER
 from ..tuple_layout import fillfactor_expr

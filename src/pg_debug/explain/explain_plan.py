@@ -9,15 +9,15 @@ from typing import Any
 
 from ..artifacts import ErrorResult
 from ..artifacts import ExplainPlanArtifact
-from ..sql import IndexDefinition
-from ..sql import SafeSqlDriver
-from ..sql import SqlBindParams
-from ..sql import check_postgres_version_requirement
+from ..db import SafeSqlDriver
+from ..db import check_postgres_version_requirement
+from ..parsing import SqlBindParams
+from ..plans.hypothetical import IndexDefinition
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from ..sql.sql_driver import SqlDriver
+    from ..db.driver import SqlDriver
 
 
 class ExplainPlanTool:

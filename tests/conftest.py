@@ -5,7 +5,7 @@ import pytest
 from dotenv import load_dotenv
 from utils import create_postgres_container
 
-from pg_debug.sql import reset_postgres_version_cache
+from pg_debug.db import reset_postgres_version_cache
 
 load_dotenv()
 

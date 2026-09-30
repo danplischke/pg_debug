@@ -6,9 +6,9 @@ from unittest.mock import patch
 
 import pytest
 
+from pg_debug.db import QUERY_MARKER
+from pg_debug.db import SqlDriver
 from pg_debug.errors import InvalidArgumentError
-from pg_debug.sql import QUERY_MARKER
-from pg_debug.sql import SqlDriver
 from pg_debug.top_queries import TopQueriesCalc
 
 

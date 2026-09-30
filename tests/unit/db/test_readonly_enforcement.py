@@ -6,8 +6,8 @@ import pytest
 
 from pg_debug import AccessMode
 from pg_debug import PgDebug
-from pg_debug.sql import SafeSqlDriver
-from pg_debug.sql import SqlDriver
+from pg_debug.db import SafeSqlDriver
+from pg_debug.db import SqlDriver
 
 
 @pytest.mark.asyncio

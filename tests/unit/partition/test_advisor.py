@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from pg_debug.db import SqlDriver
 from pg_debug.partition.advisor import MAX_LIST_VALUES
 from pg_debug.partition.advisor import MAX_SHOWN_PARTITIONS
 from pg_debug.partition.advisor import MIN_HASH_DISTINCT
@@ -23,7 +24,6 @@ from pg_debug.partition.advisor import _parse_bound
 from pg_debug.partition.advisor import _strategy_for
 from pg_debug.partition.advisor import _weigh_workload
 from pg_debug.partition.result import Strategy
-from pg_debug.sql import SqlDriver
 
 
 def column(name="created_at", type_name="timestamptz", distinct=None, **extra):

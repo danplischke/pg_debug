@@ -4,8 +4,8 @@ import logging
 from dataclasses import dataclass
 from typing import Literal
 
-from .safe_sql import SafeSqlDriver
-from .sql_driver import SqlDriver
+from .driver import SqlDriver
+from .restricted import SafeSqlDriver
 
 logger = logging.getLogger(__name__)
 

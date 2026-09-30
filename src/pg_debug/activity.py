@@ -12,9 +12,9 @@ from typing import Dict
 from typing import List
 from typing import Optional
 
-from .sql import SafeSqlDriver
-from .sql import SqlDriver
-from .sql import get_postgres_version
+from .db import SafeSqlDriver
+from .db import SqlDriver
+from .db import get_postgres_version
 
 logger = logging.getLogger(__name__)
 

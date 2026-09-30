@@ -33,6 +33,9 @@ from .configuration import ConfigurationReviewer
 from .database_health import DatabaseHealthTool
 from .database_health import HealthCheckResult
 from .database_health import HealthType
+from .db import DbConnPool
+from .db import SafeSqlDriver
+from .db import SqlDriver
 from .errors import ConnectionFailedError
 from .errors import ExplainPlanError
 from .errors import ExtensionRequiredError
@@ -60,12 +63,9 @@ from .partition import Strategy
 from .plan import PlanDiagnoser
 from .plan import PlanFinding
 from .plan import PlanIssue
+from .plans.hypothetical import IndexDefinition
 from .schema import ObjectType
 from .schema import SchemaInspector
-from .sql import DbConnPool
-from .sql import IndexDefinition
-from .sql import SafeSqlDriver
-from .sql import SqlDriver
 from .statistics import StatisticsInspector
 from .sync import SyncPgDebug
 from .top_queries import TopQueriesCalc

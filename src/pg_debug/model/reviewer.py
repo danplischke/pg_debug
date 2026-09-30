@@ -10,8 +10,8 @@ from typing import Iterable
 from typing import List
 from typing import Optional
 
-from ..sql import SafeSqlDriver
-from ..sql import SqlDriver
+from ..db import SafeSqlDriver
+from ..db import SqlDriver
 from . import columns
 from . import keys
 from . import layout

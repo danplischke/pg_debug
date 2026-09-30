@@ -5,8 +5,8 @@ import pytest
 
 from pg_debug.artifacts import ErrorResult
 from pg_debug.artifacts import ExplainPlanArtifact
+from pg_debug.db import SqlDriver
 from pg_debug.explain import ExplainPlanTool
-from pg_debug.sql import SqlDriver
 
 logger = logging.getLogger(__name__)
 

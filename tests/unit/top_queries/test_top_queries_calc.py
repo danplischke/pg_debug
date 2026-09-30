@@ -5,9 +5,9 @@ from unittest.mock import patch
 import pytest
 
 import pg_debug.top_queries.top_queries_calc as top_queries_module
+from pg_debug.db import SqlDriver
+from pg_debug.db.extensions import ExtensionStatus
 from pg_debug.errors import ExtensionRequiredError
-from pg_debug.sql import SqlDriver
-from pg_debug.sql.extension_utils import ExtensionStatus
 from pg_debug.top_queries import PG_STAT_STATEMENTS
 from pg_debug.top_queries import TopQueriesCalc
 

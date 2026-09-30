@@ -8,9 +8,9 @@ from typing import Any
 from typing import Dict
 from typing import List
 
+from .db import SafeSqlDriver
+from .db import SqlDriver
 from .errors import InvalidArgumentError
-from .sql import SafeSqlDriver
-from .sql import SqlDriver
 
 logger = logging.getLogger(__name__)
 

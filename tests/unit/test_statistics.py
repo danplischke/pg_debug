@@ -6,7 +6,7 @@ import pytest
 
 from pg_debug.database_health import HealthType
 from pg_debug.database_health.statistics_health_calc import StatisticsHealthCalc
-from pg_debug.sql import SqlDriver
+from pg_debug.db import SqlDriver
 from pg_debug.statistics import StatisticsInspector
 
 

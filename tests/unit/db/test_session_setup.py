@@ -5,9 +5,9 @@ import pytest
 
 from pg_debug import AccessMode
 from pg_debug import PgDebug
-from pg_debug.sql import QUERY_MARKER
-from pg_debug.sql.sql_driver import DbConnPool
-from pg_debug.sql.sql_driver import build_session_setup
+from pg_debug.db import QUERY_MARKER
+from pg_debug.db.driver import DbConnPool
+from pg_debug.db.driver import build_session_setup
 
 
 def rendered(statements):

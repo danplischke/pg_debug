@@ -12,7 +12,7 @@ from pg_debug.database_health.connection_health_calc import ConnectionHealthCalc
 from pg_debug.database_health.constraint_health_calc import ConstraintHealthCalc
 from pg_debug.database_health.index_health_calc import IndexHealthCalc
 from pg_debug.database_health.vacuum_health_calc import VacuumHealthCalc
-from pg_debug.sql import SqlDriver
+from pg_debug.db import SqlDriver
 
 
 def make_driver(*result_sets):

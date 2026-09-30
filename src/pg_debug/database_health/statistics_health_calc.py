@@ -1,7 +1,7 @@
 """Health check for planner statistics freshness."""
 
-from ..sql import SafeSqlDriver
-from ..sql import SqlDriver
+from ..db import SafeSqlDriver
+from ..db import SqlDriver
 from ..statistics import DEFAULT_MIN_CHANGED_ROWS
 from ..statistics import DEFAULT_STALE_FRACTION
 from ..statistics import StatisticsInspector

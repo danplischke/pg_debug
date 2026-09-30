@@ -32,11 +32,11 @@ from pglast.enums import ConstrType
 from pglast.enums import ObjectType
 from pglast.parser import ParseError
 
+from ..db import SafeSqlDriver
+from ..db import SqlDriver
 from ..errors import InvalidArgumentError
 from ..severity import SEVERITY_ORDER
 from ..severity import Severity
-from ..sql import SafeSqlDriver
-from ..sql import SqlDriver
 from .locks import Duration
 from .locks import LockLevel
 

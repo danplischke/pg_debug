@@ -14,8 +14,8 @@ from typing import Any
 from typing import Dict
 from typing import List
 
-from ..sql import SafeSqlDriver
-from ..sql import SqlDriver
+from ..db import SafeSqlDriver
+from ..db import SqlDriver
 from .catalog import scoped
 from .catalog import user_schemas
 from .result import Confidence

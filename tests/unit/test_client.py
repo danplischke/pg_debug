@@ -10,14 +10,14 @@ from pg_debug.artifacts import ErrorResult
 from pg_debug.artifacts import ExplainPlanArtifact
 from pg_debug.artifacts import PlanNode
 from pg_debug.client import resolve_database_url
+from pg_debug.db import DbConnPool
+from pg_debug.db import SafeSqlDriver
+from pg_debug.db import SqlDriver
 from pg_debug.errors import ConnectionFailedError
 from pg_debug.errors import ExplainPlanError
 from pg_debug.errors import ExtensionRequiredError
 from pg_debug.errors import InvalidArgumentError
 from pg_debug.model import RuleId
-from pg_debug.sql import DbConnPool
-from pg_debug.sql import SafeSqlDriver
-from pg_debug.sql import SqlDriver
 
 
 @pytest.fixture

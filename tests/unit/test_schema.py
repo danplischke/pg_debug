@@ -3,10 +3,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from pg_debug.db import SqlDriver
 from pg_debug.errors import InvalidArgumentError
 from pg_debug.schema import ObjectType
 from pg_debug.schema import SchemaInspector
-from pg_debug.sql import SqlDriver
 
 
 def make_driver(*result_sets):

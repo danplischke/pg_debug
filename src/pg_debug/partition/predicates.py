@@ -24,7 +24,7 @@ from typing import Tuple
 
 from pglast import ast
 
-from ..sql import TableAliasVisitor
+from ..parsing import TableAliasVisitor
 
 #: Operators that let PostgreSQL prune to a subset of partitions. Equality
 #: prunes under every strategy; the range operators only under RANGE and LIST.

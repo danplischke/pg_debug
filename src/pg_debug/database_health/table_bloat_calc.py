@@ -27,8 +27,8 @@ from typing import cast
 
 from typing_extensions import LiteralString
 
-from ..sql import SafeSqlDriver
-from ..sql import SqlDriver
+from ..db import SafeSqlDriver
+from ..db import SqlDriver
 from ..tuple_layout import fillfactor_expr
 from ..tuple_layout import row_layout_ctes
 from ..tuple_layout import rows_per_page_expr

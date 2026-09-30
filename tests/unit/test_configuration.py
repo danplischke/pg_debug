@@ -22,9 +22,9 @@ from pg_debug.configuration import _random_page_cost
 from pg_debug.configuration import _shared_buffers
 from pg_debug.configuration import _slow_query_log
 from pg_debug.configuration import _work_mem
+from pg_debug.db import SqlDriver
+from pg_debug.db import reset_postgres_version_cache
 from pg_debug.severity import Severity
-from pg_debug.sql import SqlDriver
-from pg_debug.sql import reset_postgres_version_cache
 
 
 def setting(name, value, unit=None, source="default"):

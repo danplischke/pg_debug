@@ -10,7 +10,7 @@ import humanize
 
 from ..artifacts import ExplainPlanArtifact
 from ..artifacts import calculate_improvement_multiple
-from ..sql import SqlDriver
+from ..db import SqlDriver
 from .dta_calc import IndexTuningBase
 from .index_opt_base import IndexDefinition
 from .index_opt_base import IndexTuningResult

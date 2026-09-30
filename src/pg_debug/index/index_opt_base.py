@@ -13,16 +13,16 @@ from pglast.ast import SelectStmt
 from pglast.parser import ParseError
 
 from ..artifacts import calculate_improvement_multiple
+from ..db import QUERY_MARKER
+from ..db import SafeSqlDriver
+from ..db import SqlDriver
+from ..db import check_hypopg_installation_status
+from ..db import split_table_reference
+from ..db import table_identifier
 from ..explain import ExplainPlanTool
-from ..sql import QUERY_MARKER
-from ..sql import IndexDefinition
-from ..sql import SafeSqlDriver
-from ..sql import SqlBindParams
-from ..sql import SqlDriver
-from ..sql import TableAliasVisitor
-from ..sql import check_hypopg_installation_status
-from ..sql import split_table_reference
-from ..sql import table_identifier
+from ..parsing import SqlBindParams
+from ..parsing import TableAliasVisitor
+from ..plans.hypothetical import IndexDefinition
 
 logger = logging.getLogger(__name__)
 

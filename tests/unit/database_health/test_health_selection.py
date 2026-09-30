@@ -7,8 +7,8 @@ import pytest
 from pg_debug.database_health import DatabaseHealthTool
 from pg_debug.database_health import HealthCheckResult
 from pg_debug.database_health import HealthType
+from pg_debug.db import SqlDriver
 from pg_debug.errors import InvalidArgumentError
-from pg_debug.sql import SqlDriver
 
 
 def test_parse_single_type():

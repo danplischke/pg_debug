@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from pg_debug.db import SqlDriver
 from pg_debug.model import Confidence
 from pg_debug.model import ReviewOptions
 from pg_debug.model import Severity
@@ -15,7 +16,6 @@ from pg_debug.model.keys import UNINDEXED_FOREIGN_KEY_SQL
 from pg_debug.model.keys import foreign_key_type_mismatches
 from pg_debug.model.keys import missing_primary_keys
 from pg_debug.model.keys import unindexed_foreign_keys
-from pg_debug.sql import SqlDriver
 
 
 def driver_returning(rows):

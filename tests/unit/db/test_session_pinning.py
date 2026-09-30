@@ -11,10 +11,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pg_debug.sql import QUERY_MARKER
-from pg_debug.sql import DbConnPool
-from pg_debug.sql import SafeSqlDriver
-from pg_debug.sql import SqlDriver
+from pg_debug.db import QUERY_MARKER
+from pg_debug.db import DbConnPool
+from pg_debug.db import SafeSqlDriver
+from pg_debug.db import SqlDriver
 
 
 class RotatingPool:

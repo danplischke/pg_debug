@@ -10,8 +10,8 @@ uv run pytest                     # everything, including container-backed tests
 A single file or test:
 
 ```bash
-uv run pytest tests/unit/sql/test_obfuscate_password.py
-uv run pytest tests/unit/sql/test_db_conn_pool.py::test_pool_connect_success
+uv run pytest tests/unit/db/test_obfuscate_password.py
+uv run pytest tests/unit/db/test_db_conn_pool.py::test_pool_connect_success
 ```
 
 ## What needs a database
@@ -38,7 +38,7 @@ when the extension is absent.
 
 ## Test layout
 
-- `tests/unit/sql/` — safe SQL parsing and rejection, the driver, connection pool, password obfuscation
+- `tests/unit/db/` — the driver, restricted mode's parsing and rejection, connection pool, password obfuscation
 - `tests/unit/explain/` — explain plan generation and formatting
 - `tests/unit/index/` — the Database Tuning Advisor's candidate search
 - `tests/unit/database_health/` — health check selection and the individual calculators

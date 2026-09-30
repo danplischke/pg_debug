@@ -27,6 +27,7 @@ from .client import TuningMethod
 from .configuration import ConfigFinding
 from .database_health import HealthCheckResult
 from .database_health import HealthType
+from .db import DbConnPool
 from .migration import StatementReview
 from .model import DEFAULT_MIN_ROWS
 from .model import ModelFinding
@@ -37,7 +38,6 @@ from .partition import PartitionCandidate
 from .plan import DEFAULT_MIN_RATIO
 from .plan import PlanFinding
 from .schema import ObjectType
-from .sql import DbConnPool
 
 T = TypeVar("T")
 

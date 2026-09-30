@@ -11,12 +11,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from pg_debug.db import SqlDriver
 from pg_debug.errors import InvalidArgumentError
 from pg_debug.migration import Duration
 from pg_debug.migration import LockLevel
 from pg_debug.migration import MigrationLinter
 from pg_debug.severity import Severity
-from pg_debug.sql import SqlDriver
 
 
 @pytest.fixture

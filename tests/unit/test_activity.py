@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from pg_debug.activity import ActivityInspector
-from pg_debug.sql import SqlDriver
+from pg_debug.db import SqlDriver
 
 
 def make_driver(rows=()):

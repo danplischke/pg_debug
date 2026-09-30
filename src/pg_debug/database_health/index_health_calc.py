@@ -1,7 +1,7 @@
 from typing import Any
 
-from ..sql import SafeSqlDriver
-from ..sql import SqlDriver
+from ..db import SafeSqlDriver
+from ..db import SqlDriver
 from .result import HealthCheckResult
 
 INVALID_INDEXES = "Invalid index check"

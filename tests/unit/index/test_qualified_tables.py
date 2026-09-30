@@ -6,17 +6,17 @@ from unittest.mock import MagicMock
 import pytest
 from pglast import parse_sql
 
+from pg_debug.db import SqlDriver
+from pg_debug.db import split_table_reference
+from pg_debug.db import table_identifier
+from pg_debug.db.identifiers import MAX_IDENTIFIER_BYTES
 from pg_debug.index.dta_calc import HYPOTHETICAL_INDEX_SIZES_SQL
 from pg_debug.index.dta_calc import ConditionColumnCollector
 from pg_debug.index.dta_calc import DatabaseTuningAdvisor
-from pg_debug.sql import ColumnCollector
-from pg_debug.sql import IndexDefinition
-from pg_debug.sql import SqlDriver
-from pg_debug.sql import TableAliasVisitor
-from pg_debug.sql import resolve_table_reference
-from pg_debug.sql import split_table_reference
-from pg_debug.sql import table_identifier
-from pg_debug.sql.index import MAX_IDENTIFIER_BYTES
+from pg_debug.parsing import ColumnCollector
+from pg_debug.parsing import TableAliasVisitor
+from pg_debug.parsing import resolve_table_reference
+from pg_debug.plans.hypothetical import IndexDefinition
 
 
 def parse(sql):
@@ -173,7 +173,7 @@ def test_index_sizes_come_from_the_hypopg_function_not_its_view():
 
 
 def test_hypopg_function_is_allowed_in_restricted_mode():
-    from pg_debug.sql.safe_sql import SafeSqlDriver
+    from pg_debug.db.restricted import SafeSqlDriver
 
     assert "hypopg" in SafeSqlDriver.ALLOWED_FUNCTIONS
 

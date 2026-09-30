@@ -38,10 +38,10 @@ import humanize
 from pglast import parse_sql
 from pglast.parser import ParseError
 
-from ..sql import SafeSqlDriver
-from ..sql import SqlDriver
-from ..sql import TableAliasVisitor
-from ..sql import workload_only
+from ..db import SafeSqlDriver
+from ..db import SqlDriver
+from ..db import workload_only
+from ..parsing import TableAliasVisitor
 from .predicates import extract_predicates
 from .result import PartitionCandidate
 from .result import Strategy

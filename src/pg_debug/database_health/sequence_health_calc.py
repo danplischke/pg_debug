@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 from psycopg.sql import Identifier
 
-from ..sql import SafeSqlDriver
-from ..sql import SqlDriver
+from ..db import SafeSqlDriver
+from ..db import SqlDriver
 from .result import HealthCheckResult
 
 SEQUENCE_HEALTH = "Sequence health"

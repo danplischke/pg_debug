@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from pg_debug.db import SqlDriver
 from pg_debug.errors import InvalidArgumentError
 from pg_debug.model import Confidence
 from pg_debug.model import ModelFinding
@@ -13,7 +14,6 @@ from pg_debug.model import ModelReviewer
 from pg_debug.model import RuleId
 from pg_debug.model import Severity
 from pg_debug.model.reviewer import RULES
-from pg_debug.sql import SqlDriver
 
 
 def finding(rule: RuleId, **overrides) -> ModelFinding:

@@ -12,7 +12,7 @@ from pg_debug.database_health.table_bloat_calc import DEFAULT_MIN_BLOAT_BYTES
 from pg_debug.database_health.table_bloat_calc import DEFAULT_MIN_BLOAT_PERCENT
 from pg_debug.database_health.table_bloat_calc import TABLE_BLOAT_SQL
 from pg_debug.database_health.table_bloat_calc import TableBloatCalc
-from pg_debug.sql import SqlDriver
+from pg_debug.db import SqlDriver
 from pg_debug.tuple_layout import row_layout_ctes
 
 

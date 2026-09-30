@@ -25,11 +25,11 @@ from typing import Dict
 from typing import List
 from typing import Optional
 
+from .db import SafeSqlDriver
+from .db import SqlDriver
+from .db.extensions import get_postgres_version
 from .severity import SEVERITY_ORDER
 from .severity import Severity
-from .sql import SafeSqlDriver
-from .sql import SqlDriver
-from .sql.extension_utils import get_postgres_version
 
 logger = logging.getLogger(__name__)
 

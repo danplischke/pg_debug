@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from pg_debug.db import SqlDriver
 from pg_debug.model import Confidence
 from pg_debug.model import ReviewOptions
 from pg_debug.model import Severity
@@ -13,7 +14,6 @@ from pg_debug.model.layout import HIGH_PADDING_BYTES
 from pg_debug.model.layout import MEDIUM_PADDING_BYTES
 from pg_debug.model.layout import MIN_PADDING_BYTES
 from pg_debug.model.layout import column_order_padding
-from pg_debug.sql import SqlDriver
 from pg_debug.tuple_layout import DECLARED_ORDER
 from pg_debug.tuple_layout import PACKED_ORDER
 from pg_debug.tuple_layout import row_layout_ctes

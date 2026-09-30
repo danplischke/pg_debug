@@ -20,6 +20,11 @@ from .configuration import ConfigurationReviewer
 from .database_health import DatabaseHealthTool
 from .database_health import HealthCheckResult
 from .database_health import HealthType
+from .db import DbConnPool
+from .db import SafeSqlDriver
+from .db import SqlDriver
+from .db import check_hypopg_installation_status
+from .db import obfuscate_password
 from .errors import ConnectionFailedError
 from .errors import ExplainPlanError
 from .errors import ExtensionRequiredError
@@ -44,11 +49,6 @@ from .plan import PlanDiagnoser
 from .plan import PlanFinding
 from .schema import ObjectType
 from .schema import SchemaInspector
-from .sql import DbConnPool
-from .sql import SafeSqlDriver
-from .sql import SqlDriver
-from .sql import check_hypopg_installation_status
-from .sql import obfuscate_password
 from .statistics import StatisticsInspector
 from .top_queries import TopQueriesCalc
 

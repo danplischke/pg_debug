@@ -19,8 +19,8 @@ from __future__ import annotations
 from typing import Any
 from typing import Dict
 
-from ..sql import SafeSqlDriver
-from ..sql import SqlDriver
+from ..db import SafeSqlDriver
+from ..db import SqlDriver
 from .result import HealthCheckResult
 
 AUTOVACUUM_BACKLOG = "Autovacuum backlog"

@@ -13,9 +13,9 @@ from typing import Any
 from typing import Dict
 from typing import List
 
-from .sql import SafeSqlDriver
-from .sql import SqlDriver
-from .sql import split_table_reference
+from .db import SafeSqlDriver
+from .db import SqlDriver
+from .db import split_table_reference
 
 logger = logging.getLogger(__name__)
 

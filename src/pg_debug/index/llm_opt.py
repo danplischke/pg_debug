@@ -12,10 +12,10 @@ from pydantic import BaseModel
 from pg_debug.artifacts import ErrorResult
 from pg_debug.errors import MissingDependencyError
 from pg_debug.explain.explain_plan import ExplainPlanTool
-from pg_debug.sql import TableAliasVisitor
+from pg_debug.parsing import TableAliasVisitor
 
-from ..sql import IndexDefinition
-from ..sql import SqlDriver
+from ..db import SqlDriver
+from ..plans.hypothetical import IndexDefinition
 from .index_opt_base import IndexRecommendation
 from .index_opt_base import IndexTuningBase
 
