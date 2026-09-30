@@ -5,13 +5,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pg_debug.database_health import DatabaseHealthTool
-from pg_debug.database_health.autovacuum_calc import BACKLOG_SQL
-from pg_debug.database_health.autovacuum_calc import DEFAULT_LARGE_TABLE_ROWS
-from pg_debug.database_health.autovacuum_calc import DEFAULT_MIN_DEAD_ROWS
-from pg_debug.database_health.autovacuum_calc import HORIZON_SQL
-from pg_debug.database_health.autovacuum_calc import AutovacuumCalc
 from pg_debug.db import SqlDriver
+from pg_debug.health import DatabaseHealthTool
+from pg_debug.health.checks.autovacuum import BACKLOG_SQL
+from pg_debug.health.checks.autovacuum import DEFAULT_LARGE_TABLE_ROWS
+from pg_debug.health.checks.autovacuum import DEFAULT_MIN_DEAD_ROWS
+from pg_debug.health.checks.autovacuum import HORIZON_SQL
+from pg_debug.health.checks.autovacuum import AutovacuumCalc
 
 
 def driver_returning(rows):

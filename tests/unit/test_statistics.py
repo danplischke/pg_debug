@@ -4,9 +4,9 @@ from unittest.mock import patch
 
 import pytest
 
-from pg_debug.database_health import HealthType
-from pg_debug.database_health.statistics_health_calc import StatisticsHealthCalc
 from pg_debug.db import SqlDriver
+from pg_debug.health import HealthType
+from pg_debug.health.checks.statistics import StatisticsHealthCalc
 from pg_debug.statistics import StatisticsInspector
 
 

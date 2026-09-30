@@ -14,9 +14,9 @@ same counters must not reach different verdicts.
 
 from typing import Any
 
-from ..configuration import MIN_BLOCK_READS
-from ..db import SqlDriver
-from .result import HealthCheckResult
+from ...configuration import MIN_BLOCK_READS
+from ...db import SqlDriver
+from ..result import HealthCheckResult
 
 INDEX_HIT_RATE = "Buffer health for indexes"
 TABLE_HIT_RATE = "Buffer health for tables"

@@ -2,8 +2,8 @@ import logging
 
 import pytest
 
-from pg_debug.database_health import DatabaseHealthTool
 from pg_debug.db import SqlDriver
+from pg_debug.health import DatabaseHealthTool
 
 logger = logging.getLogger(__name__)
 

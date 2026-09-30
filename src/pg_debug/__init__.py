@@ -27,9 +27,6 @@ from .client import PgDebug
 from .client import resolve_database_url
 from .configuration import ConfigFinding
 from .configuration import ConfigurationReviewer
-from .database_health import DatabaseHealthTool
-from .database_health import HealthCheckResult
-from .database_health import HealthType
 from .db import DbConnPool
 from .db import SafeSqlDriver
 from .db import SqlDriver
@@ -41,6 +38,9 @@ from .errors import MissingDependencyError
 from .errors import NotConnectedError
 from .errors import PgDebugError
 from .errors import QueryError
+from .health import DatabaseHealthTool
+from .health import HealthCheckResult
+from .health import HealthType
 from .index import MAX_NUM_INDEX_TUNING_QUERIES
 from .index import DatabaseTuningAdvisor
 from .index import IndexRecommendation

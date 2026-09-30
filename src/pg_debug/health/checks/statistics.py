@@ -1,11 +1,11 @@
 """Health check for planner statistics freshness."""
 
-from ..db import SafeSqlDriver
-from ..db import SqlDriver
-from ..statistics import DEFAULT_MIN_CHANGED_ROWS
-from ..statistics import DEFAULT_STALE_FRACTION
-from ..statistics import StatisticsInspector
-from .result import HealthCheckResult
+from ...db import SafeSqlDriver
+from ...db import SqlDriver
+from ...statistics import DEFAULT_MIN_CHANGED_ROWS
+from ...statistics import DEFAULT_STALE_FRACTION
+from ...statistics import StatisticsInspector
+from ..result import HealthCheckResult
 
 STATISTICS_HEALTH = "Statistics health"
 

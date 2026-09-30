@@ -1,8 +1,8 @@
 from typing import Any
 
-from ..db import SafeSqlDriver
-from ..db import SqlDriver
-from .result import HealthCheckResult
+from ...db import SafeSqlDriver
+from ...db import SqlDriver
+from ..result import HealthCheckResult
 
 INVALID_INDEXES = "Invalid index check"
 DUPLICATE_INDEXES = "Duplicate index check"

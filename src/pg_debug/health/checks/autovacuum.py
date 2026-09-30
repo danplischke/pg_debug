@@ -19,9 +19,9 @@ from __future__ import annotations
 from typing import Any
 from typing import Dict
 
-from ..db import SafeSqlDriver
-from ..db import SqlDriver
-from .result import HealthCheckResult
+from ...db import SafeSqlDriver
+from ...db import SqlDriver
+from ..result import HealthCheckResult
 
 AUTOVACUUM_BACKLOG = "Autovacuum backlog"
 VACUUM_HORIZON = "Vacuum horizon"

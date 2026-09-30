@@ -24,9 +24,9 @@ from .client import PgDebug
 from .client import SortBy
 from .client import TuningMethod
 from .configuration import ConfigFinding
-from .database_health import HealthCheckResult
-from .database_health import HealthType
 from .db import DbConnPool
+from .health import HealthCheckResult
+from .health import HealthType
 from .migration import StatementReview
 from .model import DEFAULT_MIN_ROWS
 from .model import ModelFinding

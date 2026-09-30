@@ -22,11 +22,11 @@ from pg_debug import AccessMode
 from pg_debug import PgDebug
 from pg_debug import SyncPgDebug
 from pg_debug import cli
-from pg_debug.database_health.autovacuum_calc import AutovacuumCalc
-from pg_debug.database_health.table_bloat_calc import TableBloatCalc
 from pg_debug.db import SafeSqlDriver
 from pg_debug.errors import ExtensionRequiredError
 from pg_debug.errors import InvalidArgumentError
+from pg_debug.health.checks.autovacuum import AutovacuumCalc
+from pg_debug.health.checks.table_bloat import TableBloatCalc
 from pg_debug.index.dta_calc import HYPOTHETICAL_INDEX_SIZES_SQL
 from pg_debug.index.dta_calc import DatabaseTuningAdvisor
 from pg_debug.index.index_opt_base import HIDDEN_QUERY_TEXT

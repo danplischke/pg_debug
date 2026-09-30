@@ -8,17 +8,17 @@ from typing import List
 from typing import Set
 
 from ..errors import InvalidArgumentError
-from .autovacuum_calc import AutovacuumCalc
-from .buffer_health_calc import BufferHealthCalc
-from .connection_health_calc import ConnectionHealthCalc
-from .constraint_health_calc import ConstraintHealthCalc
-from .index_health_calc import IndexHealthCalc
-from .replication_calc import ReplicationCalc
+from .checks.autovacuum import AutovacuumCalc
+from .checks.buffer import BufferHealthCalc
+from .checks.connection import ConnectionHealthCalc
+from .checks.constraint import ConstraintHealthCalc
+from .checks.index import IndexHealthCalc
+from .checks.replication import ReplicationCalc
+from .checks.sequence import SequenceHealthCalc
+from .checks.statistics import StatisticsHealthCalc
+from .checks.table_bloat import TableBloatCalc
+from .checks.vacuum import VacuumHealthCalc
 from .result import HealthCheckResult
-from .sequence_health_calc import SequenceHealthCalc
-from .statistics_health_calc import StatisticsHealthCalc
-from .table_bloat_calc import TableBloatCalc
-from .vacuum_health_calc import VacuumHealthCalc
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ class DatabaseHealthTool:
 
         Returns:
             An ordered mapping of check name to its
-            :class:`~pg_debug.database_health.result.HealthCheckResult`, which
+            :class:`~pg_debug.health.result.HealthCheckResult`, which
             carries a ``healthy`` flag, a text ``summary``, the flagged
             ``findings`` and the ``metrics`` behind the verdict.
 

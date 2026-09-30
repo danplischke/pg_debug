@@ -6,13 +6,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from pg_debug.configuration import MIN_BLOCK_READS
-from pg_debug.database_health import HealthCheckResult
-from pg_debug.database_health.buffer_health_calc import BufferHealthCalc
-from pg_debug.database_health.connection_health_calc import ConnectionHealthCalc
-from pg_debug.database_health.constraint_health_calc import ConstraintHealthCalc
-from pg_debug.database_health.index_health_calc import IndexHealthCalc
-from pg_debug.database_health.vacuum_health_calc import VacuumHealthCalc
 from pg_debug.db import SqlDriver
+from pg_debug.health import HealthCheckResult
+from pg_debug.health.checks.buffer import BufferHealthCalc
+from pg_debug.health.checks.connection import ConnectionHealthCalc
+from pg_debug.health.checks.constraint import ConstraintHealthCalc
+from pg_debug.health.checks.index import IndexHealthCalc
+from pg_debug.health.checks.vacuum import VacuumHealthCalc
 
 
 def make_driver(*result_sets):

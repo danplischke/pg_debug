@@ -21,7 +21,6 @@ from . import __version__
 from .client import DATABASE_URL_ENV_VARS
 from .client import AccessMode
 from .client import PgDebug
-from .database_health import HealthType
 from .db import obfuscate_password
 from .errors import PgDebugError
 from .formatting import render_activity
@@ -37,6 +36,7 @@ from .formatting import render_plan_findings
 from .formatting import render_rows
 from .formatting import render_vacuum_progress
 from .formatting import to_json
+from .health import HealthType
 from .index.index_opt_base import MAX_NUM_INDEX_TUNING_QUERIES
 from .index.llm_opt import DEFAULT_LLM_MODEL
 from .migration import MigrationLinter

@@ -4,11 +4,11 @@ from unittest.mock import patch
 
 import pytest
 
-from pg_debug.database_health import DatabaseHealthTool
-from pg_debug.database_health import HealthCheckResult
-from pg_debug.database_health import HealthType
 from pg_debug.db import SqlDriver
 from pg_debug.errors import InvalidArgumentError
+from pg_debug.health import DatabaseHealthTool
+from pg_debug.health import HealthCheckResult
+from pg_debug.health import HealthType
 
 
 def test_parse_single_type():
@@ -48,8 +48,8 @@ async def test_run_checks_only_runs_requested_checks():
     tool = DatabaseHealthTool(MagicMock(spec=SqlDriver))
 
     with (
-        patch("pg_debug.database_health.database_health.BufferHealthCalc") as buffer_cls,
-        patch("pg_debug.database_health.database_health.IndexHealthCalc") as index_cls,
+        patch("pg_debug.health.tool.BufferHealthCalc") as buffer_cls,
+        patch("pg_debug.health.tool.IndexHealthCalc") as index_cls,
     ):
         buffer_cls.return_value.index_hit_rate = AsyncMock(
             return_value=HealthCheckResult(name="Buffer health for indexes", healthy=True, summary="99.0%")
@@ -86,7 +86,7 @@ async def test_health_reports_when_nothing_ran():
 async def test_run_checks_propagates_driver_errors():
     tool = DatabaseHealthTool(MagicMock(spec=SqlDriver))
 
-    with patch("pg_debug.database_health.database_health.BufferHealthCalc") as buffer_cls:
+    with patch("pg_debug.health.tool.BufferHealthCalc") as buffer_cls:
         buffer_cls.return_value.index_hit_rate = AsyncMock(side_effect=RuntimeError("connection lost"))
 
         with pytest.raises(RuntimeError, match="connection lost"):

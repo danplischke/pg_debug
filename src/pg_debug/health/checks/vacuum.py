@@ -1,9 +1,9 @@
 from dataclasses import asdict
 from dataclasses import dataclass
 
-from ..db import SafeSqlDriver
-from ..db import SqlDriver
-from .result import HealthCheckResult
+from ...db import SafeSqlDriver
+from ...db import SqlDriver
+from ..result import HealthCheckResult
 
 VACUUM_HEALTH = "Vacuum health"
 

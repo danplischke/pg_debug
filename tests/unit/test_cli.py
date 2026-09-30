@@ -6,8 +6,8 @@ from unittest.mock import patch
 import pytest
 
 from pg_debug import cli
-from pg_debug.database_health import HealthCheckResult
 from pg_debug.errors import ExtensionRequiredError
+from pg_debug.health import HealthCheckResult
 from pg_debug.model import Confidence
 from pg_debug.model import ModelFinding
 from pg_debug.model import RuleId

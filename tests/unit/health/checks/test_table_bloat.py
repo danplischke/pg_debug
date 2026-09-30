@@ -5,14 +5,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pg_debug.database_health import DatabaseHealthTool
-from pg_debug.database_health import HealthType
-from pg_debug.database_health.table_bloat_calc import _RELATION_FILTER
-from pg_debug.database_health.table_bloat_calc import DEFAULT_MIN_BLOAT_BYTES
-from pg_debug.database_health.table_bloat_calc import DEFAULT_MIN_BLOAT_PERCENT
-from pg_debug.database_health.table_bloat_calc import TABLE_BLOAT_SQL
-from pg_debug.database_health.table_bloat_calc import TableBloatCalc
 from pg_debug.db import SqlDriver
+from pg_debug.health import DatabaseHealthTool
+from pg_debug.health import HealthType
+from pg_debug.health.checks.table_bloat import _RELATION_FILTER
+from pg_debug.health.checks.table_bloat import DEFAULT_MIN_BLOAT_BYTES
+from pg_debug.health.checks.table_bloat import DEFAULT_MIN_BLOAT_PERCENT
+from pg_debug.health.checks.table_bloat import TABLE_BLOAT_SQL
+from pg_debug.health.checks.table_bloat import TableBloatCalc
 from pg_debug.tuple_layout import row_layout_ctes
 
 

@@ -2,7 +2,7 @@
 
 import pytest
 
-from pg_debug.database_health.sequence_health_calc import SequenceHealthCalc
+from pg_debug.health.checks.sequence import SequenceHealthCalc
 
 
 class TestParseSequenceName:

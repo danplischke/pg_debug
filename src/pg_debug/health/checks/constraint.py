@@ -1,8 +1,8 @@
 from dataclasses import asdict
 from dataclasses import dataclass
 
-from ..db import SqlDriver
-from .result import HealthCheckResult
+from ...db import SqlDriver
+from ..result import HealthCheckResult
 
 CONSTRAINT_HEALTH = "Constraint health"
 

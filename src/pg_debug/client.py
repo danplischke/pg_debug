@@ -15,9 +15,6 @@ from typing import Optional
 from .activity import ActivityInspector
 from .configuration import ConfigFinding
 from .configuration import ConfigurationReviewer
-from .database_health import DatabaseHealthTool
-from .database_health import HealthCheckResult
-from .database_health import HealthType
 from .db import DbConnPool
 from .db import SafeSqlDriver
 from .db import SqlDriver
@@ -27,6 +24,9 @@ from .errors import ConnectionFailedError
 from .errors import ExplainPlanError
 from .errors import ExtensionRequiredError
 from .errors import InvalidArgumentError
+from .health import DatabaseHealthTool
+from .health import HealthCheckResult
+from .health import HealthType
 from .index.dta_calc import DatabaseTuningAdvisor
 from .index.index_opt_base import MAX_NUM_INDEX_TUNING_QUERIES
 from .index.llm_opt import LLMOptimizerTool

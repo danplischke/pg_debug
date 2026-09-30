@@ -2,8 +2,8 @@ from dataclasses import asdict
 from dataclasses import dataclass
 from typing import Optional
 
-from ..db import SqlDriver
-from .result import HealthCheckResult
+from ...db import SqlDriver
+from ..result import HealthCheckResult
 
 REPLICATION_HEALTH = "Replication health"
 

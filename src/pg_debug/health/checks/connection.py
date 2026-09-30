@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
-from ..db import SqlDriver
-from .result import HealthCheckResult
+from ...db import SqlDriver
+from ..result import HealthCheckResult
 
 CONNECTION_HEALTH = "Connection health"
 
