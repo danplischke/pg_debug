@@ -534,6 +534,25 @@ uv run pytest tests/integration   # spins up PostgreSQL containers, needs Docker
 Some tests under `tests/unit` also start containers (`test_explain_real_db.py`,
 `test_db_conn_pool.py`); see `tests/README.md`.
 
+### Package layout
+
+| Under `src/pg_debug/` | What it holds |
+| --- | --- |
+| `client.py`, `sync.py`, `errors.py`, `severity.py` | The public surface: `PgDebug`, `SyncPgDebug`, the exceptions and severities. |
+| `cli/` | The `pg-debug` command, and `render.py`, which formats its output. |
+| `db/` | Talking to PostgreSQL: the driver and pool, restricted mode and its allowlist, extension and version checks, identifiers. |
+| `parsing/` | Reading SQL pg_debug is given to analyse: the pglast visitors and bind-parameter substitution. |
+| `queries/` | The SQL pg_debug runs. Queries are moving here from the modules that run them; `tests/unit/test_sql_location.py` lists the files that still write their own. |
+| `plans/` | `explain` and `diagnose`: running EXPLAIN, the plan tree, the diagnosis rules, hypothetical indexes. |
+| `health/` | `health`: `tool.py` runs the checks in `checks/`, one module per check. |
+| `index/` | `tune-workload` and `tune-queries`: the search in `base.py`, the `dta` and `llm` methods, and the report. |
+| `model/`, `migration/`, `partition/` | `model`, `check-migration` and `partitions`. |
+| `activity.py`, `configuration.py`, `schema.py`, `statistics.py`, `top_queries.py` | Features that fit in one file. |
+
+A feature is one module until it needs a second file. `tests/unit/` mirrors
+`src/pg_debug/`, and since the test directories have no package files, every
+test module needs a name of its own.
+
 ## Relationship to postgres-mcp
 
 The database logic — safe SQL parsing, the explain tooling, health calculators and the

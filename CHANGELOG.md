@@ -269,6 +269,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `analyze_query_indexes(..., method="llm")` rejects more than one query up
   front, instead of failing deep in the analysis, since the LLM optimizer
   reasons about a single plan.
+- The package is reorganised so that where a module lives says what it does.
+  The top-level `pg_debug` exports and the CLI are unchanged; code that imports
+  submodules needs the new paths:
+  - `pg_debug.sql` is split into `pg_debug.db` (the driver, restricted mode and
+    its allowlist, extension checks, identifiers) and `pg_debug.parsing` (the
+    pglast visitors and `SqlBindParams`).
+  - `pg_debug.explain`, `pg_debug.plan` and `pg_debug.artifacts` are merged into
+    `pg_debug.plans`, which also holds `IndexDefinition`.
+  - `pg_debug.database_health` is now `pg_debug.health`, with one module per
+    check under `pg_debug.health.checks`.
+  - `pg_debug.index.index_opt_base`, `dta_calc` and `llm_opt` are now
+    `pg_debug.index.base`, `dta` and `llm`; `pg_debug.top_queries` is a single
+    module; `pg_debug.tuple_layout` is `pg_debug.queries.tuple_layout`; and
+    `pg_debug.formatting` is `pg_debug.cli.render`.
 
 ## [0.1.0] - 2026-08-12
 
