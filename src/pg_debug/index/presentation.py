@@ -11,9 +11,9 @@ import humanize
 from ..db import SqlDriver
 from ..plans.tree import ExplainPlanArtifact
 from ..plans.tree import calculate_improvement_multiple
-from .dta_calc import IndexTuningBase
-from .index_opt_base import IndexDefinition
-from .index_opt_base import IndexTuningResult
+from .base import IndexDefinition
+from .base import IndexTuningResult
+from .dta import IndexTuningBase
 
 logger = logging.getLogger(__name__)
 

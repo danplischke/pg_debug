@@ -42,6 +42,8 @@ when the extension is absent.
 - `tests/unit/plans/` — explain plan generation and formatting, and plan diagnosis
 - `tests/unit/index/` — the Database Tuning Advisor's candidate search
 - `tests/unit/health/` — health check selection, and the individual checks under `checks/`
-- `tests/unit/top_queries/` — `pg_stat_statements` queries across PostgreSQL versions
-- `tests/unit/test_client.py`, `test_cli.py`, `test_schema.py`, `test_formatting.py` — the library API, the CLI and its rendering
+- `tests/unit/cli/` — the CLI and its rendering
+- `tests/unit/queries/` — SQL shared between modules, such as the tuple layout
+- `tests/unit/test_top_queries.py`, `test_top_queries_sampling.py` — `pg_stat_statements` queries across PostgreSQL versions
+- `tests/unit/test_client.py`, `test_schema.py` and the other top-level files — the library API and the one-file features
 - `tests/integration/` — end-to-end runs against a real server

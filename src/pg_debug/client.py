@@ -27,9 +27,9 @@ from .errors import InvalidArgumentError
 from .health import DatabaseHealthTool
 from .health import HealthCheckResult
 from .health import HealthType
-from .index.dta_calc import DatabaseTuningAdvisor
-from .index.index_opt_base import MAX_NUM_INDEX_TUNING_QUERIES
-from .index.llm_opt import LLMOptimizerTool
+from .index.base import MAX_NUM_INDEX_TUNING_QUERIES
+from .index.dta import DatabaseTuningAdvisor
+from .index.llm import LLMOptimizerTool
 from .index.presentation import TextPresentation
 from .migration import MigrationLinter
 from .migration import StatementReview
@@ -143,7 +143,7 @@ class PgDebug:
                 through it.
             llm_model: Model for the ``llm`` index tuning method. Defaults to
                 the ``PG_DEBUG_LLM_MODEL`` environment variable, then to
-                :data:`~pg_debug.index.llm_opt.DEFAULT_LLM_MODEL`.
+                :data:`~pg_debug.index.llm.DEFAULT_LLM_MODEL`.
             pool: An existing connection pool to use. When given, the client
                 does not close it on exit and does not reconfigure it, so
                 ``search_path`` and the server-side timeout are its owner's

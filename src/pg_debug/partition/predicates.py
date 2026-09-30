@@ -7,7 +7,7 @@ appear in a WHERE clause or a join condition, and records whether they were
 compared for equality or over a range — because a HASH partition prunes on the
 first and not on the second.
 
-Deliberately separate from :class:`~pg_debug.index.dta_calc.ConditionColumnCollector`,
+Deliberately separate from :class:`~pg_debug.index.dta.ConditionColumnCollector`,
 which is built around ``visit_SelectStmt`` and so never sees a DELETE. Deletes
 are the ones worth seeing here: a table whose old rows are deleted by date is
 the strongest case for partitioning there is, because the delete becomes a

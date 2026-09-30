@@ -171,7 +171,7 @@ async def test_extension_not_available(local_sql_driver):
 
         # Replace the function with our mock
         # We need to patch the actual function imported by TopQueriesCalc
-        mp.setattr(pg_debug.top_queries.top_queries_calc, "check_extension", mock_check)
+        mp.setattr(pg_debug.top_queries, "check_extension", mock_check)
 
         # Run the test
         result = await calc.get_top_queries_by_time()

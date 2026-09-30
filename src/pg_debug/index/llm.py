@@ -16,8 +16,8 @@ from pg_debug.plans.tree import ErrorResult
 
 from ..db import SqlDriver
 from ..plans.hypothetical import IndexDefinition
-from .index_opt_base import IndexRecommendation
-from .index_opt_base import IndexTuningBase
+from .base import IndexRecommendation
+from .base import IndexTuningBase
 
 logger = logging.getLogger(__name__)
 

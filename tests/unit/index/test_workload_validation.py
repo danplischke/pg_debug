@@ -12,8 +12,8 @@ import pytest
 
 from pg_debug.db import QUERY_MARKER
 from pg_debug.db import SqlDriver
-from pg_debug.index.dta_calc import DatabaseTuningAdvisor
-from pg_debug.index.index_opt_base import HIDDEN_QUERY_TEXT
+from pg_debug.index.base import HIDDEN_QUERY_TEXT
+from pg_debug.index.dta import DatabaseTuningAdvisor
 
 USABLE = "select * from orders where user_id = 42"
 

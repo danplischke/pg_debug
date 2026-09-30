@@ -2,9 +2,9 @@
 
 import pytest
 
-from pg_debug.tuple_layout import DECLARED_ORDER
-from pg_debug.tuple_layout import PACKED_ORDER
-from pg_debug.tuple_layout import row_layout_ctes
+from pg_debug.queries.tuple_layout import DECLARED_ORDER
+from pg_debug.queries.tuple_layout import PACKED_ORDER
+from pg_debug.queries.tuple_layout import row_layout_ctes
 
 
 def test_it_builds_the_four_ctes_the_callers_join_to():

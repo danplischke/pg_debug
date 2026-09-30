@@ -184,7 +184,7 @@ async def test_sample_waits_between_snapshots():
     with (
         patch.object(TopQueriesCalc, "_require_pg_stat_statements", AsyncMock()),
         patch.object(TopQueriesCalc, "_counter_snapshot", AsyncMock(side_effect=snapshots)),
-        patch("pg_debug.top_queries.top_queries_calc.asyncio.sleep", AsyncMock()) as sleep,
+        patch("pg_debug.top_queries.asyncio.sleep", AsyncMock()) as sleep,
     ):
         (result,) = await calc.sample(2.5)
 

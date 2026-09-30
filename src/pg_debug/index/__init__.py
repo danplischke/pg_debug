@@ -1,11 +1,11 @@
 """Index tuning: recommend indexes for a query workload."""
 
-from .dta_calc import DatabaseTuningAdvisor
-from .index_opt_base import MAX_NUM_INDEX_TUNING_QUERIES
-from .index_opt_base import IndexRecommendation
-from .index_opt_base import IndexTuningBase
-from .index_opt_base import IndexTuningResult
-from .llm_opt import LLMOptimizerTool
+from .base import MAX_NUM_INDEX_TUNING_QUERIES
+from .base import IndexRecommendation
+from .base import IndexTuningBase
+from .base import IndexTuningResult
+from .dta import DatabaseTuningAdvisor
+from .llm import LLMOptimizerTool
 from .presentation import TextPresentation
 
 __all__ = [

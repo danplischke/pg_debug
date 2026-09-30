@@ -8,8 +8,8 @@ import pytest_asyncio
 
 from pg_debug.db import DbConnPool
 from pg_debug.db import SqlDriver
-from pg_debug.index.dta_calc import DatabaseTuningAdvisor
-from pg_debug.index.index_opt_base import IndexTuningResult
+from pg_debug.index.base import IndexTuningResult
+from pg_debug.index.dta import DatabaseTuningAdvisor
 
 logger = logging.getLogger(__name__)
 

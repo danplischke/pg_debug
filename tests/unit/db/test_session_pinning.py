@@ -140,7 +140,7 @@ async def test_safe_sql_driver_proxies_the_session():
 @pytest.mark.asyncio
 async def test_index_tuning_runs_inside_a_session():
     """Otherwise the hypothetical indexes it creates can vanish mid-analysis."""
-    from pg_debug.index.dta_calc import DatabaseTuningAdvisor
+    from pg_debug.index.dta import DatabaseTuningAdvisor
 
     sql_driver = MagicMock(spec=SqlDriver)
     sql_driver.execute_query = AsyncMock(return_value=[])

@@ -7,7 +7,7 @@ therefore costs seven bytes of nothing, on every row, for the life of the
 table. Ordering the same columns widest-alignment-first removes the holes
 entirely and changes no behaviour whatsoever.
 
-Both row widths come from :mod:`pg_debug.tuple_layout`, the same code the table
+Both row widths come from :mod:`pg_debug.queries.tuple_layout`, the same code the table
 bloat check measures with, so a table this rule calls optimal is a table the
 bloat check will not accuse of padding.
 """
@@ -20,11 +20,11 @@ from typing import List
 
 from ..db import SafeSqlDriver
 from ..db import SqlDriver
-from ..tuple_layout import DECLARED_ORDER
-from ..tuple_layout import PACKED_ORDER
-from ..tuple_layout import fillfactor_expr
-from ..tuple_layout import row_layout_ctes
-from ..tuple_layout import rows_per_page_expr
+from ..queries.tuple_layout import DECLARED_ORDER
+from ..queries.tuple_layout import PACKED_ORDER
+from ..queries.tuple_layout import fillfactor_expr
+from ..queries.tuple_layout import row_layout_ctes
+from ..queries.tuple_layout import rows_per_page_expr
 from .catalog import scoped
 from .catalog import user_schemas
 from .result import Confidence

@@ -355,15 +355,15 @@ async def test_llm_method_accepts_a_single_query(pg):
 
 
 def test_llm_model_defaults_to_a_capable_model(monkeypatch):
-    from pg_debug.index.llm_opt import DEFAULT_LLM_MODEL
-    from pg_debug.index.llm_opt import llm_model
+    from pg_debug.index.llm import DEFAULT_LLM_MODEL
+    from pg_debug.index.llm import llm_model
 
     monkeypatch.delenv("PG_DEBUG_LLM_MODEL", raising=False)
     assert llm_model() == DEFAULT_LLM_MODEL
 
 
 def test_llm_model_is_configurable(monkeypatch):
-    from pg_debug.index.llm_opt import llm_model
+    from pg_debug.index.llm import llm_model
 
     monkeypatch.setenv("PG_DEBUG_LLM_MODEL", "gpt-4o-mini")
     assert llm_model() == "gpt-4o-mini"
@@ -403,7 +403,7 @@ async def test_a_per_call_llm_model_wins(pg):
 
 
 def test_optimizer_falls_back_to_the_environment(monkeypatch):
-    from pg_debug.index.llm_opt import LLMOptimizerTool
+    from pg_debug.index.llm import LLMOptimizerTool
 
     monkeypatch.setenv("PG_DEBUG_LLM_MODEL", "from-env")
     assert LLMOptimizerTool(MagicMock(spec=SqlDriver)).model == "from-env"

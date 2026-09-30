@@ -18,11 +18,11 @@ from ..db import split_table_reference
 from ..parsing import ColumnCollector
 from ..parsing import TableAliasVisitor
 from ..parsing import resolve_table_reference
-from .index_opt_base import DEFAULT_WRITE_WEIGHT
-from .index_opt_base import IndexRecommendation
-from .index_opt_base import IndexTuningBase
-from .index_opt_base import candidate_str
-from .index_opt_base import pp_list
+from .base import DEFAULT_WRITE_WEIGHT
+from .base import IndexRecommendation
+from .base import IndexTuningBase
+from .base import candidate_str
+from .base import pp_list
 
 logger = logging.getLogger(__name__)
 

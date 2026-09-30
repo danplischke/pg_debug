@@ -6,7 +6,7 @@ needs attention when a large share of its heap is space no live row occupies.
 
 The estimate compares the pages a table actually occupies (``pg_class.relpages``)
 against the pages its live rows would need. That second number comes from
-:mod:`pg_debug.tuple_layout`, which builds a row the way PostgreSQL does —
+:mod:`pg_debug.queries.tuple_layout`, which builds a row the way PostgreSQL does —
 padding each column forward to its type's alignment boundary — and is shared
 with the data-model review so the two cannot drift apart. Skipping the padding,
 as most catalog bloat queries do, understates the row width and so reports
@@ -29,9 +29,9 @@ from typing_extensions import LiteralString
 
 from ...db import SafeSqlDriver
 from ...db import SqlDriver
-from ...tuple_layout import fillfactor_expr
-from ...tuple_layout import row_layout_ctes
-from ...tuple_layout import rows_per_page_expr
+from ...queries.tuple_layout import fillfactor_expr
+from ...queries.tuple_layout import row_layout_ctes
+from ...queries.tuple_layout import rows_per_page_expr
 from ..result import HealthCheckResult
 
 TABLE_BLOAT = "Table bloat"

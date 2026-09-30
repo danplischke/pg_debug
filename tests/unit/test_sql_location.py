@@ -38,9 +38,9 @@ STILL_WRITING_SQL = {
     "health/checks/sequence.py",
     "health/checks/table_bloat.py",
     "health/checks/vacuum.py",
-    "index/dta_calc.py",
-    "index/index_opt_base.py",
-    "index/llm_opt.py",
+    "index/base.py",
+    "index/dta.py",
+    "index/llm.py",
     "migration/lint.py",
     "model/columns.py",
     "model/keys.py",
@@ -51,8 +51,7 @@ STILL_WRITING_SQL = {
     "plans/explain.py",
     "schema.py",
     "statistics.py",
-    "top_queries/top_queries_calc.py",
-    "tuple_layout.py",
+    "top_queries.py",
 }
 
 

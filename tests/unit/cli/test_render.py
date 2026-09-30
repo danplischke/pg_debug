@@ -2,11 +2,11 @@ import json
 from datetime import datetime
 from decimal import Decimal
 
-from pg_debug.formatting import render_index_recommendations
-from pg_debug.formatting import render_mapping
-from pg_debug.formatting import render_object_details
-from pg_debug.formatting import render_rows
-from pg_debug.formatting import to_json
+from pg_debug.cli.render import render_index_recommendations
+from pg_debug.cli.render import render_mapping
+from pg_debug.cli.render import render_object_details
+from pg_debug.cli.render import render_rows
+from pg_debug.cli.render import to_json
 
 
 def test_to_json_handles_database_types():

@@ -10,9 +10,9 @@ from pg_debug.db import SqlDriver
 from pg_debug.db import split_table_reference
 from pg_debug.db import table_identifier
 from pg_debug.db.identifiers import MAX_IDENTIFIER_BYTES
-from pg_debug.index.dta_calc import HYPOTHETICAL_INDEX_SIZES_SQL
-from pg_debug.index.dta_calc import ConditionColumnCollector
-from pg_debug.index.dta_calc import DatabaseTuningAdvisor
+from pg_debug.index.dta import HYPOTHETICAL_INDEX_SIZES_SQL
+from pg_debug.index.dta import ConditionColumnCollector
+from pg_debug.index.dta import DatabaseTuningAdvisor
 from pg_debug.parsing import ColumnCollector
 from pg_debug.parsing import TableAliasVisitor
 from pg_debug.parsing import resolve_table_reference

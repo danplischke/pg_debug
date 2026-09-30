@@ -12,8 +12,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from pg_debug.db import SqlDriver
-from pg_debug.index.dta_calc import DatabaseTuningAdvisor
-from pg_debug.index.index_opt_base import DEFAULT_WRITE_WEIGHT
+from pg_debug.index.base import DEFAULT_WRITE_WEIGHT
+from pg_debug.index.dta import DatabaseTuningAdvisor
 
 
 def driver():

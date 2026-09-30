@@ -13,7 +13,7 @@ from pg_debug.health.checks.table_bloat import DEFAULT_MIN_BLOAT_BYTES
 from pg_debug.health.checks.table_bloat import DEFAULT_MIN_BLOAT_PERCENT
 from pg_debug.health.checks.table_bloat import TABLE_BLOAT_SQL
 from pg_debug.health.checks.table_bloat import TableBloatCalc
-from pg_debug.tuple_layout import row_layout_ctes
+from pg_debug.queries.tuple_layout import row_layout_ctes
 
 
 def row(**cells):
