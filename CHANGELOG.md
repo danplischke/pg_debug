@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-06
+
+First published release. 0.1.0 below was never tagged or uploaded to PyPI;
+its entry is kept because it describes what the package started as.
+
 ### Fixed
 
 - The buffer health checks no longer report a cache hit rate taken over too few
@@ -284,7 +289,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     module; `pg_debug.tuple_layout` is `pg_debug.queries.tuple_layout`; and
     `pg_debug.formatting` is `pg_debug.cli.render`.
 
-## [0.1.0] - 2026-08-12
+## [0.1.0] - 2026-08-12 (unpublished)
 
 First release. `pg_debug` extracts the analysis engine of
 [crystaldba/postgres-mcp](https://github.com/crystaldba/postgres-mcp) into an
@@ -345,5 +350,6 @@ async Python library with a `pg-debug` CLI, replacing the MCP server layer.
 - The MCP server, its tool registrations and its stdio/SSE/streamable-HTTP
   transports.
 
-[Unreleased]: https://github.com/danplischke/pg_debug/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/danplischke/pg_debug/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/danplischke/pg_debug/compare/332df27...v0.2.0
 [0.1.0]: https://github.com/danplischke/pg_debug/releases/tag/v0.1.0
