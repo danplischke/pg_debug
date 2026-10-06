@@ -28,6 +28,10 @@ its entry is kept because it describes what the package started as.
 
 ### Added
 
+- Python 3.13 is supported; CI runs the suite on 3.12 and 3.13.
+- Published wheels declare `License-Expression: MIT` and ship `NOTICE`, which
+  records the derivation from postgres-mcp, alongside `LICENSE`. Package
+  metadata now carries the project URLs.
 - `pg-debug diagnose` and `PgDebug.diagnose_query()`: run a query and report
   what is wrong with the plan it produced, rather than only printing it. Nine
   rules over the parsed plan — the lowest node whose row estimate diverged from
@@ -256,6 +260,8 @@ its entry is kept because it describes what the package started as.
 
 ### Changed
 
+- The version is written in one place, `pg_debug.__version__`;
+  `pyproject.toml` reads it from there at build time.
 - Every statement pg_debug issues now carries the `/* pg_debug */` marker, in
   both access modes. Only `SafeSqlDriver` applied it before, so in the default
   unrestricted mode the tool's own catalog reads were indistinguishable from

@@ -1,0 +1,41 @@
+name: Bug report
+description: pg_debug did something wrong, or said something wrong about a database.
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: pg_debug version
+      description: Output of `pg-debug --version`.
+      placeholder: pg-debug 0.2.0
+    validations:
+      required: true
+  - type: input
+    id: postgres
+    attributes:
+      label: PostgreSQL version
+      description: Output of `SELECT version();`. Mention managed services (RDS, Cloud SQL, Supabase) and installed extensions (`hypopg`, `pg_stat_statements`).
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: What you ran
+      description: The CLI command or Python call, including the access mode. Redact credentials.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: What happened
+      description: The full output or traceback. For a wrong finding, the plan or catalog rows that show it is wrong.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true

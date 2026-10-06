@@ -2,47 +2,79 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
-    paths-ignore:
-      - "**/README.md"
+    branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened]
-    paths-ignore:
-      - "**/README.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
+  lint:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v10
         with:
-          python-version: "3.12"
-
-      - name: Start Docker service
-        run: sudo service docker start || true
-
-      - name: Verify Docker is running
-        run: docker info
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+          enable-cache: true
 
       - name: Install
-        run: uv sync --all-extras
+        run: uv sync --all-extras --locked
+
+      - name: Format
+        run: uv run ruff format --check .
 
       - name: Lint
-        run: |
-          uv run ruff format --check .
-          uv run ruff check .
+        run: uv run ruff check .
 
       - name: Type check
         run: uv run pyright
 
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: uv sync --all-extras --locked
+
+      - name: Verify Docker is running
+        run: docker info
+
       - name: Test
         run: uv run pytest -v --log-cli-level=INFO
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Check metadata
+        run: uvx twine check --strict dist/*
+
+      - name: Install the wheel into a clean environment and run it
+        run: |
+          uv venv /tmp/smoke
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+          /tmp/smoke/bin/pg-debug --version
+          /tmp/smoke/bin/python -m pg_debug --version
+          /tmp/smoke/bin/python -c "import pg_debug; print(pg_debug.__version__)"

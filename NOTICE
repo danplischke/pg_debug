@@ -1,0 +1,7 @@
+pg_debug is derived from postgres-mcp (https://github.com/crystaldba/postgres-mcp),
+Copyright (c) 2025 Crystal Corp., licensed under the MIT License.
+
+The safe SQL parsing, explain tooling, health calculators and Database Tuning
+Advisor originate there and are redistributed here under the same license; see
+LICENSE. The "Relationship to postgres-mcp" section of README.md lists what
+changed during extraction.

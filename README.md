@@ -1,5 +1,10 @@
 # pg_debug
 
+[![CI](https://github.com/danplischke/pg_debug/actions/workflows/ci.yml/badge.svg)](https://github.com/danplischke/pg_debug/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/pg-debug)](https://pypi.org/project/pg-debug/)
+[![Python](https://img.shields.io/pypi/pyversions/pg-debug)](https://pypi.org/project/pg-debug/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 PostgreSQL inspection, health checks and index tuning — as an async Python library with a CLI.
 
 `pg_debug` is an extraction of the analysis engine behind
@@ -525,14 +530,17 @@ session started in this repository.
 ## Development
 
 ```bash
-uv sync --all-extras          # install into .venv
-uv run ruff check .
-uv run pytest tests/unit      # unit tests, no database needed
-uv run pytest tests/integration   # spins up PostgreSQL containers, needs Docker
+uv sync --all-extras              # install into .venv
+uv run pre-commit install         # ruff, pyright and uv.lock checks on every commit
+uv run ruff format --check . && uv run ruff check . && uv run pyright
+uv run pytest tests/unit          # unit tests, no database needed
+uv run pytest                     # everything; spins up PostgreSQL containers, needs Docker
 ```
 
 Some tests under `tests/unit` also start containers (`test_explain_real_db.py`,
-`test_db_conn_pool.py`); see `tests/README.md`.
+`test_db_conn_pool.py`); see `tests/README.md`. [CONTRIBUTING.md](CONTRIBUTING.md)
+covers conventions, the changelog and how a release is cut; [AGENTS.md](AGENTS.md)
+is the same for coding agents.
 
 ### Package layout
 
@@ -577,4 +585,4 @@ during extraction:
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE); [NOTICE](NOTICE) records the derivation from postgres-mcp.
