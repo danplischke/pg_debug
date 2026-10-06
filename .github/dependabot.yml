@@ -15,3 +15,10 @@ updates:
     groups:
       dev-tools:
         dependency-type: "development"
+    ignore:
+      # pglast is pinned to one major on purpose: each major tracks a new
+      # PostgreSQL parser and changes the node classes the restricted-mode
+      # allowlist and the migration linter walk. Moving majors is a migration
+      # with its own tests, not a dependency bump.
+      - dependency-name: "pglast"
+        update-types: ["version-update:semver-major"]
