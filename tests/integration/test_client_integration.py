@@ -868,15 +868,20 @@ async def test_sequential_scan_health_reports_a_table_read_whole_over_and_over(p
         await pg.execute_sql(f"SELECT count(*) FROM {SCHEMA}.orders WHERE total >= 0")
 
     calc = SeqScanHealthCalc(await pg.sql_driver(), min_table_bytes=0, min_bytes_read=0)
-    finding = None
+
+    def reported(check):
+        return next((f for f in check.findings if f["table"] == "orders" and f["seq_scans"] >= 5), None)
+
+    check = await calc.sequential_scan_check()
+    finding = reported(check)
     for _ in range(20):
-        # Backends flush their table counters shortly after each transaction;
-        # give the collector a moment rather than asserting on the first read.
-        check = await calc.sequential_scan_check()
-        finding = next((f for f in check.findings if f["table"] == "orders" and f["seq_scans"] >= 5), None)
         if finding:
             break
+        # Backends flush their table counters shortly after each transaction;
+        # give the collector a moment rather than asserting on the first read.
         await asyncio.sleep(0.25)
+        check = await calc.sequential_scan_check()
+        finding = reported(check)
 
     assert finding, "the five full scans of orders should be reported"
     assert finding["index_scans"] == 0
