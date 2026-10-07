@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `pg-debug locks` and `PgDebug.lock_tree()`: who is blocking whom, as a tree.
+  `activity` already reported the pids blocking each waiter, which left the
+  reader to follow them by hand when the database was stuck. This walks the
+  blocking graph from every waiter back to the backend that waits on nothing
+  and prints that root first — usually a session idle in a transaction, with
+  the last statement it ran — and nests everything stuck behind it beneath,
+  each line saying what it waits for (the lock mode and table, or the other
+  transaction and the table of the row) and what the holder has on it. Roots
+  are ordered by how many backends they block. It works in `restricted` mode
+  and needs no extension.
+
 ## [0.2.0] - 2026-10-06
 
 First published release. 0.1.0 below was never tagged or uploaded to PyPI;

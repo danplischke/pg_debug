@@ -83,6 +83,7 @@ CLI_COMMANDS = [
     "execute",
     "explain",
     "health",
+    "locks",
     "model",
     "objects",
     "partitions",

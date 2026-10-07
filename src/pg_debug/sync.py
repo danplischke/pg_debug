@@ -259,6 +259,10 @@ class SyncPgDebug:
         """Report running vacuums and how far along they are."""
         return self._call(self._client.vacuum_progress)
 
+    def lock_tree(self) -> List[Dict[str, Any]]:
+        """Report who is blocking whom, root blockers first."""
+        return self._call(self._client.lock_tree)
+
     # -- Diagnostics ---------------------------------------------------------
 
     def analyze_db_health(

@@ -583,6 +583,95 @@ async def test_list_activity_reports_who_is_blocking_whom(pg):
 
 
 @pytest.mark.asyncio
+async def test_lock_tree_puts_the_root_blocker_first_and_names_the_lock(pg):
+    """One session holds the table and goes idle in its transaction, two wait
+    on it. The tree has to start at the idle one, say what each waiter wants
+    and what the holder has, and count both beneath it."""
+    async with await psycopg.AsyncConnection.connect(DATABASE_URI or "") as holder:
+        await holder.execute(f"LOCK TABLE {SCHEMA}.orders IN ACCESS EXCLUSIVE MODE")
+        holder_pid = (await (await holder.execute("SELECT pg_backend_pid()")).fetchone() or [None])[0]
+
+        async def run_blocked(sql: LiteralString):
+            async with await psycopg.AsyncConnection.connect(DATABASE_URI or "", autocommit=True) as app:
+                await app.execute(sql)
+
+        reader = asyncio.create_task(run_blocked(f"SELECT count(*) FROM {SCHEMA}.orders"))
+        writer = asyncio.create_task(run_blocked(f"UPDATE {SCHEMA}.orders SET status = status WHERE id = 1"))
+        try:
+            await asyncio.sleep(0.7)
+            roots = await pg.lock_tree()
+        finally:
+            await holder.rollback()
+            await asyncio.gather(reader, writer)
+
+    (root,) = [r for r in roots if r["pid"] == holder_pid]
+    assert root["state"] == "idle in transaction"
+    assert root["waits_for"] is None
+    assert root["blocked_total"] == 2
+
+    waits = {child["query"]: child["waits_for"] for child in root["blocking"]}
+    read = next(w for q, w in waits.items() if "count(*)" in q)
+    assert read["locktype"] == "relation"
+    assert read["mode"] == "AccessShareLock"
+    assert read["relation"] == f"{SCHEMA}.orders"
+    assert read["held_modes"] == ["AccessExclusiveLock"]
+    assert read["description"] == f"AccessShareLock on {SCHEMA}.orders ({holder_pid} holds AccessExclusiveLock)"
+    write = next(w for q, w in waits.items() if "UPDATE" in q)
+    assert write["mode"] == "RowExclusiveLock"
+
+
+@pytest.mark.asyncio
+async def test_lock_tree_names_the_table_behind_a_row_lock(pg):
+    """A row lock waits on the holder's transaction id, which names no table;
+    the waiter's own tuple lock does."""
+    async with await psycopg.AsyncConnection.connect(DATABASE_URI or "") as holder:
+        await holder.execute(f"UPDATE {SCHEMA}.orders SET status = 'held' WHERE id = 2")
+        holder_pid = (await (await holder.execute("SELECT pg_backend_pid()")).fetchone() or [None])[0]
+
+        async def run_blocked():
+            async with await psycopg.AsyncConnection.connect(DATABASE_URI or "", autocommit=True) as app:
+                await app.execute(f"UPDATE {SCHEMA}.orders SET status = 'waited' WHERE id = 2")
+
+        waiter = asyncio.create_task(run_blocked())
+        try:
+            await asyncio.sleep(0.7)
+            roots = await pg.lock_tree()
+        finally:
+            await holder.rollback()
+            await waiter
+
+    (root,) = [r for r in roots if r["pid"] == holder_pid]
+    (child,) = root["blocking"]
+    waits_for = child["waits_for"]
+    assert waits_for["locktype"] == "transactionid"
+    assert waits_for["tuple_relation"] == f"{SCHEMA}.orders"
+    assert waits_for["held_modes"] == ["ExclusiveLock"]
+    assert waits_for["description"].endswith(f", to lock a row in {SCHEMA}.orders ({holder_pid} holds ExclusiveLock)")
+
+
+@pytest.mark.asyncio
+async def test_lock_tree_is_empty_when_nothing_waits(pg):
+    assert await pg.lock_tree() == []
+
+
+@pytest.mark.asyncio
+async def test_lock_tree_works_in_restricted_mode():
+    async with PgDebug(DATABASE_URI, access_mode=AccessMode.RESTRICTED) as restricted:
+        assert isinstance(await restricted.lock_tree(), list)
+
+
+def test_cli_locks_against_a_real_database(capsys, monkeypatch):
+    monkeypatch.setenv("DATABASE_URI", DATABASE_URI or "")
+
+    assert cli.main(["locks"]) == 0
+    out = capsys.readouterr().out
+    assert out.strip() == "(nothing is blocked)" or out.startswith("pid ")
+
+    assert cli.main(["--json", "locks"]) == 0
+    assert isinstance(json.loads(capsys.readouterr().out), list)
+
+
+@pytest.mark.asyncio
 async def test_list_activity_min_duration_filters(pg):
     assert await pg.list_activity(include_idle=True, min_duration_seconds=100_000) == []
 

@@ -39,6 +39,7 @@ from .render import render_column_stats
 from .render import render_configuration_review
 from .render import render_health_checks
 from .render import render_index_recommendations
+from .render import render_lock_tree
 from .render import render_migration_review
 from .render import render_model_findings
 from .render import render_object_details
@@ -394,6 +395,9 @@ def build_parser() -> argparse.ArgumentParser:
     activity.add_argument("-b", "--blocked", action="store_true", help="Only show backends waiting on a lock another backend holds.")
     activity.set_defaults(func=cmd_activity)
 
+    locks = subparsers.add_parser("locks", help="Show who is blocking whom, the root blockers first")
+    locks.set_defaults(func=cmd_locks)
+
     vacuum_progress = subparsers.add_parser("vacuum-progress", help="Show running vacuums and how far along they are")
     vacuum_progress.set_defaults(func=cmd_vacuum_progress)
 
@@ -508,6 +512,10 @@ async def cmd_activity(pg: PgDebug, args: argparse.Namespace) -> Any:
     )
 
 
+async def cmd_locks(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.lock_tree()
+
+
 async def cmd_vacuum_progress(pg: PgDebug, args: argparse.Namespace) -> Any:
     return await pg.vacuum_progress()
 
@@ -591,6 +599,8 @@ def format_result(command: str, result: Any, as_json: bool) -> str:
 
     if command == "activity":
         return render_activity(result)
+    if command == "locks":
+        return render_lock_tree(result)
     if command == "column-stats":
         return render_column_stats(result)
     if command == "vacuum-progress":

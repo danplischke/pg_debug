@@ -7,10 +7,13 @@ answer "what is happening" rather than "what has happened".
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from typing import Any
 from typing import Dict
 from typing import List
+from typing import LiteralString
 from typing import Optional
+from typing import cast
 
 from .db import SafeSqlDriver
 from .db import SqlDriver
@@ -173,5 +176,246 @@ class ActivityInspector:
     async def _has_query_id(self) -> bool:
         return await get_postgres_version(self.sql_driver) >= QUERY_ID_MIN_VERSION
 
+    async def lock_tree(self) -> List[Dict[str, Any]]:
+        """Who is blocking whom, as trees rooted at the backends that wait on nothing.
 
-__all__ = ["ActivityInspector"]
+        ``list_backends`` says which pids block each waiter. When the database
+        is stuck the question is the other way round: which one session is at
+        the root, what is it doing, and what does everything else wait for.
+        This walks the blocking graph from every waiter back to a backend that
+        is itself not waiting, and reports each such root with the backends
+        behind it nested under it.
+
+        Returns:
+            One dict per root, the root blocking the most backends first. Each
+            node carries the backend's identity, state, how long it has been in
+            it, its query, ``blocked_by``, ``blocking`` (the nodes waiting on
+            it, nested the same way) and ``blocked_total`` (distinct backends
+            anywhere beneath it). A non-root node also carries ``waits_for``:
+            the lock type and mode it is waiting on, the relation when the
+            catalog of this database can name it (another database's shows as
+            an OID), the transaction id for a row-lock wait with the table the
+            row is in, the modes its parent holds on that target, and a
+            one-line ``description`` of all that.
+
+            A backend waiting on several holders appears under each of them.
+            Two backends waiting on each other (a deadlock, which the server
+            resolves within ``deadlock_timeout``) are reported once, under a
+            node marked ``cycle``.
+
+        Note:
+            This reads pg_stat_activity and pg_locks in two statements, so a
+            lock released between them shows as a wait on "a lock pg_locks no
+            longer shows". Run it again; a pile-up that matters is still there.
+        """
+        rows = await self.sql_driver.execute_query(cast(LiteralString, LOCK_TREE_BACKENDS_SQL))
+        backends = [row.cells for row in rows] if rows else []
+        if not backends:
+            return []
+        rows = await self.sql_driver.execute_query(cast(LiteralString, LOCK_TREE_HOLDERS_SQL))
+        holders = [row.cells for row in rows] if rows else []
+        return assemble_lock_tree(backends, holders)
+
+
+# -- Lock wait tree ---------------------------------------------------------
+
+#: The backends in a lock pile-up: every one waiting on a lock, and every one a
+#: waiter points at. A backend waits on at most one lock, so the LATERAL picks
+#: it up directly from pg_locks. The relation is named where this database's
+#: catalog can name it. A wait on another transaction is how a row lock waits,
+#: and the waiter's own granted tuple lock says which table the row is in.
+LOCK_TREE_BACKENDS_SQL = """
+    WITH involved AS (
+        SELECT a.pid, pg_blocking_pids(a.pid) AS blocked_by
+        FROM pg_stat_activity a
+        WHERE a.pid <> pg_backend_pid()
+    )
+    SELECT
+        a.pid,
+        a.datname,
+        a.usename,
+        a.application_name,
+        a.backend_type,
+        a.state,
+        a.wait_event_type,
+        a.wait_event,
+        i.blocked_by,
+        EXTRACT(EPOCH FROM clock_timestamp() - a.state_change)::float8 AS state_seconds,
+        EXTRACT(EPOCH FROM clock_timestamp() - a.query_start)::float8 AS query_seconds,
+        EXTRACT(EPOCH FROM clock_timestamp() - a.xact_start)::float8 AS transaction_seconds,
+        a.query,
+        w.locktype AS waiting_locktype,
+        w.mode AS waiting_mode,
+        w.relation AS waiting_relation_oid,
+        CASE WHEN wc.oid IS NOT NULL THEN quote_ident(wn.nspname) || '.' || quote_ident(wc.relname) END AS waiting_relation,
+        w.transactionid::text AS waiting_transactionid,
+        CASE WHEN tc.oid IS NOT NULL THEN quote_ident(tn.nspname) || '.' || quote_ident(tc.relname) END AS tuple_relation
+    FROM pg_stat_activity a
+    JOIN involved i ON i.pid = a.pid
+    LEFT JOIN LATERAL (
+        SELECT l.locktype, l.mode, l.relation, l.transactionid
+        FROM pg_locks l
+        WHERE l.pid = a.pid AND NOT l.granted
+        LIMIT 1
+    ) w ON true
+    LEFT JOIN pg_class wc ON wc.oid = w.relation
+    LEFT JOIN pg_namespace wn ON wn.oid = wc.relnamespace
+    LEFT JOIN LATERAL (
+        SELECT l.relation
+        FROM pg_locks l
+        WHERE l.pid = a.pid AND l.granted AND l.locktype = 'tuple'
+        LIMIT 1
+    ) t ON true
+    LEFT JOIN pg_class tc ON tc.oid = t.relation
+    LEFT JOIN pg_namespace tn ON tn.oid = tc.relnamespace
+    WHERE cardinality(i.blocked_by) > 0
+       OR a.pid IN (SELECT unnest(blocked_by) FROM involved)
+    ORDER BY a.pid
+"""
+
+#: For every lock being waited on, who holds a lock on the same target and in
+#: which mode. A lock's target is the whole set of identifying columns, most of
+#: them NULL for any given lock type, which is what IS NOT DISTINCT FROM is for.
+#: Not every holder on a target blocks the waiter; pg_blocking_pids decides
+#: that, and this only supplies the mode for the pairs it names.
+LOCK_TREE_HOLDERS_SQL = """
+    SELECT w.pid AS waiter, h.pid AS holder, h.mode AS held_mode
+    FROM pg_locks w
+    JOIN pg_locks h
+      ON h.granted
+     AND h.pid <> w.pid
+     AND h.locktype = w.locktype
+     AND h.database IS NOT DISTINCT FROM w.database
+     AND h.relation IS NOT DISTINCT FROM w.relation
+     AND h.page IS NOT DISTINCT FROM w.page
+     AND h.tuple IS NOT DISTINCT FROM w.tuple
+     AND h.virtualxid IS NOT DISTINCT FROM w.virtualxid
+     AND h.transactionid IS NOT DISTINCT FROM w.transactionid
+     AND h.classid IS NOT DISTINCT FROM w.classid
+     AND h.objid IS NOT DISTINCT FROM w.objid
+     AND h.objsubid IS NOT DISTINCT FROM w.objsubid
+    WHERE NOT w.granted
+"""
+
+_NODE_FIELDS = (
+    "datname",
+    "usename",
+    "application_name",
+    "backend_type",
+    "state",
+    "wait_event_type",
+    "wait_event",
+    "state_seconds",
+    "query_seconds",
+    "transaction_seconds",
+    "query",
+)
+
+
+def assemble_lock_tree(backends: List[Dict[str, Any]], holders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Turn the rows of the two lock-tree queries into nested trees.
+
+    Args:
+        backends: One row per backend involved, with ``blocked_by`` and the
+            lock it waits on, as :data:`LOCK_TREE_BACKENDS_SQL` returns them.
+        holders: ``(waiter, holder, held_mode)`` rows from
+            :data:`LOCK_TREE_HOLDERS_SQL`.
+
+    Returns:
+        The roots, as :meth:`ActivityInspector.lock_tree` describes them.
+    """
+    by_pid: Dict[int, Dict[str, Any]] = {int(row["pid"]): row for row in backends}
+
+    held: Dict[tuple[int, int], List[str]] = defaultdict(list)
+    for row in holders:
+        held[(int(row["waiter"]), int(row["holder"]))].append(row["held_mode"])
+
+    waiters_of: Dict[int, List[int]] = defaultdict(list)
+    for pid, row in by_pid.items():
+        for blocker in row.get("blocked_by") or []:
+            waiters_of[int(blocker)].append(pid)
+
+    def build(pid: int, parent: Optional[int], trail: frozenset[int]) -> Dict[str, Any]:
+        row = by_pid.get(pid, {"pid": pid})
+        node: Dict[str, Any] = {"pid": pid}
+        node.update({field: row.get(field) for field in _NODE_FIELDS})
+        node["blocked_by"] = [int(p) for p in row.get("blocked_by") or []]
+        node["waits_for"] = _waits_for(row, parent, sorted(set(held.get((pid, parent), [])))) if parent is not None else None
+
+        children: List[Dict[str, Any]] = []
+        # The longest-running waiter first: it has been stuck the longest.
+        for child in sorted(waiters_of.get(pid, []), key=lambda c: -(by_pid[c].get("query_seconds") or 0)):
+            if child == pid or child in trail:
+                node["cycle"] = True
+                continue
+            children.append(build(child, pid, trail | {pid}))
+        node["blocking"] = children
+        node["blocked_total"] = len(_pids_beneath(children))
+        return node
+
+    roots = [pid for pid, row in by_pid.items() if not row.get("blocked_by") and waiters_of.get(pid)]
+    trees = [build(pid, None, frozenset()) for pid in roots]
+
+    # A waiter no root reaches is in a cycle: every path from it leads back
+    # to itself. The server will break the deadlock; until then, report it.
+    reached = {pid for tree in trees for pid in _pids_beneath([tree])}
+    for pid in by_pid:
+        if pid not in reached and by_pid[pid].get("blocked_by"):
+            tree = build(pid, None, frozenset())
+            tree["cycle"] = True
+            trees.append(tree)
+            reached |= _pids_beneath([tree])
+
+    trees.sort(key=lambda t: (-t["blocked_total"], -(t.get("transaction_seconds") or 0), t["pid"]))
+    return trees
+
+
+def _pids_beneath(nodes: List[Dict[str, Any]]) -> set[int]:
+    found: set[int] = set()
+    for node in nodes:
+        found.add(node["pid"])
+        found |= _pids_beneath(node["blocking"])
+    return found
+
+
+def _waits_for(row: Dict[str, Any], holder: Optional[int], held_modes: List[str]) -> Dict[str, Any]:
+    """Describe the lock a waiter is waiting on, in words and in fields."""
+    locktype = row.get("waiting_locktype")
+    mode = row.get("waiting_mode")
+    oid = row.get("waiting_relation_oid")
+    relation = row.get("waiting_relation") or (str(oid) if oid is not None else None)
+    tuple_relation = row.get("tuple_relation")
+    transactionid = row.get("waiting_transactionid")
+
+    if locktype == "relation":
+        description = f"{mode} on {relation}"
+    elif locktype == "transactionid":
+        description = f"transaction {transactionid} to end"
+        if tuple_relation:
+            description += f", to lock a row in {tuple_relation}"
+    elif locktype == "tuple":
+        description = f"a row lock in {relation}"
+    elif locktype == "virtualxid":
+        description = "a virtual transaction to end"
+    elif locktype == "advisory":
+        description = f"{mode} advisory lock"
+    elif locktype is None:
+        description = "a lock pg_locks no longer shows"
+    else:
+        description = f"{mode} {locktype} lock"
+
+    if held_modes and holder is not None:
+        description += f" ({holder} holds {' and '.join(held_modes)})"
+
+    return {
+        "locktype": locktype,
+        "mode": mode,
+        "relation": relation,
+        "tuple_relation": tuple_relation,
+        "transactionid": transactionid,
+        "held_modes": held_modes,
+        "description": description,
+    }
+
+
+__all__ = ["ActivityInspector", "assemble_lock_tree"]

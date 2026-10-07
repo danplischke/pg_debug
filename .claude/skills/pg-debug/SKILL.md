@@ -136,9 +136,32 @@ pg-debug vacuum-progress             # is that vacuum going to finish?
 ```
 
 `activity` hides idle backends by default and excludes its own connection.
-Each row carries `blocked_by` — the pids holding the lock it is waiting for —
-so a lock pile-up reads directly off the output: find the backend with an empty
-`blocked_by` that others point at, and that is the one to deal with.
+Each row carries `blocked_by` — the pids holding the lock it is waiting for.
+
+When backends are waiting on each other, `locks` does the tracing:
+
+```bash
+pg-debug locks                       # who is blocking whom, root blockers first
+pg-debug --json locks                # the same tree as data
+```
+
+It walks `blocked_by` back from every waiter to a backend that waits on
+nothing and prints that root first, with everything stuck behind it nested
+beneath. Each waiter line says what it waits for — the lock mode and table, or
+for a row lock, the other transaction and the table the row is in — and what
+the holder has on it. The root is usually `idle in transaction`: an
+application that opened a transaction, took a lock, and went off to do
+something else. The query shown for it is the last one it ran before going
+idle, which is how you find that code. `blocking N` on the root is how many
+backends are stuck behind it in total, so when there are several roots the
+one listed first is the one to deal with. A root marked as a deadlock is in a
+cycle the server will break within `deadlock_timeout`.
+
+`lock_tree()` returns the same trees from Python: each node has `pid`,
+`state`, `query`, the `*_seconds` ages, `blocked_by`, `blocking` (nested
+nodes), `blocked_total`, and on a waiter `waits_for` with `locktype`, `mode`,
+`relation`, `tuple_relation`, `transactionid`, `held_modes` and a
+`description`.
 
 `wait_event_type` says what kind of wait it is: `Lock` means another backend,
 `IO` means storage, `Timeout` usually means the query is deliberately sleeping,
@@ -479,7 +502,7 @@ health, and `list[ModelFinding]` for the data model review.
 
 The live-activity and statistics methods mirror the commands:
 `list_activity(include_idle=, min_duration_seconds=, blocked_only=)`,
-`vacuum_progress()`, `column_stats(table)`, `extended_statistics(table)`, and
+`lock_tree()`, `vacuum_progress()`, `column_stats(table)`, `extended_statistics(table)`, and
 `get_top_queries(..., interval_seconds=)` for sampling. The model review is
 `review_data_model(rules=, schema=, min_rows=, proven_only=)`; each
 `ModelFinding` has `rule`, `confidence`, `severity`, `summary`, `detail`,

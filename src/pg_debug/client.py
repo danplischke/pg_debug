@@ -531,6 +531,17 @@ class PgDebug:
         """Report running vacuums and how far along they are."""
         return await ActivityInspector(await self.sql_driver()).vacuum_progress()
 
+    async def lock_tree(self) -> List[Dict[str, Any]]:
+        """Report who is blocking whom, as trees rooted at the backends that wait on nothing.
+
+        Returns:
+            One dict per root blocker, the one blocking the most backends
+            first, with the backends waiting on it nested under ``blocking``
+            and what each waits for under ``waits_for``. See
+            :meth:`ActivityInspector.lock_tree`.
+        """
+        return await ActivityInspector(await self.sql_driver()).lock_tree()
+
     # -- Diagnostics ---------------------------------------------------------
 
     async def analyze_db_health(

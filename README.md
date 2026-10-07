@@ -19,6 +19,7 @@ without an MCP client in the loop.
 - **Explain plans** — plan or `EXPLAIN ANALYZE` a query, including plans against *hypothetical* indexes that are never created (via [HypoPG](https://github.com/HypoPG/hypopg)).
 - **Plan diagnosis** — read the plan rather than only print it: the node whose row estimate first diverged from what it found, and whether that is stale statistics or two correlated columns nothing has told the planner about; sorts and hashes that outgrew `work_mem`; scans reading rows in order to discard them; parallel workers asked for and not granted. Each finding is ranked by the share of the query's work behind it.
 - **Live activity** — what every backend is doing right now, what it is waiting on, and which process is blocking it.
+- **Lock tree** — who is blocking whom, as a tree rooted at the session that waits on nothing: what it is doing, what every backend beneath it waits for, and the mode the holder has.
 - **Vacuum progress** — running vacuums, their phase and how far through the heap they are.
 - **Planner statistics** — the per-column numbers behind a plan's row estimates, the extended statistics defined on a table, and which tables the planner is reasoning about with stale numbers.
 - **Configuration review** — the server's settings judged against what it is actually doing: `work_mem` against bytes spilled to temporary files, `shared_buffers` against the cache hit rate it is achieving, `max_wal_size` against how many checkpoints were forced rather than scheduled. A default that is doing no harm is left alone, and nothing here guesses at the machine's memory or storage.
@@ -68,6 +69,7 @@ pg-debug --json diagnose ./slow.sql | jq '.[] | select(.severity == "high")'
 pg-debug activity                       # what is running right now
 pg-debug activity --blocked              # only backends waiting on a lock
 pg-debug activity --min-duration 30      # queries running longer than 30s
+pg-debug locks                           # who is blocking whom, root blockers first
 pg-debug vacuum-progress
 
 pg-debug health
@@ -120,6 +122,7 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `explain SQL` | `--analyze`, `-i, --hypothetical-index SPEC` (repeatable) |
 | `diagnose SQL` | a file path, inline SQL, or `-` for stdin; `--min-ratio N` (default 10) |
 | `activity` | `-a, --all` (include idle), `-m, --min-duration SECONDS`, `-b, --blocked` |
+| `locks` | — |
 | `vacuum-progress` | — |
 | `column-stats TABLE` | — |
 | `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--exit-code` |
@@ -367,6 +370,7 @@ bad URL instead.
 | `explain_query(sql, analyze=False, hypothetical_indexes=None)` | `ExplainPlanArtifact` |
 | `diagnose_query(sql, min_ratio=10)` | `list[PlanFinding]` — most severe first |
 | `list_activity(include_idle=False, min_duration_seconds=None, blocked_only=False)` | `list[dict]` — one per backend, with `blocked_by` |
+| `lock_tree()` | `list[dict]` — one per root blocker, waiters nested under `blocking` |
 | `vacuum_progress()` | `list[dict]` — one per running vacuum |
 | `column_stats(table)` / `extended_statistics(table)` | `list[dict]` — planner statistics |
 | `analyze_db_health(health_type="all")` | `dict[str, HealthCheckResult]` — check name to result |
