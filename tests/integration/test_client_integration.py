@@ -857,6 +857,46 @@ async def test_extended_statistics_round_trip(pg):
 
 
 @pytest.mark.asyncio
+async def test_sequential_scan_health_reports_a_table_read_whole_over_and_over(pg):
+    """Read the orders table in full a few times and never through an index.
+    With the size and byte thresholds lowered to the test's scale, it has to
+    come back with the counters behind the verdict."""
+    from pg_debug.health.checks.seq_scan import SeqScanHealthCalc
+
+    await pg.execute_sql(f"SELECT pg_stat_reset_single_table_counters('{SCHEMA}.orders'::regclass)")
+    for _ in range(5):
+        await pg.execute_sql(f"SELECT count(*) FROM {SCHEMA}.orders WHERE total >= 0")
+
+    calc = SeqScanHealthCalc(await pg.sql_driver(), min_table_bytes=0, min_bytes_read=0)
+    finding = None
+    for _ in range(20):
+        # Backends flush their table counters shortly after each transaction;
+        # give the collector a moment rather than asserting on the first read.
+        check = await calc.sequential_scan_check()
+        finding = next((f for f in check.findings if f["table"] == "orders" and f["seq_scans"] >= 5), None)
+        if finding:
+            break
+        await asyncio.sleep(0.25)
+
+    assert finding, "the five full scans of orders should be reported"
+    assert finding["index_scans"] == 0
+    assert finding["seq_share"] == 1.0
+    # n_live_tup is the planner's count, not an exact one, and a stray scan
+    # from the fixture can land in the window; the shape is what matters.
+    assert finding["scanned_fraction"] >= 0.8
+    assert finding["estimated_bytes_read"] >= 4 * finding["size_bytes"]
+    assert check.metrics["min_table_bytes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_sequential_scan_health_runs_with_the_default_thresholds(pg):
+    check = (await pg.analyze_db_health("scan"))["Sequential scan health"]
+
+    assert check.metrics["min_bytes_read"] == 1024**3
+    assert all(f["size_bytes"] >= check.metrics["min_table_bytes"] for f in check.findings)
+
+
+@pytest.mark.asyncio
 async def test_statistics_health_flags_a_never_analyzed_table(pg):
     await pg.execute_sql(f"CREATE TABLE {SCHEMA}.never (id int)")
     await pg.execute_sql(f"ALTER TABLE {SCHEMA}.never SET (autovacuum_enabled = false)")

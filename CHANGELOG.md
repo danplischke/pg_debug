@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A `scan` health check: tables read sequentially far more than through an
+  index, from `pg_stat_user_tables` and no extension. Index tuning finds the
+  same tables, but only with `pg_stat_statements` and `hypopg` installed; the
+  counters are always there. The check argues in bytes, not scan counts: each
+  table is charged the data its sequential scans read, scaled down when a
+  scan returned only part of the table, and reported only when that reading
+  is large, the table is not small, and sequential scans outnumber index
+  scans. Findings carry the counters, the rows each scan returned against the
+  table's rows, when the counting started, and on PostgreSQL 16 and later the
+  time of the last sequential scan.
+
 - `pg-debug index-use` and `PgDebug.explain_index_use()`: why the planner
   did not use an index for a query. The question has two halves and they need
   different evidence. Whether the planner *can* use the index is read from

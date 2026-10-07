@@ -27,7 +27,7 @@ without an MCP client in the loop.
 - **Migration review** — read a migration before running it and see, per statement, the lock it takes, how long it holds it, whether it rewrites the table, and a safer rewrite where one exists. Connected, it reports how big the tables actually are, which is what decides whether a rewrite is a pause or an outage.
 - **Data model review** — foreign keys with no index behind them, keys whose two sides are different types, tables with no primary key, columns ordered so alignment padding costs bytes on every row, and types that do not mean what they look like. Each finding says whether it is proven from the catalog or inferred from statistics, and carries the DDL that fixes it.
 - **Partition advice** — whether a table is worth partitioning, decided by the share of recorded query time that would still prune rather than by the table's size. It is built to say no: a 400 GB table where a third of the query time filters on a timestamp is a worse table after partitioning, and the verdict comes with the number behind it either way.
-- **Health checks** — invalid/duplicate/bloated/unused indexes, table bloat, connection utilization, transaction ID wraparound risk, autovacuum backlog and what is holding the vacuum horizon, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints, statistics freshness.
+- **Health checks** — invalid/duplicate/bloated/unused indexes, table bloat, connection utilization, transaction ID wraparound risk, autovacuum backlog and what is holding the vacuum horizon, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints, statistics freshness, tables read sequentially far more than through an index.
 - **Top queries** — the most expensive queries recorded by `pg_stat_statements`, ranked by resource blend or by execution time, cumulatively or sampled over an interval.
 - **Index tuning** — recommend indexes for your recorded workload or for a specific set of queries, with before/after planner costs, the size HypoPG measures for each candidate, and what each one will cost to keep up to date.
 - **Access modes** — run unrestricted, or in a `restricted` mode that parses each statement, rejects anything that is not read-only, and runs it in a read-only transaction with a statement timeout.
@@ -142,7 +142,17 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `tune-queries QUERY...` | up to 10 queries, same options as `tune-workload` |
 
 Health checks are `index`, `connection`, `vacuum`, `sequence`, `replication`,
-`buffer`, `constraint`, `statistics`, `table` and `all`.
+`buffer`, `constraint`, `statistics`, `table`, `scan` and `all`.
+
+`scan` reports tables read sequentially far more than through an index, from
+`pg_stat_user_tables` — no extension needed. It argues in bytes rather than
+scan counts: each table is charged the data its sequential scans read (scans
+times size, scaled down when a scan returned only part of the table, which is
+what a `LIMIT` that stopped early looks like), and reported only when that
+reading reaches 1 GB, the table is at least 10 MB, and sequential scans
+outnumber index scans. The queries behind the scans are not visible from the
+counters; `top-queries` lists them and `tune-queries` says which index serves
+them.
 
 `table` estimates how much of each table's heap holds no live rows, from
 `pg_stats` and `pg_class` — no extension needed. It builds a row the way

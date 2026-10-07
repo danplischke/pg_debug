@@ -252,7 +252,8 @@ Checks: `index` (invalid, duplicate, bloated, unused), `table` (heap bloat),
 `connection`, `vacuum` (transaction ID wraparound, autovacuum backlog, and what
 is holding the vacuum horizon), `sequence` (approaching
 maximum), `replication`, `buffer` (cache hit rates), `constraint` (invalid
-constraints), `statistics` (never analyzed or drifted), `all`.
+constraints), `statistics` (never analyzed or drifted), `scan` (tables read
+sequentially far more than through an index, charged in bytes read), `all`.
 
 In JSON each check has `healthy`, `summary`, `findings` (the flagged objects)
 and `metrics` (the numbers and thresholds behind the verdict). Filter on
