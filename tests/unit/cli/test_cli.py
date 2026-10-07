@@ -939,3 +939,60 @@ def test_diagnose_reads_the_query_from_a_file(pg_client, tmp_path):
 
     assert run(["diagnose", str(sql)])[0] == 0
     assert pg_client.diagnose_query.await_args_list[0].args[0] == "SELECT 1"
+
+
+# -- index-use --------------------------------------------------------------
+
+
+def index_use_verdict(used=False):
+    from pg_debug.index_use import IndexUse
+    from pg_debug.index_use import IndexUseFinding
+    from pg_debug.index_use import IndexUseReason
+    from pg_debug.model import Confidence
+
+    verdict = IndexUse(
+        index="orders_status",
+        table="public.orders",
+        definition="CREATE INDEX orders_status ON public.orders USING btree (status)",
+        method="btree",
+        columns=["status"],
+        key_columns=1,
+        predicate=None,
+        valid=True,
+        size_bytes=8192,
+        used=used,
+        node_type="Index Scan" if used else None,
+    )
+    if not used:
+        verdict.findings = [
+            IndexUseFinding(
+                reason=IndexUseReason.NO_PREDICATE,
+                confidence=Confidence.PROVEN,
+                summary="The query does not restrict status, the index's first column.",
+                detail="The query restricts region on public.orders.",
+                evidence={"index_columns": ["status"]},
+                remediation=["CREATE INDEX ON public.orders (region);"],
+            )
+        ]
+    return verdict
+
+
+def test_index_use_renders_the_verdict_and_the_reason(pg_client):
+    pg_client.explain_index_use = AsyncMock(return_value=[index_use_verdict()])
+
+    code, out, _ = run(["index-use", "SELECT * FROM orders WHERE region = 'eu'"])
+
+    assert code == 0
+    assert "public.orders: orders_status  btree (status)  8.0 KiB  -- NOT used" in out
+    assert "[proven] no predicate: The query does not restrict status" in out
+    assert "CREATE INDEX ON public.orders (region);" in out
+
+
+def test_index_use_passes_the_index_filter_and_emits_json(pg_client):
+    pg_client.explain_index_use = AsyncMock(return_value=[index_use_verdict(used=True)])
+
+    code, out, _ = run(["--json", "index-use", "-i", "orders_status", "SELECT 1 FROM orders"])
+
+    assert code == 0
+    pg_client.explain_index_use.assert_awaited_once_with("SELECT 1 FROM orders", index="orders_status")
+    assert json.loads(out)[0]["used"] is True

@@ -17,6 +17,7 @@ without an MCP client in the loop.
 
 - **Schema introspection** — list schemas, tables, views, sequences and extensions; describe an object's columns, constraints and indexes.
 - **Explain plans** — plan or `EXPLAIN ANALYZE` a query, including plans against *hypothetical* indexes that are never created (via [HypoPG](https://github.com/HypoPG/hypopg)).
+- **Index use** — why the planner did not use an index for a query: the query restricts a different column, or the column wrapped in an expression the index is not on, an operator a btree cannot search, a cast the plan applies to the column, a partial index the query does not match, an invalid index — or nothing stops it and it judged another plan cheaper, in which case the finding carries both costs and the row estimate the choice rests on.
 - **Plan diagnosis** — read the plan rather than only print it: the node whose row estimate first diverged from what it found, and whether that is stale statistics or two correlated columns nothing has told the planner about; sorts and hashes that outgrew `work_mem`; scans reading rows in order to discard them; parallel workers asked for and not granted. Each finding is ranked by the share of the query's work behind it.
 - **Live activity** — what every backend is doing right now, what it is waiting on, and which process is blocking it.
 - **Lock tree** — who is blocking whom, as a tree rooted at the session that waits on nothing: what it is doing, what every backend beneath it waits for, and the mode the holder has.
@@ -67,6 +68,9 @@ pg-debug diagnose ./slow.sql            # what is wrong with this plan, and why
 pg-debug --json diagnose ./slow.sql | jq '.[] | select(.severity == "high")'
 pg-debug diagnose --plan plan.json       # a plan you already have; no query is run
 pg-debug diagnose --plan - < auto_explain.json   # and no database needed
+
+pg-debug index-use "SELECT * FROM orders WHERE lower(email) = 'a@b.c'"   # why is my index not used?
+pg-debug index-use -i orders_email_idx ./query.sql
 
 pg-debug activity                       # what is running right now
 pg-debug activity --blocked              # only backends waiting on a lock
@@ -126,6 +130,7 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `activity` | `-a, --all` (include idle), `-m, --min-duration SECONDS`, `-b, --blocked` |
 | `locks` | — |
 | `vacuum-progress` | — |
+| `index-use SQL` | a file path, inline SQL, or `-` for stdin; `-i, --index NAME` to report one index |
 | `column-stats TABLE` | — |
 | `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--exit-code` |
 | `config` | `--exit-code` |
@@ -230,6 +235,24 @@ is why the plan should come from this database or one with the same schema and
 data. Unconnected, those two questions go unanswered and a misestimate says so,
 rather than letting the silence read as a clean bill. The text format EXPLAIN
 prints by default is not read.
+
+`index-use` answers "why is my index not used?", which has two halves that
+need different evidence. Whether the planner *can* use the index is read from
+the query's text against the index's definition and the catalog: which column
+each predicate restricts, bare or wrapped in a function or cast (`lower(email)`
+and `email` are different keys), with which operator (`<>`, `NOT IN`, a
+leading-wildcard `LIKE`, `ILIKE` and regular expressions cannot be looked up
+in a btree; `LIKE 'prefix%'` needs the C collation or `text_pattern_ops`),
+whether the index is valid, whether a partial index's `WHERE` is matched, and
+whether the plan casts the column before comparing it. Whether it *chose* to
+is read by planning the query again with sequential scans disabled: if the
+index is used then, nothing stopped it, and the finding reports both costs and
+the share of the table the planner expects the predicate to match, which is
+the number the choice turns on. If another index serves the query either way,
+that index is named: the planner cannot be made to prefer one index over
+another. Nothing is executed; the query is planned, not run. The forced plan
+needs a `SET` for the session, which `restricted` mode does not allow, and the
+verdict says it was skipped rather than guessing.
 
 `check-migration` answers a different question from the rest: not what the
 database is, but what a change will do to everyone using it while it runs. The
@@ -386,6 +409,7 @@ bad URL instead.
 | `list_activity(include_idle=False, min_duration_seconds=None, blocked_only=False)` | `list[dict]` — one per backend, with `blocked_by` |
 | `lock_tree()` | `list[dict]` — one per root blocker, waiters nested under `blocking` |
 | `vacuum_progress()` | `list[dict]` — one per running vacuum |
+| `explain_index_use(sql, index=None)` | `list[IndexUse]` — one per index on the query's tables, unused first, each with `findings` |
 | `column_stats(table)` / `extended_statistics(table)` | `list[dict]` — planner statistics |
 | `analyze_db_health(health_type="all")` | `dict[str, HealthCheckResult]` — check name to result |
 | `review_data_model(rules="all", schema=None, min_rows=1000, proven_only=False)` | `list[ModelFinding]` — most severe first |

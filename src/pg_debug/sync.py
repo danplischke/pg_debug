@@ -27,6 +27,7 @@ from .configuration import ConfigFinding
 from .db import DbConnPool
 from .health import HealthCheckResult
 from .health import HealthType
+from .index_use import IndexUse
 from .migration import StatementReview
 from .model import DEFAULT_MIN_ROWS
 from .model import ModelFinding
@@ -189,6 +190,12 @@ class SyncPgDebug:
     def diagnose_plan(self, plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
         """Diagnose a plan that already exists, checking this database's catalog."""
         return self._call(self._client.diagnose_plan, plan, min_ratio=min_ratio)
+
+    # -- Index use -----------------------------------------------------------
+
+    def explain_index_use(self, sql: str, index: Optional[str] = None) -> List[IndexUse]:
+        """Say whether the planner uses each index on the query's tables, and if not, why."""
+        return self._call(self._client.explain_index_use, sql, index=index)
 
     # -- Planner statistics --------------------------------------------------
 

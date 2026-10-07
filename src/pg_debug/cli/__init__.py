@@ -41,6 +41,7 @@ from .render import render_column_stats
 from .render import render_configuration_review
 from .render import render_health_checks
 from .render import render_index_recommendations
+from .render import render_index_use
 from .render import render_lock_tree
 from .render import render_migration_review
 from .render import render_model_findings
@@ -316,6 +317,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     diagnose.set_defaults(func=cmd_diagnose)
 
+    index_use = subparsers.add_parser("index-use", help="Say whether a query uses each index on its tables, and if not, why")
+    index_use.add_argument("sql", help="Query to plan, a file holding it, or - to read it from stdin")
+    index_use.add_argument("-i", "--index", help="Report only this index.")
+    index_use.set_defaults(func=cmd_index_use)
+
     column_stats = subparsers.add_parser("column-stats", help="Show the planner's statistics for a table")
     column_stats.add_argument("table", help="Table name, optionally schema-qualified")
     column_stats.set_defaults(func=cmd_column_stats)
@@ -509,6 +515,10 @@ async def cmd_diagnose(pg: PgDebug, args: argparse.Namespace) -> Any:
     return await pg.diagnose_query(read_sql_or_file(args.sql), min_ratio=args.min_ratio)
 
 
+async def cmd_index_use(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.explain_index_use(read_sql_or_file(args.sql), index=args.index)
+
+
 async def cmd_column_stats(pg: PgDebug, args: argparse.Namespace) -> Any:
     return {
         "columns": await pg.column_stats(args.table),
@@ -607,12 +617,16 @@ def format_result(command: str, result: Any, as_json: bool) -> str:
             return to_json([candidate.to_dict() for candidate in result])
         if command == "diagnose":
             return to_json([finding.to_dict() for finding in result])
+        if command == "index-use":
+            return to_json([verdict.to_dict() for verdict in result])
         return to_json(result)
 
     if command == "activity":
         return render_activity(result)
     if command == "locks":
         return render_lock_tree(result)
+    if command == "index-use":
+        return render_index_use(result)
     if command == "column-stats":
         return render_column_stats(result)
     if command == "vacuum-progress":

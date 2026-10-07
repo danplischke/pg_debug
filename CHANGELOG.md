@@ -8,6 +8,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `pg-debug index-use` and `PgDebug.explain_index_use()`: why the planner
+  did not use an index for a query. The question has two halves and they need
+  different evidence. Whether the planner *can* use the index is read from
+  the query's text against the index's definition and the catalog: the
+  column each predicate restricts, bare or wrapped in a function or cast the
+  index is not on; an operator a btree cannot search (`<>`, `NOT IN`, a
+  leading-wildcard `LIKE`, `ILIKE`, a regular expression); `LIKE 'prefix%'`
+  under a non-C collation without a pattern operator class; a cast the plan
+  applies to the column; a partial index whose `WHERE` the query does not
+  match; an invalid index; an OR that spans tables. Whether it *chose* to is
+  read by planning the query again with sequential scans disabled: if the
+  index is used then, nothing stopped it, and the finding reports both costs
+  and the share of the table the predicate is expected to match. When another
+  index serves the query either way, that index is named rather than the
+  verdict left unexplained. Each finding is marked proven or candidate and
+  carries the statement or rewrite that addresses it. Nothing is executed;
+  in `restricted` mode the forced plan is skipped and the verdict says so.
+
 - `pg-debug diagnose --plan` and `PgDebug.diagnose_plan()`: diagnose a plan
   that already exists. `diagnose` had to run the query itself with
   `EXPLAIN ANALYZE`, in unrestricted mode, which put its best reading behind

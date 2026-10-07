@@ -555,6 +555,125 @@ async def test_a_plan_taken_elsewhere_is_diagnosed_against_this_catalog_in_restr
     assert all("catalog_checked" not in finding.evidence for finding in findings)
 
 
+@pytest_asyncio.fixture
+async def indexed_users(pg):
+    """A table with the indexes the index-use scenarios need."""
+    await pg.execute_sql(
+        f"""
+        CREATE TABLE {SCHEMA}.users (
+            id bigserial PRIMARY KEY,
+            email text NOT NULL,
+            status text NOT NULL,
+            org_id integer NOT NULL
+        )
+        """
+    )
+    await pg.execute_sql(
+        f"INSERT INTO {SCHEMA}.users (email, status, org_id) "
+        f"SELECT 'user' || i || '@example.com', CASE WHEN i % 10 = 0 THEN 'open' ELSE 'closed' END, i % 100 FROM generate_series(1, 20000) i"
+    )
+    await pg.execute_sql(f"CREATE INDEX users_lower_email ON {SCHEMA}.users (lower(email))")
+    await pg.execute_sql(f"CREATE INDEX users_status ON {SCHEMA}.users (status)")
+    await pg.execute_sql(f"CREATE INDEX users_org ON {SCHEMA}.users (org_id)")
+    await pg.execute_sql(f"ANALYZE {SCHEMA}.users")
+    return f"{SCHEMA}.users"
+
+
+@pytest.mark.asyncio
+async def test_index_use_reports_the_index_the_plan_reads(pg, indexed_users):
+    verdicts = await pg.explain_index_use(f"SELECT * FROM {indexed_users} WHERE org_id = 7", index="users_org")
+
+    (verdict,) = verdicts
+    assert verdict.used is True
+    assert verdict.node_type in ("Index Scan", "Bitmap Index Scan", "Index Only Scan")
+    assert verdict.findings == []
+
+
+@pytest.mark.asyncio
+async def test_index_use_names_the_expression_the_query_does_not_use(pg, indexed_users):
+    verdicts = await pg.explain_index_use(f"SELECT * FROM {indexed_users} WHERE email = 'user1@example.com'", index="users_lower_email")
+
+    (verdict,) = verdicts
+    assert verdict.used is False
+    reasons = [f.reason.value for f in verdict.findings]
+    assert reasons == ["expression_mismatch"], reasons
+    assert "lower(email)" in verdict.findings[0].summary
+
+
+@pytest.mark.asyncio
+async def test_index_use_measures_why_an_unselective_predicate_is_scanned(pg, indexed_users):
+    """Nine rows in ten are 'closed'. The planner can use the index and does
+    not, and the finding carries both costs and the share."""
+    verdicts = await pg.explain_index_use(f"SELECT * FROM {indexed_users} WHERE status = 'closed'", index="users_status")
+
+    (verdict,) = verdicts
+    assert verdict.used is False
+    (finding,) = [f for f in verdict.findings if f.reason.value == "planner_preferred_other"]
+    assert finding.evidence["forced_cost"] > finding.evidence["chosen_cost"]
+    assert finding.evidence["share"] > 0.8
+    assert "users_status" in finding.evidence["forced_scan"]
+
+
+@pytest.mark.asyncio
+async def test_index_use_reads_a_cast_off_the_plan(pg, indexed_users):
+    verdicts = await pg.explain_index_use(f"SELECT * FROM {indexed_users} WHERE org_id = 7::numeric", index="users_org")
+
+    (verdict,) = verdicts
+    (finding,) = [f for f in verdict.findings if f.reason.value == "type_mismatch"]
+    assert finding.evidence["cast_to"] == "numeric"
+    assert finding.evidence["column_type"] == "integer"
+
+
+@pytest.mark.asyncio
+async def test_index_use_says_when_no_column_of_the_index_is_restricted(pg, indexed_users):
+    verdicts = await pg.explain_index_use(f"SELECT * FROM {indexed_users} WHERE org_id = 7", index="users_status")
+
+    (verdict,) = verdicts
+    assert [f.reason.value for f in verdict.findings] == ["no_predicate"]
+
+
+@pytest.mark.asyncio
+async def test_index_use_in_restricted_mode_skips_the_forced_plan_and_says_so(indexed_users):
+    async with PgDebug(DATABASE_URI, access_mode=AccessMode.RESTRICTED) as restricted:
+        verdicts = await restricted.explain_index_use(f"SELECT * FROM {indexed_users} WHERE status = 'closed'", index="users_status")
+
+    (verdict,) = verdicts
+    assert verdict.used is False
+    assert verdict.findings == []
+    assert verdict.notes and "restricted mode" in verdict.notes[0]
+
+
+@pytest.mark.asyncio
+async def test_index_use_leaves_the_session_setting_as_it_found_it(pg, indexed_users):
+    await pg.explain_index_use(f"SELECT * FROM {indexed_users} WHERE status = 'closed'")
+
+    rows = await pg.execute_sql("SHOW enable_seqscan")
+    assert rows[0]["enable_seqscan"] == "on"
+
+
+def test_cli_index_use_against_a_real_database(capsys, monkeypatch):
+    """cli.main() runs its own event loop, so this sets up through SyncPgDebug."""
+    monkeypatch.setenv("DATABASE_URI", DATABASE_URI or "")
+    table = "pgdebug_index_use_test"
+
+    with SyncPgDebug(DATABASE_URI) as pg:
+        pg.execute_sql(f"DROP TABLE IF EXISTS {table}")
+        pg.execute_sql(f"CREATE TABLE {table} (id serial PRIMARY KEY, status text NOT NULL)")
+        pg.execute_sql(f"INSERT INTO {table} (status) SELECT CASE WHEN i % 10 = 0 THEN 'open' ELSE 'closed' END FROM generate_series(1, 5000) i")
+        pg.execute_sql(f"ANALYZE {table}")
+        try:
+            assert cli.main(["index-use", f"SELECT * FROM {table} WHERE id = 1"]) == 0
+            out = capsys.readouterr().out
+            assert f"{table}_pkey" in out and "used by" in out
+
+            assert cli.main(["--json", "index-use", "-i", f"{table}_pkey", f"SELECT * FROM {table} WHERE status = 'open'"]) == 0
+            payload = json.loads(capsys.readouterr().out)
+            assert payload[0]["index"] == f"{table}_pkey" and payload[0]["used"] is False
+            assert payload[0]["findings"][0]["reason"] == "no_predicate"
+        finally:
+            pg.execute_sql(f"DROP TABLE IF EXISTS {table}")
+
+
 @pytest.mark.asyncio
 async def test_list_activity_sees_a_running_query(pg):
     """A second connection running a slow query shows up as active."""

@@ -45,6 +45,10 @@ from .index import MAX_NUM_INDEX_TUNING_QUERIES
 from .index import DatabaseTuningAdvisor
 from .index import IndexRecommendation
 from .index import LLMOptimizerTool
+from .index_use import IndexUse
+from .index_use import IndexUseAnalyzer
+from .index_use import IndexUseFinding
+from .index_use import IndexUseReason
 from .migration import LockLevel
 from .migration import MigrationLinter
 from .migration import StatementReview
@@ -94,6 +98,10 @@ __all__ = [
     "HealthType",
     "IndexDefinition",
     "IndexRecommendation",
+    "IndexUse",
+    "IndexUseAnalyzer",
+    "IndexUseFinding",
+    "IndexUseReason",
     "InvalidArgumentError",
     "LLMOptimizerTool",
     "LockLevel",

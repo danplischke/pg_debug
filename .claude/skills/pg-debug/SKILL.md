@@ -94,6 +94,29 @@ Say that, rather than reaching for something else to blame.
 `--analyze` executes the query, so do not use it for `UPDATE`/`DELETE` unless
 you mean it. It also cannot be combined with `-i`.
 
+When the question is "I have an index, why is it not used?", do not reason it
+out from the plan by hand:
+
+```bash
+pg-debug index-use "SELECT * FROM orders WHERE lower(email) = 'a@b.c'"
+pg-debug index-use -i orders_email_idx ./query.sql    # one index only
+```
+
+It reports every index on the query's tables as used (with the plan node) or
+not, and for each unused one the reason, marked proven or candidate: the
+query restricts a different column, or the column inside an expression the
+index is not on; an operator a btree cannot search (`<>`, `NOT IN`,
+`LIKE '%x'`, `ILIKE`, regex); `LIKE 'prefix%'` under a non-C collation without
+`text_pattern_ops`; a cast the plan applies to the column (`org_id =
+7::numeric`); a partial index whose `WHERE` the query does not match; an
+invalid index. When nothing stops the planner it says so, with the cost of
+the plan it chose against the plan with sequential scans disabled and the
+share of the table the predicate is expected to match — above a few percent a
+sequential scan is cheaper and no index on that column will be chosen. When
+another index is used either way, it names that index. Each finding carries
+the statement or rewrite that addresses it. It works in restricted mode, where
+the forced-plan step is skipped and the verdict says so.
+
 An index only helps a predicate it matches: to speed up `WHERE lower(email) =
 ...` the index has to be on `lower(email)`, not on `email`. PostgreSQL will
 only accept an expression built from IMMUTABLE functions, so `date_trunc('day',
@@ -519,7 +542,7 @@ health, and `list[ModelFinding]` for the data model review.
 
 The live-activity and statistics methods mirror the commands:
 `list_activity(include_idle=, min_duration_seconds=, blocked_only=)`,
-`lock_tree()`, `vacuum_progress()`, `column_stats(table)`, `extended_statistics(table)`, and
+`lock_tree()`, `vacuum_progress()`, `explain_index_use(sql, index=)`, `column_stats(table)`, `extended_statistics(table)`, and
 `get_top_queries(..., interval_seconds=)` for sampling. The model review is
 `review_data_model(rules=, schema=, min_rows=, proven_only=)`; each
 `ModelFinding` has `rule`, `confidence`, `severity`, `summary`, `detail`,

@@ -31,6 +31,8 @@ from .index.base import MAX_NUM_INDEX_TUNING_QUERIES
 from .index.dta import DatabaseTuningAdvisor
 from .index.llm import LLMOptimizerTool
 from .index.presentation import TextPresentation
+from .index_use import IndexUse
+from .index_use import IndexUseAnalyzer
 from .migration import MigrationLinter
 from .migration import StatementReview
 from .model import DEFAULT_MIN_ROWS
@@ -383,6 +385,40 @@ class PgDebug:
                 produced without ANALYZE.
         """
         return await PlanDiagnoser(await self.sql_driver()).diagnose_plan(plan, min_ratio=min_ratio)
+
+    # -- Index use -----------------------------------------------------------
+
+    async def explain_index_use(self, sql: str, index: Optional[str] = None) -> List[IndexUse]:
+        """Say whether the planner uses each index on the query's tables, and if not, why.
+
+        The two halves of "why is my index not used" need different
+        evidence, and both are gathered. Whether the planner *can* use it is
+        read from the query's text against the index's definition and the
+        catalog: the column each predicate restricts, bare or wrapped in an
+        expression, the operator, an invalid index, a partial index the query
+        does not match, a cast the plan applies to the column. Whether it
+        *chose* to is read by planning the query again with sequential scans
+        disabled: if the index is used then, nothing stopped it, and the
+        finding reports both costs and the row estimate the choice rests on.
+
+        Nothing is executed; the query is planned, not run. The forced plan
+        needs a ``SET`` for the session, which restricted mode does not allow,
+        and the verdict notes that it was skipped.
+
+        Args:
+            sql: One SELECT, UPDATE or DELETE.
+            index: Report only this index, by name.
+
+        Returns:
+            One :class:`~pg_debug.index_use.IndexUse` per index, the ones not
+            used first, each with its findings.
+
+        Raises:
+            InvalidArgumentError: If the SQL does not parse, reads no indexed
+                table, or names an index not on its tables.
+            ExplainPlanError: If the query could not be planned.
+        """
+        return await IndexUseAnalyzer(await self.sql_driver()).analyze(sql, index=index)
 
     # -- Planner statistics --------------------------------------------------
 

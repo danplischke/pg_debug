@@ -265,6 +265,30 @@ def render_index_recommendations(result: Mapping[str, Any]) -> str:
     return "\n".join(lines).rstrip()
 
 
+def render_index_use(verdicts: Sequence[Any]) -> str:
+    """Render each index with its verdict, and the reasons beneath the ones not used."""
+    if not verdicts:
+        return "(no indexes on the tables this query reads)"
+
+    lines: List[str] = []
+    for verdict in verdicts:
+        size = humanize.naturalsize(verdict.size_bytes, binary=True) if verdict.size_bytes else ""
+        head = f"{verdict.table}: {verdict.index}  {verdict.description}" + (f"  {size}" if size else "")
+        if verdict.used:
+            lines.append(f"{head}  -- used by {verdict.node_type}")
+        else:
+            lines.append(f"{head}  -- NOT used")
+        for finding in verdict.findings:
+            lines.append(f"  [{finding.confidence.value}] {finding.reason.value.replace('_', ' ')}: {finding.summary}")
+            lines.append(f"      {finding.detail}")
+            for step in finding.remediation:
+                lines.append(f"      {step}")
+        for note in verdict.notes:
+            lines.append(f"  note: {note}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 def render_model_findings(findings: Sequence[Any]) -> str:
     """Render a data-model review, grouped by the table each finding is about.
 
@@ -450,6 +474,7 @@ __all__ = [
     "render_configuration_review",
     "render_health_checks",
     "render_index_recommendations",
+    "render_index_use",
     "render_lock_tree",
     "render_mapping",
     "render_migration_review",
