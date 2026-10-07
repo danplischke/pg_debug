@@ -8,6 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `--baseline FILE` and `--save-baseline FILE` on `health`, `model` and
+  `config`. Their `--exit-code` makes them build gates, and the trouble with
+  a gate on an existing database is the first run: it fails on everything,
+  deliberate findings included, and gets turned off. A baseline is the
+  findings a team has read and accepted; against one, the gate fails only on
+  what is new. It records what each finding is about — the check and the
+  object, the rule and the table, the setting — never the numbers, so a
+  bloated index is the same finding at 31% and 34%, and a finding that goes
+  away is simply not listed. The file is JSON, one finding per line in a
+  stable order, for the repository. Text output ends with what the baseline
+  changed; JSON output marks each finding `known` or `new`.
+
 - A `scan` health check: tables read sequentially far more than through an
   index, from `pg_stat_user_tables` and no extension. Index tuning finds the
   same tables, but only with `pg_stat_statements` and `hypopg` installed; the

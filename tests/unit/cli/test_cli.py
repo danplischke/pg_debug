@@ -996,3 +996,91 @@ def test_index_use_passes_the_index_filter_and_emits_json(pg_client):
     assert code == 0
     pg_client.explain_index_use.assert_awaited_once_with("SELECT 1 FROM orders", index="orders_status")
     assert json.loads(out)[0]["used"] is True
+
+
+# -- Baselines --------------------------------------------------------------
+
+
+def unhealthy_index_results(*indexes):
+    return health_results(
+        ("Connection health", True, "ok", {}),
+        (
+            "Index bloat",
+            False,
+            "bloated",
+            {"findings": [{"schema": "public", "table": "orders", "index": name, "bloat_percent": 30.0} for name in indexes]},
+        ),
+    )
+
+
+def test_save_baseline_writes_what_the_run_found(pg_client, tmp_path):
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a"))
+    path = tmp_path / "health.json"
+
+    code, _, err = run(["health", "--save-baseline", str(path)])
+
+    assert code == 0
+    assert "Saved a baseline of 1 finding(s)" in err
+    assert json.loads(path.read_text())["findings"] == [{"check": "Index bloat", "index": "orders_a", "schema": "public", "table": "orders"}]
+
+
+def test_a_known_finding_does_not_fail_the_gate_but_a_new_one_does(pg_client, tmp_path):
+    path = tmp_path / "health.json"
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a"))
+    run(["health", "--save-baseline", str(path)])
+
+    code, out, _ = run(["health", "--exit-code", "--baseline", str(path)])
+    assert code == 0
+    assert f"Baseline {path}: 1 known finding(s), nothing new." in out
+
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a", "orders_b"))
+    code, out, _ = run(["health", "--exit-code", "--baseline", str(path)])
+    assert code == cli.UNHEALTHY_EXIT_CODE
+    assert "1 known finding(s) ignored, 1 new:" in out
+    assert "  Index bloat: public.orders orders_b" in out
+
+
+def test_json_output_marks_each_finding_against_the_baseline(pg_client, tmp_path):
+    path = tmp_path / "health.json"
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a"))
+    run(["health", "--save-baseline", str(path)])
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a", "orders_b"))
+
+    code, out, _ = run(["--json", "health", "--baseline", str(path)])
+
+    assert code == 0
+    findings = json.loads(out)["Index bloat"]["findings"]
+    assert [(f["index"], f["baseline"]) for f in findings] == [("orders_a", "known"), ("orders_b", "new")]
+
+
+def test_model_baseline_gates_only_new_high_severity_findings(pg_client, tmp_path):
+    path = tmp_path / "model.json"
+    pg_client.review_data_model = AsyncMock(return_value=model_findings((RuleId.MISSING_PRIMARY_KEY, Confidence.PROVEN, Severity.HIGH, "events")))
+    run(["model", "--save-baseline", str(path)])
+
+    assert run(["model", "--exit-code", "--baseline", str(path)])[0] == 0
+
+    pg_client.review_data_model = AsyncMock(
+        return_value=model_findings(
+            (RuleId.MISSING_PRIMARY_KEY, Confidence.PROVEN, Severity.HIGH, "events"),
+            (RuleId.NAIVE_TIMESTAMP, Confidence.PROVEN, Severity.MEDIUM, "orders"),
+        )
+    )
+    assert run(["model", "--exit-code", "--baseline", str(path)])[0] == 0, "new but not high severity"
+
+    pg_client.review_data_model = AsyncMock(return_value=model_findings((RuleId.MISSING_PRIMARY_KEY, Confidence.PROVEN, Severity.HIGH, "fresh")))
+    code, out, _ = run(["--json", "model", "--exit-code", "--baseline", str(path)])
+    assert code == cli.UNHEALTHY_EXIT_CODE
+    assert json.loads(out)[0]["baseline"] == "new"
+
+
+def test_a_baseline_from_another_command_is_an_error(pg_client, tmp_path):
+    path = tmp_path / "health.json"
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a"))
+    run(["health", "--save-baseline", str(path)])
+    pg_client.review_data_model = AsyncMock(return_value=[])
+
+    code, _, err = run(["model", "--baseline", str(path)])
+
+    assert code == 1
+    assert "baseline for `pg-debug health`, not `pg-debug model`" in err

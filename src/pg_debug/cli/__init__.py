@@ -19,6 +19,13 @@ from typing import Sequence
 from typing import Tuple
 
 from .. import __version__
+from ..baseline import Baseline
+from ..baseline import Partition
+from ..baseline import config_finding_key
+from ..baseline import describe_key
+from ..baseline import health_finding_key
+from ..baseline import model_finding_key
+from ..baseline import partition
 from ..client import DATABASE_URL_ENV_VARS
 from ..client import AccessMode
 from ..client import PgDebug
@@ -216,6 +223,20 @@ def parse_size(value: str) -> int:
     return int(float(number) * SIZE_UNITS.get(unit or "B", 1))
 
 
+def add_baseline_arguments(parser: argparse.ArgumentParser) -> None:
+    """``--baseline`` and ``--save-baseline``, for the commands that gate a build."""
+    parser.add_argument(
+        "--baseline",
+        metavar="FILE",
+        help="Compare against a saved baseline: findings in it are reported as known and do not affect --exit-code.",
+    )
+    parser.add_argument(
+        "--save-baseline",
+        metavar="FILE",
+        help="Save this run's findings as the baseline to compare later runs against. Do it from a run you have read and accept.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser."""
     parser = argparse.ArgumentParser(
@@ -351,6 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any high-severity finding is reported, for use in CI.",
     )
+    add_baseline_arguments(model)
     model.set_defaults(func=cmd_model)
 
     config = subparsers.add_parser("config", help="Review the server's settings against what it is actually doing")
@@ -359,6 +381,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any high-severity finding is reported, for use in CI.",
     )
+    add_baseline_arguments(config)
     config.set_defaults(func=cmd_config)
 
     partitions = subparsers.add_parser("partitions", help="Say whether a table is worth partitioning, from what the workload does")
@@ -430,6 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any check reports a problem, for use in CI.",
     )
+    add_baseline_arguments(health)
     health.set_defaults(func=cmd_health)
 
     top_queries = subparsers.add_parser("top-queries", help="Report the most expensive queries (needs pg_stat_statements)")
@@ -592,7 +616,33 @@ async def cmd_tune_queries(pg: PgDebug, args: argparse.Namespace) -> Any:
 # -- Output -----------------------------------------------------------------
 
 
-def format_result(command: str, result: Any, as_json: bool) -> str:
+def _with_baseline(payload: Dict[str, Any], key: Dict[str, Any], baseline: Optional[Baseline]) -> Dict[str, Any]:
+    if baseline is not None:
+        payload["baseline"] = "known" if key in baseline else "new"
+    return payload
+
+
+def _health_check_json(name: str, check: Any, baseline: Optional[Baseline]) -> Dict[str, Any]:
+    payload = check.to_dict()
+    if baseline is None or check.healthy:
+        return payload
+    if not check.findings:
+        payload["baseline"] = "known" if {"check": name} in baseline else "new"
+        return payload
+    payload["findings"] = [_with_baseline(dict(finding), health_finding_key(name, finding), baseline) for finding in check.findings]
+    return payload
+
+
+def render_baseline_trailer(path: str, split: Partition) -> str:
+    """The line after the report that says what the baseline changed."""
+    if not split.new:
+        return f"Baseline {path}: {len(split.known)} known finding(s), nothing new."
+    lines = [f"Baseline {path}: {len(split.known)} known finding(s) ignored, {len(split.new)} new:"]
+    lines.extend(f"  {describe_key(key)}" for key in split.new)
+    return "\n".join(lines)
+
+
+def format_result(command: str, result: Any, as_json: bool, baseline: Optional[Baseline] = None) -> str:
     """Render a command result as JSON or as text."""
     if command == "explain":
         if not as_json:
@@ -606,13 +656,13 @@ def format_result(command: str, result: Any, as_json: bool) -> str:
 
     if as_json:
         if command == "health":
-            return to_json({name: check.to_dict() for name, check in result.items()})
+            return to_json({name: _health_check_json(name, check, baseline) for name, check in result.items()})
         if command == "model":
-            return to_json([finding.to_dict() for finding in result])
+            return to_json([_with_baseline(finding.to_dict(), model_finding_key(finding), baseline) for finding in result])
         if command == "check-migration":
             return to_json([review.to_dict() for review in result])
         if command == "config":
-            return to_json([finding.to_dict() for finding in result])
+            return to_json([_with_baseline(finding.to_dict(), config_finding_key(finding), baseline) for finding in result])
         if command == "partitions":
             return to_json([candidate.to_dict() for candidate in result])
         if command == "diagnose":
@@ -689,7 +739,24 @@ async def run(args: argparse.Namespace) -> int:
     ) as pg:
         result = await args.func(pg, args)
 
-    print(format_result(args.command, result, args.json))
+    if getattr(args, "save_baseline", None):
+        saved = Baseline.of(args.command, result)
+        saved.save(args.save_baseline)
+        print(f"Saved a baseline of {len(saved)} finding(s) to {args.save_baseline}.", file=sys.stderr)
+
+    baseline: Optional[Baseline] = None
+    split: Optional[Partition] = None
+    if getattr(args, "baseline", None):
+        baseline = Baseline.load(args.baseline, args.command)
+        split = partition(args.command, result, baseline)
+
+    print(format_result(args.command, result, args.json, baseline))
+    if split is not None and not args.json:
+        print(render_baseline_trailer(args.baseline, split))
+
+    if split is not None and getattr(args, "exit_code", False):
+        # Against a baseline, only what is new can fail the build.
+        return UNHEALTHY_EXIT_CODE if split.new_failures else 0
 
     if args.command == "health" and getattr(args, "exit_code", False):
         return UNHEALTHY_EXIT_CODE if any(not check.healthy for check in result.values()) else 0

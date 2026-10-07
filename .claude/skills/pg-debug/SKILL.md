@@ -246,7 +246,15 @@ pg-debug health                          # everything
 pg-debug health --type index,vacuum      # a subset
 pg-debug --json health                   # structured, for scripts
 pg-debug health --exit-code              # exit 3 if anything is unhealthy (CI)
+pg-debug health --save-baseline b.json   # accept today's findings
+pg-debug health --exit-code --baseline b.json   # then fail only on new ones
 ```
+
+`model` and `config` take the same `--baseline` / `--save-baseline`. A
+baseline holds what each finding is about, not its numbers, so it survives a
+bloat percentage drifting; a finding that disappears is simply not listed.
+Suggest it whenever a user wants to put one of these checks in CI against a
+database that already has findings.
 
 Checks: `index` (invalid, duplicate, bloated, unused), `table` (heap bloat),
 `connection`, `vacuum` (transaction ID wraparound, autovacuum backlog, and what

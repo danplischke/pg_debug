@@ -132,17 +132,35 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `vacuum-progress` | — |
 | `index-use SQL` | a file path, inline SQL, or `-` for stdin; `-i, --index NAME` to report one index |
 | `column-stats TABLE` | — |
-| `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--exit-code` |
-| `config` | `--exit-code` |
+| `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
+| `config` | `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
 | `partitions` | `--min-size SIZE` (default 1GB, accepts `500MB`/`2GB`), `--min-pruning-share SHARE` (default 0.5), `--limit N` (default 200) |
 | `check-migration SQL` | a file path, inline SQL, or `-` for stdin; `--offline`, `--exit-code` |
-| `model` | `-s, --schema SCHEMA`, `-r, --rule RULES` (comma-separated, default `all`), `--proven-only`, `--min-rows N` (default 1000), `--exit-code` |
+| `model` | `-s, --schema SCHEMA`, `-r, --rule RULES` (comma-separated, default `all`), `--proven-only`, `--min-rows N` (default 1000), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
 | `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10, ignored for cumulative `resources`), `-i, --interval SECONDS` |
 | `tune-workload` | `--max-index-size-mb MB` (default 10000), `--method {dta,llm}` (default `dta`) |
 | `tune-queries QUERY...` | up to 10 queries, same options as `tune-workload` |
 
 Health checks are `index`, `connection`, `vacuum`, `sequence`, `replication`,
 `buffer`, `constraint`, `statistics`, `table`, `scan` and `all`.
+
+`health`, `model` and `config` can gate a build with `--exit-code`. The
+trouble with adopting such a gate is the first run: an existing database has
+findings, some of them deliberate, and a gate that fails on all of them on day
+one is a gate that gets turned off. A baseline is the set of findings a team
+has read and accepted:
+
+```bash
+pg-debug health --save-baseline health-baseline.json     # from a run you accept
+pg-debug health --exit-code --baseline health-baseline.json   # fails only on what is new
+```
+
+A baseline records what each finding is about — the check and the object it
+names, the rule and the table, the setting — and never the numbers, so a
+bloated index is the same finding at 31% and at 34%. A finding that goes away
+simply stops being listed. The file is JSON, one finding per line in a stable
+order, meant to live in the repository next to the workflow that reads it. In
+JSON output each finding carries `"baseline": "known"` or `"new"`.
 
 `scan` reports tables read sequentially far more than through an index, from
 `pg_stat_user_tables` — no extension needed. It argues in bytes rather than
