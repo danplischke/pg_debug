@@ -36,6 +36,7 @@ from .partition import DEFAULT_MIN_TABLE_BYTES
 from .partition import PartitionCandidate
 from .plans import DEFAULT_MIN_RATIO
 from .plans import PlanFinding
+from .plans import PlanInput
 from .plans.tree import ExplainPlanArtifact
 from .schema import ObjectType
 
@@ -184,6 +185,10 @@ class SyncPgDebug:
     def diagnose_query(self, sql: str, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
         """Run a query and say what is wrong with the plan it produced."""
         return self._call(self._client.diagnose_query, sql, min_ratio=min_ratio)
+
+    def diagnose_plan(self, plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
+        """Diagnose a plan that already exists, checking this database's catalog."""
+        return self._call(self._client.diagnose_plan, plan, min_ratio=min_ratio)
 
     # -- Planner statistics --------------------------------------------------
 

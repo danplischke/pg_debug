@@ -8,6 +8,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `pg-debug diagnose --plan` and `PgDebug.diagnose_plan()`: diagnose a plan
+  that already exists. `diagnose` had to run the query itself with
+  `EXPLAIN ANALYZE`, in unrestricted mode, which put its best reading behind
+  its heaviest requirement — most people with a slow query hold a plan, not
+  production access. `--plan` takes `EXPLAIN (ANALYZE, FORMAT JSON)` output
+  from a file, stdin or inline, including the object `auto_explain` logs, and
+  runs nothing, so it works in `restricted` mode and, with no database URL,
+  with no connection at all. Connected, the tables the plan reads are checked
+  for stale statistics and missing extended statistics as before; unconnected,
+  a misestimate says those were not checked instead of staying silent.
+  `pg_debug.diagnose_plan(plan)` does the offline reading from Python without
+  a client or an event loop. The unit tests gain a corpus of real PostgreSQL
+  16 plans diagnosed this way.
+
+### Fixed
+
+- `pg-debug diagnose ./slow.sql` ran the literal text `./slow.sql` as the
+  query. The README had promised a file path since the command appeared;
+  it now reads one, as `check-migration` does.
+
 - `pg-debug locks` and `PgDebug.lock_tree()`: who is blocking whom, as a tree.
   `activity` already reported the pids blocking each waiter, which left the
   reader to follow them by hand when the database was stuck. This walks the

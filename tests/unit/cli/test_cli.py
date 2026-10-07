@@ -845,3 +845,97 @@ def test_parse_size_accepts_the_units_postgres_uses(text, expected):
 def test_parse_size_rejects_what_is_not_a_size(text):
     with pytest.raises(argparse.ArgumentTypeError):
         cli.parse_size(text)
+
+
+# -- diagnose --plan ----------------------------------------------------------
+
+MISESTIMATE_PLAN = [
+    {
+        "Plan": {
+            "Node Type": "Seq Scan",
+            "Relation Name": "visits",
+            "Schema": "public",
+            "Total Cost": 100.0,
+            "Startup Cost": 0.0,
+            "Plan Rows": 50,
+            "Plan Width": 8,
+            "Actual Total Time": 25.0,
+            "Actual Startup Time": 0.0,
+            "Actual Rows": 1000,
+            "Actual Loops": 1,
+        }
+    }
+]
+
+
+@pytest.fixture
+def no_database_url(monkeypatch):
+    monkeypatch.delenv("DATABASE_URI", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+
+def test_diagnose_plan_without_a_database_url_never_opens_a_connection(pg_client, no_database_url, tmp_path):
+    """A plan in hand and no database: the point of --plan."""
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(MISESTIMATE_PLAN))
+
+    code, out, _ = run(["diagnose", "--plan", str(plan)])
+
+    assert code == 0
+    assert "expected 50 rows and found 1,000" in out
+    assert "needs this database's catalog" in out
+    pg_client.diagnose_plan.assert_not_called()
+    pg_client.diagnose_query.assert_not_called()
+
+
+def test_diagnose_plan_asks_the_database_when_there_is_one(pg_client, monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URI", "postgresql://db")
+    pg_client.diagnose_plan = AsyncMock(return_value=[])
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(MISESTIMATE_PLAN))
+
+    code, _, _ = run(["diagnose", "--plan", str(plan)])
+
+    assert code == 0
+    pg_client.diagnose_plan.assert_awaited_once()
+    assert json.loads(pg_client.diagnose_plan.await_args_list[0].args[0]) == MISESTIMATE_PLAN
+
+
+def test_diagnose_plan_offline_ignores_the_database_url(pg_client, monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URI", "postgresql://db")
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(MISESTIMATE_PLAN))
+
+    code, out, _ = run(["--json", "diagnose", "--plan", "--offline", str(plan)])
+
+    assert code == 0
+    assert json.loads(out)[0]["issue"] == "row_estimate"
+    pg_client.diagnose_plan.assert_not_called()
+
+
+def test_diagnose_plan_reads_stdin(no_database_url, monkeypatch):
+    import io
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(MISESTIMATE_PLAN)))
+
+    code, out, _ = run(["diagnose", "--plan", "-"])
+
+    assert code == 0
+    assert "expected 50 rows" in out
+
+
+def test_diagnose_plan_refuses_the_text_format_with_a_clear_message(no_database_url):
+    code, _, err = run(["diagnose", "--plan", "Seq Scan on orders  (cost=0.00..1.00 rows=1 width=8)"])
+
+    assert code == 1
+    assert "FORMAT JSON" in err
+
+
+def test_diagnose_reads_the_query_from_a_file(pg_client, tmp_path):
+    """The README promises `pg-debug diagnose ./slow.sql`."""
+    pg_client.diagnose_query = AsyncMock(return_value=[])
+    sql = tmp_path / "slow.sql"
+    sql.write_text("SELECT 1")
+
+    assert run(["diagnose", str(sql)])[0] == 0
+    assert pg_client.diagnose_query.await_args_list[0].args[0] == "SELECT 1"

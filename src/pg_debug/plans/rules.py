@@ -85,6 +85,10 @@ class RuleContext:
             told apart from a type name in a rendered condition.
         work_mem: The setting as this session sees it, quoted back in the
             remediation so nobody has to go and look it up.
+        catalog: Whether the catalog was consulted at all. A plan diagnosed
+            with no connection behind it has empty ``stale``, ``covered`` and
+            ``columns`` not because the tables are fine but because nothing
+            looked, and the findings have to say which.
     """
 
     parents: Dict[int, Optional[PlanNode]] = field(default_factory=dict)
@@ -94,6 +98,7 @@ class RuleContext:
     covered: Dict[str, List[Set[str]]] = field(default_factory=dict)
     columns: Dict[str, Set[str]] = field(default_factory=dict)
     work_mem: Optional[str] = None
+    catalog: bool = True
 
     def share(self, ms: float) -> float:
         """``ms`` as a share of the query's work."""
@@ -178,6 +183,22 @@ def row_estimate(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
         if node.actual_loops and node.actual_loops > 1:
             detail += f" Counts are per loop, and this node ran {_fmt(node.actual_loops)} times."
 
+        evidence: Dict[str, Any] = {
+            "estimated_rows": estimated,
+            "actual_rows": actual,
+            "loops": loops(node),
+            "contaminated_node": top.node_type,
+        }
+        if not context.catalog and relation:
+            # The two rules that would explain the estimate need the catalog,
+            # and nothing consulted it. Say so here, where the reader is,
+            # rather than leaving the silence to be read as a clean bill.
+            detail += (
+                f" Whether {relation}'s statistics are stale, or its columns are correlated with nothing telling the "
+                "planner, needs this database's catalog: diagnose the plan again with a connection to find out."
+            )
+            evidence["catalog_checked"] = False
+
         findings.append(
             PlanFinding(
                 issue=PlanIssue.ROW_ESTIMATE,
@@ -191,12 +212,7 @@ def row_estimate(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
                 detail=detail,
                 cost_ms=cost,
                 share_of_time=share,
-                evidence={
-                    "estimated_rows": estimated,
-                    "actual_rows": actual,
-                    "loops": loops(node),
-                    "contaminated_node": top.node_type,
-                },
+                evidence=evidence,
             )
         )
     return findings

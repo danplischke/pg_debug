@@ -60,6 +60,7 @@ from .plans import ExplainPlanTool
 from .plans import PlanDiagnoser
 from .plans import PlanFinding
 from .plans import PlanIssue
+from .plans import diagnose_plan
 from .plans.hypothetical import IndexDefinition
 from .plans.tree import ErrorResult
 from .plans.tree import ExplainPlanArtifact
@@ -122,5 +123,6 @@ __all__ = [
     "SyncPgDebug",
     "TopQueriesCalc",
     "__version__",
+    "diagnose_plan",
     "resolve_database_url",
 ]

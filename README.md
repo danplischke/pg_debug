@@ -65,6 +65,8 @@ pg-debug explain --analyze "SELECT * FROM orders LIMIT 10"
 pg-debug diagnose "SELECT * FROM orders WHERE status = 'open' AND region = 'eu'"
 pg-debug diagnose ./slow.sql            # what is wrong with this plan, and why
 pg-debug --json diagnose ./slow.sql | jq '.[] | select(.severity == "high")'
+pg-debug diagnose --plan plan.json       # a plan you already have; no query is run
+pg-debug diagnose --plan - < auto_explain.json   # and no database needed
 
 pg-debug activity                       # what is running right now
 pg-debug activity --blocked              # only backends waiting on a lock
@@ -120,7 +122,7 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `describe NAME` | `-s, --schema SCHEMA` (default `public`, ignored if `NAME` is qualified), `-t, --type {table,view,sequence,extension}` |
 | `execute SQL` | — |
 | `explain SQL` | `--analyze`, `-i, --hypothetical-index SPEC` (repeatable) |
-| `diagnose SQL` | a file path, inline SQL, or `-` for stdin; `--min-ratio N` (default 10) |
+| `diagnose SQL` | a file path, inline SQL, or `-` for stdin; `--min-ratio N` (default 10); `--plan` to read `EXPLAIN (ANALYZE, FORMAT JSON)` output instead of running a query, `--offline` to not connect even with a URL set |
 | `activity` | `-a, --all` (include idle), `-m, --min-duration SECONDS`, `-b, --blocked` |
 | `locks` | — |
 | `vacuum-progress` | — |
@@ -217,6 +219,17 @@ refuses outright rather than half-answering — its promise is that nothing
 executes. A statement that writes is run in a transaction that is rolled back,
 which undoes the rows but not a sequence it consumed or a trigger that reached
 outside the database.
+
+A plan that already exists can be read instead: `--plan` takes
+`EXPLAIN (ANALYZE, FORMAT JSON)` output — a file, stdin, or the object
+`auto_explain` logs with `auto_explain.log_format = 'json'` — and runs nothing,
+so it works in `restricted` mode and, with no database URL at all, with no
+connection. Connected, the tables the plan reads are checked for stale
+statistics and for extended statistics covering their correlated columns, which
+is why the plan should come from this database or one with the same schema and
+data. Unconnected, those two questions go unanswered and a misestimate says so,
+rather than letting the silence read as a clean bill. The text format EXPLAIN
+prints by default is not read.
 
 `check-migration` answers a different question from the rest: not what the
 database is, but what a change will do to everyone using it while it runs. The
@@ -369,6 +382,7 @@ bad URL instead.
 | `execute_sql(sql)` | `list[dict]` — one per row, empty for statements with no result set |
 | `explain_query(sql, analyze=False, hypothetical_indexes=None)` | `ExplainPlanArtifact` |
 | `diagnose_query(sql, min_ratio=10)` | `list[PlanFinding]` — most severe first |
+| `diagnose_plan(plan, min_ratio=10)` | `list[PlanFinding]` — the same, over `EXPLAIN (ANALYZE, FORMAT JSON)` output; works in restricted mode. `pg_debug.diagnose_plan(plan)` does it with no database at all |
 | `list_activity(include_idle=False, min_duration_seconds=None, blocked_only=False)` | `list[dict]` — one per backend, with `blocked_by` |
 | `lock_tree()` | `list[dict]` — one per root blocker, waiters nested under `blocking` |
 | `vacuum_progress()` | `list[dict]` — one per running vacuum |

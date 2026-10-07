@@ -70,6 +70,7 @@ PUBLIC_NAMES = [
     "SyncPgDebug",
     "TopQueriesCalc",
     "__version__",
+    "diagnose_plan",
     "resolve_database_url",
 ]
 

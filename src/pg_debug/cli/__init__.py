@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -33,6 +34,7 @@ from ..model import Severity
 from ..partition import DEFAULT_MIN_PRUNING_SHARE
 from ..partition import DEFAULT_MIN_TABLE_BYTES
 from ..plans import DEFAULT_MIN_RATIO
+from ..plans import diagnose_plan
 from ..schema import ObjectType
 from .render import render_activity
 from .render import render_column_stats
@@ -181,8 +183,8 @@ def read_sql(value: str) -> str:
     return value
 
 
-def read_migration(value: str) -> str:
-    """Return a migration from a file path, stdin (``-``) or the argument itself."""
+def read_sql_or_file(value: str) -> str:
+    """Return text from a file path, stdin (``-``) or the argument itself."""
     if value == "-":
         return sys.stdin.read()
     path = Path(value)
@@ -296,8 +298,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     explain.set_defaults(func=cmd_explain)
 
-    diagnose = subparsers.add_parser("diagnose", help="Run a query and report what is wrong with its plan")
-    diagnose.add_argument("sql", help="Query to diagnose, a file path, or - to read it from stdin")
+    diagnose = subparsers.add_parser("diagnose", help="Run a query, or read a plan, and report what is wrong with it")
+    diagnose.add_argument("sql", help="Query to diagnose, a file holding it, or - to read it from stdin. With --plan, the plan instead.")
+    diagnose.add_argument(
+        "--plan",
+        action="store_true",
+        help="Read a plan instead of running a query: EXPLAIN (ANALYZE, FORMAT JSON) output, as a file, inline, or - for stdin. "
+        "Runs nothing, so it works in restricted mode. Connects only to check the tables' statistics, and only if a "
+        "database URL is given; without one the findings say what could not be checked.",
+    )
+    diagnose.add_argument("--offline", action="store_true", help="With --plan, do not connect even if a database URL is set.")
     diagnose.add_argument(
         "--min-ratio",
         type=float,
@@ -494,7 +504,9 @@ async def cmd_explain(pg: PgDebug, args: argparse.Namespace) -> Any:
 
 
 async def cmd_diagnose(pg: PgDebug, args: argparse.Namespace) -> Any:
-    return await pg.diagnose_query(read_sql(args.sql), min_ratio=args.min_ratio)
+    if args.plan:
+        return await pg.diagnose_plan(read_sql_or_file(args.sql), min_ratio=args.min_ratio)
+    return await pg.diagnose_query(read_sql_or_file(args.sql), min_ratio=args.min_ratio)
 
 
 async def cmd_column_stats(pg: PgDebug, args: argparse.Namespace) -> Any:
@@ -537,7 +549,7 @@ async def cmd_partitions(pg: PgDebug, args: argparse.Namespace) -> Any:
 
 
 async def cmd_check_migration(pg: PgDebug, args: argparse.Namespace) -> Any:
-    return await pg.check_migration(read_migration(args.sql))
+    return await pg.check_migration(read_sql_or_file(args.sql))
 
 
 async def cmd_model(pg: PgDebug, args: argparse.Namespace) -> Any:
@@ -634,16 +646,25 @@ def configure_logging(verbosity: int) -> None:
     logging.basicConfig(level=level, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s")
 
 
+def _has_database_url(explicit: Optional[str]) -> bool:
+    return bool(explicit) or any(os.environ.get(var) for var in DATABASE_URL_ENV_VARS)
+
+
 async def run(args: argparse.Namespace) -> int:
     """Run a parsed command, returning the process exit code."""
-    if getattr(args, "offline", False):
-        # The only command that can answer without a database. Reviewing a
-        # migration against a database that is not the one it will run on is
-        # worse than reviewing it against none: a table that is small in staging
-        # softens every verdict about production.
-        result = await MigrationLinter().review(read_migration(args.sql))
+    if args.command == "check-migration" and args.offline:
+        # Reviewing a migration against a database that is not the one it will
+        # run on is worse than reviewing it against none: a table that is small
+        # in staging softens every verdict about production.
+        result = await MigrationLinter().review(read_sql_or_file(args.sql))
         print(format_result(args.command, result, args.json))
         return UNHEALTHY_EXIT_CODE if args.exit_code and any(r.severity is Severity.HIGH for r in result) else 0
+
+    if args.command == "diagnose" and args.plan and (args.offline or not _has_database_url(args.database_url)):
+        # A plan can be read with no database at all. With a URL in hand the
+        # catalog is worth asking, so that path goes through the client below.
+        print(format_result(args.command, diagnose_plan(read_sql_or_file(args.sql), min_ratio=args.min_ratio), args.json))
+        return 0
 
     async with PgDebug(
         database_url=args.database_url,

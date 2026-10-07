@@ -71,6 +71,23 @@ Because it runs the query it needs `--access-mode unrestricted`, and it says so
 rather than half-answering. A statement that writes is run in a transaction
 that is rolled back — which undoes the rows but not a sequence it consumed.
 
+When the user already has a plan — pasted into the conversation, from
+`auto_explain`, from a replica — do not ask them to run the query again:
+
+```bash
+pg-debug diagnose --plan plan.json          # EXPLAIN (ANALYZE, FORMAT JSON) output
+pg-debug diagnose --plan - < plan.json
+pg-debug diagnose --plan --offline plan.json   # never connect, even with DATABASE_URI set
+```
+
+This runs nothing, so it works in restricted mode and without a database. With
+a connection it also checks the tables for stale statistics and missing
+extended statistics; without one a misestimate says those were not checked.
+Only the JSON format is read: a plan pasted in the text format has to be
+re-taken with `EXPLAIN (ANALYZE, FORMAT JSON)`, and say so. From Python,
+`diagnose_plan(plan)` on a client does the connected version and the top-level
+`pg_debug.diagnose_plan(plan)` the offline one, synchronously.
+
 An empty result is a real answer: the estimates matched and nothing spilled.
 Say that, rather than reaching for something else to blame.
 

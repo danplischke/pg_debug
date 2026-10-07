@@ -531,6 +531,31 @@ async def test_explain_with_a_hypothetical_index_on_a_qualified_table(pg):
 
 
 @pytest.mark.asyncio
+async def test_a_plan_taken_elsewhere_is_diagnosed_against_this_catalog_in_restricted_mode(pg):
+    """The plan comes from one connection; the diagnosis runs nothing and asks
+    the catalog from another, in the mode that runs nothing."""
+    await pg.execute_sql(f"CREATE TABLE {SCHEMA}.visits (id serial PRIMARY KEY, country text NOT NULL, city text NOT NULL)")
+    await pg.execute_sql(
+        f"INSERT INTO {SCHEMA}.visits (country, city) SELECT 'c' || (i % 200) % 20, 'city' || (i % 200) FROM generate_series(1, 100000) i"
+    )
+    await pg.execute_sql(f"ANALYZE {SCHEMA}.visits")
+    rows = await pg.execute_sql(
+        f"EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON) SELECT count(*) FROM {SCHEMA}.visits WHERE country = 'c0' AND city = 'city0'"
+    )
+    plan = rows[0]["QUERY PLAN"]
+
+    async with PgDebug(DATABASE_URI, access_mode=AccessMode.RESTRICTED) as restricted:
+        findings = await restricted.diagnose_plan(plan)
+
+    issues = [finding.issue.value for finding in findings]
+    assert "row_estimate" in issues, issues
+    (correlated,) = [finding for finding in findings if finding.issue.value == "correlated_columns"]
+    assert correlated.evidence["columns"] == ["country", "city"]
+    assert correlated.remediation[0].startswith("CREATE STATISTICS ") and f"ON country, city FROM {SCHEMA}.visits;" in correlated.remediation[0]
+    assert all("catalog_checked" not in finding.evidence for finding in findings)
+
+
+@pytest.mark.asyncio
 async def test_list_activity_sees_a_running_query(pg):
     """A second connection running a slow query shows up as active."""
     async with PgDebug(DATABASE_URI) as other:

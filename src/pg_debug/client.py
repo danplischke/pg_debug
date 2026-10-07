@@ -45,6 +45,7 @@ from .plans import DEFAULT_MIN_RATIO
 from .plans import ExplainPlanTool
 from .plans import PlanDiagnoser
 from .plans import PlanFinding
+from .plans import PlanInput
 from .plans.tree import ErrorResult
 from .plans.tree import ExplainPlanArtifact
 from .schema import ObjectType
@@ -355,6 +356,33 @@ class PgDebug:
                 could not be read.
         """
         return await PlanDiagnoser(await self.sql_driver()).diagnose(sql, min_ratio=min_ratio)
+
+    async def diagnose_plan(self, plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
+        """Diagnose a plan that already exists, checking this database's catalog.
+
+        The same reading as :meth:`diagnose_query`, over ``EXPLAIN (ANALYZE,
+        FORMAT JSON)`` output produced elsewhere — ``auto_explain``, a replica,
+        a colleague. Nothing is run, so this works in restricted mode. The
+        tables the plan reads are checked here for stale statistics and for
+        extended statistics covering their correlated columns, so the plan
+        should come from this database or one with the same schema and data.
+        :func:`pg_debug.diagnose_plan` does the same with no database at all.
+
+        Args:
+            plan: The EXPLAIN output as text or decoded JSON: the one-element
+                list EXPLAIN prints, or the object inside it, which is what
+                ``auto_explain`` logs.
+            min_ratio: How far a row estimate has to be from the truth before
+                it is reported, as a factor.
+
+        Returns:
+            :class:`~pg_debug.plans.PlanFinding` objects, most severe first.
+
+        Raises:
+            InvalidArgumentError: If the plan is not EXPLAIN JSON, or was
+                produced without ANALYZE.
+        """
+        return await PlanDiagnoser(await self.sql_driver()).diagnose_plan(plan, min_ratio=min_ratio)
 
     # -- Planner statistics --------------------------------------------------
 
