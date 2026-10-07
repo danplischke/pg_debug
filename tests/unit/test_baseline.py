@@ -96,6 +96,16 @@ def test_a_baseline_round_trips_through_a_file_in_a_stable_order(tmp_path):
     assert path.read_text().count("\n") == len(payload["findings"]) + 7, "one finding per line, plus the seven lines of framing"
 
 
+def test_an_empty_baseline_is_a_valid_file(tmp_path):
+    path = tmp_path / "empty.json"
+
+    Baseline.of("config", []).save(path)
+
+    assert json.loads(path.read_text())["findings"] == []
+    assert '"findings": []' in path.read_text()
+    assert len(Baseline.load(path, "config")) == 0
+
+
 def test_a_baseline_for_another_command_is_refused(tmp_path):
     path = tmp_path / "b.json"
     Baseline.of("health", {}).save(path)

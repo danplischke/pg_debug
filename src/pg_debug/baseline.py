@@ -177,10 +177,13 @@ class Baseline:
             f'  "version": {BASELINE_VERSION},',
             f'  "command": {json.dumps(self.command)},',
             f'  "created": {json.dumps(self.created)},',
-            '  "findings": [',
         ]
-        lines.extend("    " + _canonical(key) + ("," if i < len(ordered) - 1 else "") for i, key in enumerate(ordered))
-        lines.extend(["  ]", "}", ""])
+        if ordered:
+            lines.append('  "findings": [')
+            lines.extend("    " + _canonical(key) + ("," if i < len(ordered) - 1 else "") for i, key in enumerate(ordered))
+            lines.extend(["  ]", "}", ""])
+        else:
+            lines.extend(['  "findings": []', "}", ""])
         Path(path).write_text("\n".join(lines))
 
 
