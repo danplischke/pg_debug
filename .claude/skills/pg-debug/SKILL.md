@@ -71,11 +71,51 @@ Because it runs the query it needs `--access-mode unrestricted`, and it says so
 rather than half-answering. A statement that writes is run in a transaction
 that is rolled back — which undoes the rows but not a sequence it consumed.
 
+When the user already has a plan — pasted into the conversation, from
+`auto_explain`, from a replica — do not ask them to run the query again:
+
+```bash
+pg-debug diagnose --plan plan.json          # EXPLAIN (ANALYZE, FORMAT JSON) output
+pg-debug diagnose --plan - < plan.json
+pg-debug diagnose --plan --offline plan.json   # never connect, even with DATABASE_URI set
+```
+
+This runs nothing, so it works in restricted mode and without a database. With
+a connection it also checks the tables for stale statistics and missing
+extended statistics; without one a misestimate says those were not checked.
+Only the JSON format is read: a plan pasted in the text format has to be
+re-taken with `EXPLAIN (ANALYZE, FORMAT JSON)`, and say so. From Python,
+`diagnose_plan(plan)` on a client does the connected version and the top-level
+`pg_debug.diagnose_plan(plan)` the offline one, synchronously.
+
 An empty result is a real answer: the estimates matched and nothing spilled.
 Say that, rather than reaching for something else to blame.
 
 `--analyze` executes the query, so do not use it for `UPDATE`/`DELETE` unless
 you mean it. It also cannot be combined with `-i`.
+
+When the question is "I have an index, why is it not used?", do not reason it
+out from the plan by hand:
+
+```bash
+pg-debug index-use "SELECT * FROM orders WHERE lower(email) = 'a@b.c'"
+pg-debug index-use -i orders_email_idx ./query.sql    # one index only
+```
+
+It reports every index on the query's tables as used (with the plan node) or
+not, and for each unused one the reason, marked proven or candidate: the
+query restricts a different column, or the column inside an expression the
+index is not on; an operator a btree cannot search (`<>`, `NOT IN`,
+`LIKE '%x'`, `ILIKE`, regex); `LIKE 'prefix%'` under a non-C collation without
+`text_pattern_ops`; a cast the plan applies to the column (`org_id =
+7::numeric`); a partial index whose `WHERE` the query does not match; an
+invalid index. When nothing stops the planner it says so, with the cost of
+the plan it chose against the plan with sequential scans disabled and the
+share of the table the predicate is expected to match — above a few percent a
+sequential scan is cheaper and no index on that column will be chosen. When
+another index is used either way, it names that index. Each finding carries
+the statement or rewrite that addresses it. It works in restricted mode, where
+the forced-plan step is skipped and the verdict says so.
 
 An index only helps a predicate it matches: to speed up `WHERE lower(email) =
 ...` the index has to be on `lower(email)`, not on `email`. PostgreSQL will
@@ -136,9 +176,32 @@ pg-debug vacuum-progress             # is that vacuum going to finish?
 ```
 
 `activity` hides idle backends by default and excludes its own connection.
-Each row carries `blocked_by` — the pids holding the lock it is waiting for —
-so a lock pile-up reads directly off the output: find the backend with an empty
-`blocked_by` that others point at, and that is the one to deal with.
+Each row carries `blocked_by` — the pids holding the lock it is waiting for.
+
+When backends are waiting on each other, `locks` does the tracing:
+
+```bash
+pg-debug locks                       # who is blocking whom, root blockers first
+pg-debug --json locks                # the same tree as data
+```
+
+It walks `blocked_by` back from every waiter to a backend that waits on
+nothing and prints that root first, with everything stuck behind it nested
+beneath. Each waiter line says what it waits for — the lock mode and table, or
+for a row lock, the other transaction and the table the row is in — and what
+the holder has on it. The root is usually `idle in transaction`: an
+application that opened a transaction, took a lock, and went off to do
+something else. The query shown for it is the last one it ran before going
+idle, which is how you find that code. `blocking N` on the root is how many
+backends are stuck behind it in total, so when there are several roots the
+one listed first is the one to deal with. A root marked as a deadlock is in a
+cycle the server will break within `deadlock_timeout`.
+
+`lock_tree()` returns the same trees from Python: each node has `pid`,
+`state`, `query`, the `*_seconds` ages, `blocked_by`, `blocking` (nested
+nodes), `blocked_total`, and on a waiter `waits_for` with `locktype`, `mode`,
+`relation`, `tuple_relation`, `transactionid`, `held_modes` and a
+`description`.
 
 `wait_event_type` says what kind of wait it is: `Lock` means another backend,
 `IO` means storage, `Timeout` usually means the query is deliberately sleeping,
@@ -183,13 +246,22 @@ pg-debug health                          # everything
 pg-debug health --type index,vacuum      # a subset
 pg-debug --json health                   # structured, for scripts
 pg-debug health --exit-code              # exit 3 if anything is unhealthy (CI)
+pg-debug health --save-baseline b.json   # accept today's findings
+pg-debug health --exit-code --baseline b.json   # then fail only on new ones
 ```
+
+`model` and `config` take the same `--baseline` / `--save-baseline`. A
+baseline holds what each finding is about, not its numbers, so it survives a
+bloat percentage drifting; a finding that disappears is simply not listed.
+Suggest it whenever a user wants to put one of these checks in CI against a
+database that already has findings.
 
 Checks: `index` (invalid, duplicate, bloated, unused), `table` (heap bloat),
 `connection`, `vacuum` (transaction ID wraparound, autovacuum backlog, and what
 is holding the vacuum horizon), `sequence` (approaching
 maximum), `replication`, `buffer` (cache hit rates), `constraint` (invalid
-constraints), `statistics` (never analyzed or drifted), `all`.
+constraints), `statistics` (never analyzed or drifted), `scan` (tables read
+sequentially far more than through an index, charged in bytes read), `all`.
 
 In JSON each check has `healthy`, `summary`, `findings` (the flagged objects)
 and `metrics` (the numbers and thresholds behind the verdict). Filter on
@@ -479,7 +551,7 @@ health, and `list[ModelFinding]` for the data model review.
 
 The live-activity and statistics methods mirror the commands:
 `list_activity(include_idle=, min_duration_seconds=, blocked_only=)`,
-`vacuum_progress()`, `column_stats(table)`, `extended_statistics(table)`, and
+`lock_tree()`, `vacuum_progress()`, `explain_index_use(sql, index=)`, `column_stats(table)`, `extended_statistics(table)`, and
 `get_top_queries(..., interval_seconds=)` for sampling. The model review is
 `review_data_model(rules=, schema=, min_rows=, proven_only=)`; each
 `ModelFinding` has `rule`, `confidence`, `severity`, `summary`, `detail`,

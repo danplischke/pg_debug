@@ -845,3 +845,242 @@ def test_parse_size_accepts_the_units_postgres_uses(text, expected):
 def test_parse_size_rejects_what_is_not_a_size(text):
     with pytest.raises(argparse.ArgumentTypeError):
         cli.parse_size(text)
+
+
+# -- diagnose --plan ----------------------------------------------------------
+
+MISESTIMATE_PLAN = [
+    {
+        "Plan": {
+            "Node Type": "Seq Scan",
+            "Relation Name": "visits",
+            "Schema": "public",
+            "Total Cost": 100.0,
+            "Startup Cost": 0.0,
+            "Plan Rows": 50,
+            "Plan Width": 8,
+            "Actual Total Time": 25.0,
+            "Actual Startup Time": 0.0,
+            "Actual Rows": 1000,
+            "Actual Loops": 1,
+        }
+    }
+]
+
+
+@pytest.fixture
+def no_database_url(monkeypatch):
+    monkeypatch.delenv("DATABASE_URI", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+
+def test_diagnose_plan_without_a_database_url_never_opens_a_connection(pg_client, no_database_url, tmp_path):
+    """A plan in hand and no database: the point of --plan."""
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(MISESTIMATE_PLAN))
+
+    code, out, _ = run(["diagnose", "--plan", str(plan)])
+
+    assert code == 0
+    assert "expected 50 rows and found 1,000" in out
+    assert "needs this database's catalog" in out
+    pg_client.diagnose_plan.assert_not_called()
+    pg_client.diagnose_query.assert_not_called()
+
+
+def test_diagnose_plan_asks_the_database_when_there_is_one(pg_client, monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URI", "postgresql://db")
+    pg_client.diagnose_plan = AsyncMock(return_value=[])
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(MISESTIMATE_PLAN))
+
+    code, _, _ = run(["diagnose", "--plan", str(plan)])
+
+    assert code == 0
+    pg_client.diagnose_plan.assert_awaited_once()
+    assert json.loads(pg_client.diagnose_plan.await_args_list[0].args[0]) == MISESTIMATE_PLAN
+
+
+def test_diagnose_plan_offline_ignores_the_database_url(pg_client, monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URI", "postgresql://db")
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(MISESTIMATE_PLAN))
+
+    code, out, _ = run(["--json", "diagnose", "--plan", "--offline", str(plan)])
+
+    assert code == 0
+    assert json.loads(out)[0]["issue"] == "row_estimate"
+    pg_client.diagnose_plan.assert_not_called()
+
+
+def test_diagnose_plan_reads_stdin(no_database_url, monkeypatch):
+    import io
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(MISESTIMATE_PLAN)))
+
+    code, out, _ = run(["diagnose", "--plan", "-"])
+
+    assert code == 0
+    assert "expected 50 rows" in out
+
+
+def test_diagnose_plan_refuses_the_text_format_with_a_clear_message(no_database_url):
+    code, _, err = run(["diagnose", "--plan", "Seq Scan on orders  (cost=0.00..1.00 rows=1 width=8)"])
+
+    assert code == 1
+    assert "FORMAT JSON" in err
+
+
+def test_diagnose_reads_the_query_from_a_file(pg_client, tmp_path):
+    """The README promises `pg-debug diagnose ./slow.sql`."""
+    pg_client.diagnose_query = AsyncMock(return_value=[])
+    sql = tmp_path / "slow.sql"
+    sql.write_text("SELECT 1")
+
+    assert run(["diagnose", str(sql)])[0] == 0
+    assert pg_client.diagnose_query.await_args_list[0].args[0] == "SELECT 1"
+
+
+# -- index-use --------------------------------------------------------------
+
+
+def index_use_verdict(used=False):
+    from pg_debug.index_use import IndexUse
+    from pg_debug.index_use import IndexUseFinding
+    from pg_debug.index_use import IndexUseReason
+    from pg_debug.model import Confidence
+
+    verdict = IndexUse(
+        index="orders_status",
+        table="public.orders",
+        definition="CREATE INDEX orders_status ON public.orders USING btree (status)",
+        method="btree",
+        columns=["status"],
+        key_columns=1,
+        predicate=None,
+        valid=True,
+        size_bytes=8192,
+        used=used,
+        node_type="Index Scan" if used else None,
+    )
+    if not used:
+        verdict.findings = [
+            IndexUseFinding(
+                reason=IndexUseReason.NO_PREDICATE,
+                confidence=Confidence.PROVEN,
+                summary="The query does not restrict status, the index's first column.",
+                detail="The query restricts region on public.orders.",
+                evidence={"index_columns": ["status"]},
+                remediation=["CREATE INDEX ON public.orders (region);"],
+            )
+        ]
+    return verdict
+
+
+def test_index_use_renders_the_verdict_and_the_reason(pg_client):
+    pg_client.explain_index_use = AsyncMock(return_value=[index_use_verdict()])
+
+    code, out, _ = run(["index-use", "SELECT * FROM orders WHERE region = 'eu'"])
+
+    assert code == 0
+    assert "public.orders: orders_status  btree (status)  8.0 KiB  -- NOT used" in out
+    assert "[proven] no predicate: The query does not restrict status" in out
+    assert "CREATE INDEX ON public.orders (region);" in out
+
+
+def test_index_use_passes_the_index_filter_and_emits_json(pg_client):
+    pg_client.explain_index_use = AsyncMock(return_value=[index_use_verdict(used=True)])
+
+    code, out, _ = run(["--json", "index-use", "-i", "orders_status", "SELECT 1 FROM orders"])
+
+    assert code == 0
+    pg_client.explain_index_use.assert_awaited_once_with("SELECT 1 FROM orders", index="orders_status")
+    assert json.loads(out)[0]["used"] is True
+
+
+# -- Baselines --------------------------------------------------------------
+
+
+def unhealthy_index_results(*indexes):
+    return health_results(
+        ("Connection health", True, "ok", {}),
+        (
+            "Index bloat",
+            False,
+            "bloated",
+            {"findings": [{"schema": "public", "table": "orders", "index": name, "bloat_percent": 30.0} for name in indexes]},
+        ),
+    )
+
+
+def test_save_baseline_writes_what_the_run_found(pg_client, tmp_path):
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a"))
+    path = tmp_path / "health.json"
+
+    code, _, err = run(["health", "--save-baseline", str(path)])
+
+    assert code == 0
+    assert "Saved a baseline of 1 finding(s)" in err
+    assert json.loads(path.read_text())["findings"] == [{"check": "Index bloat", "index": "orders_a", "schema": "public", "table": "orders"}]
+
+
+def test_a_known_finding_does_not_fail_the_gate_but_a_new_one_does(pg_client, tmp_path):
+    path = tmp_path / "health.json"
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a"))
+    run(["health", "--save-baseline", str(path)])
+
+    code, out, _ = run(["health", "--exit-code", "--baseline", str(path)])
+    assert code == 0
+    assert f"Baseline {path}: 1 known finding(s), nothing new." in out
+
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a", "orders_b"))
+    code, out, _ = run(["health", "--exit-code", "--baseline", str(path)])
+    assert code == cli.UNHEALTHY_EXIT_CODE
+    assert "1 known finding(s) ignored, 1 new:" in out
+    assert "  Index bloat: public.orders orders_b" in out
+
+
+def test_json_output_marks_each_finding_against_the_baseline(pg_client, tmp_path):
+    path = tmp_path / "health.json"
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a"))
+    run(["health", "--save-baseline", str(path)])
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a", "orders_b"))
+
+    code, out, _ = run(["--json", "health", "--baseline", str(path)])
+
+    assert code == 0
+    findings = json.loads(out)["Index bloat"]["findings"]
+    assert [(f["index"], f["baseline"]) for f in findings] == [("orders_a", "known"), ("orders_b", "new")]
+
+
+def test_model_baseline_gates_only_new_high_severity_findings(pg_client, tmp_path):
+    path = tmp_path / "model.json"
+    pg_client.review_data_model = AsyncMock(return_value=model_findings((RuleId.MISSING_PRIMARY_KEY, Confidence.PROVEN, Severity.HIGH, "events")))
+    run(["model", "--save-baseline", str(path)])
+
+    assert run(["model", "--exit-code", "--baseline", str(path)])[0] == 0
+
+    pg_client.review_data_model = AsyncMock(
+        return_value=model_findings(
+            (RuleId.MISSING_PRIMARY_KEY, Confidence.PROVEN, Severity.HIGH, "events"),
+            (RuleId.NAIVE_TIMESTAMP, Confidence.PROVEN, Severity.MEDIUM, "orders"),
+        )
+    )
+    assert run(["model", "--exit-code", "--baseline", str(path)])[0] == 0, "new but not high severity"
+
+    pg_client.review_data_model = AsyncMock(return_value=model_findings((RuleId.MISSING_PRIMARY_KEY, Confidence.PROVEN, Severity.HIGH, "fresh")))
+    code, out, _ = run(["--json", "model", "--exit-code", "--baseline", str(path)])
+    assert code == cli.UNHEALTHY_EXIT_CODE
+    assert json.loads(out)[0]["baseline"] == "new"
+
+
+def test_a_baseline_from_another_command_is_an_error(pg_client, tmp_path):
+    path = tmp_path / "health.json"
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a"))
+    run(["health", "--save-baseline", str(path)])
+    pg_client.review_data_model = AsyncMock(return_value=[])
+
+    code, _, err = run(["model", "--baseline", str(path)])
+
+    assert code == 1
+    assert "baseline for `pg-debug health`, not `pg-debug model`" in err

@@ -1,6 +1,6 @@
 [project]
 name = "pg-debug"
-version = "0.1.0"
+dynamic = ["version"]
 description = "PostgreSQL inspection, health and index tuning as a Python library with a CLI"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -12,19 +12,29 @@ dependencies = [
     "psycopg-pool>=3.3.0",
     "pydantic>=2.0",
 ]
-license = "mit"
-license-files = ["LICENSE"]
+license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Dan Plischke" }]
 keywords = ["postgres", "postgresql", "database", "index", "tuning", "explain", "cli"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Database",
     "Topic :: Database :: Database Engines/Servers",
     "Typing :: Typed",
 ]
+
+[project.urls]
+Homepage = "https://github.com/danplischke/pg_debug"
+Repository = "https://github.com/danplischke/pg_debug"
+Changelog = "https://github.com/danplischke/pg_debug/blob/main/CHANGELOG.md"
+Issues = "https://github.com/danplischke/pg_debug/issues"
 
 [project.optional-dependencies]
 llm = ["instructor>=1.14.4"]
@@ -35,6 +45,9 @@ pg-debug = "pg_debug.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/pg_debug/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pg_debug"]
@@ -47,6 +60,7 @@ testpaths = ["tests"]
 [dependency-groups]
 dev = [
     "docker>=7.1.0",
+    "pre-commit>=4.6.2",
     "pyright==1.1.408",
     "pytest-asyncio>=1.3.0",
     "pytest>=9.0.2",

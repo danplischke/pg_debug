@@ -113,6 +113,49 @@ def render_activity(rows: Sequence[Mapping[str, Any]]) -> str:
     return render_rows(projected, max_width=80)
 
 
+def render_lock_tree(roots: Sequence[Mapping[str, Any]]) -> str:
+    """Render each root blocker with the backends waiting on it nested beneath."""
+    if not roots:
+        return "(nothing is blocked)"
+
+    lines: List[str] = []
+    for root in roots:
+        _lock_tree_lines(root, 0, lines)
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _lock_tree_lines(node: Mapping[str, Any], depth: int, lines: List[str]) -> None:
+    indent = "  " * depth
+    state = node.get("state") or node.get("backend_type") or "?"
+    parts = [f"{indent}pid {node.get('pid')}:"]
+    waits_for = node.get("waits_for")
+    if waits_for:
+        parts.append(f"waits for {waits_for.get('description')};")
+    parts.append(f"{state} for {format_duration(node.get('state_seconds'))}")
+    if node.get("transaction_seconds") is not None and state != "active":
+        parts.append(f"in a transaction open {format_duration(node.get('transaction_seconds'))}")
+    who = f"{node.get('usename') or '?'}@{node.get('datname') or '?'}"
+    if node.get("application_name"):
+        who += f" {node['application_name']}"
+    parts.append(f"({who})")
+    if depth == 0:
+        parts.append(f"blocking {node.get('blocked_total', 0)}")
+    if node.get("cycle"):
+        parts.append("[deadlock: waits on something that waits on it]")
+    lines.append(" ".join(parts))
+
+    query = " ".join(str(node.get("query") or "").split())
+    if query:
+        lines.append(f"{indent}    {query[:MAX_QUERY_WIDTH]}{'…' if len(query) > MAX_QUERY_WIDTH else ''}")
+
+    for child in node.get("blocking") or []:
+        _lock_tree_lines(child, depth + 1, lines)
+
+
+MAX_QUERY_WIDTH = 120
+
+
 def render_vacuum_progress(rows: Sequence[Mapping[str, Any]]) -> str:
     """Render running vacuums with their progress through the heap."""
     if not rows:
@@ -219,6 +262,30 @@ def render_index_recommendations(result: Mapping[str, Any]) -> str:
         lines.append(f"  cost {impact['base_cost']} -> {impact['new_cost']} ({impact['improvement_multiple']}x)")
         lines.append("")
 
+    return "\n".join(lines).rstrip()
+
+
+def render_index_use(verdicts: Sequence[Any]) -> str:
+    """Render each index with its verdict, and the reasons beneath the ones not used."""
+    if not verdicts:
+        return "(no indexes on the tables this query reads)"
+
+    lines: List[str] = []
+    for verdict in verdicts:
+        size = humanize.naturalsize(verdict.size_bytes, binary=True) if verdict.size_bytes else ""
+        head = f"{verdict.table}: {verdict.index}  {verdict.description}" + (f"  {size}" if size else "")
+        if verdict.used:
+            lines.append(f"{head}  -- used by {verdict.node_type}")
+        else:
+            lines.append(f"{head}  -- NOT used")
+        for finding in verdict.findings:
+            lines.append(f"  [{finding.confidence.value}] {finding.reason.value.replace('_', ' ')}: {finding.summary}")
+            lines.append(f"      {finding.detail}")
+            for step in finding.remediation:
+                lines.append(f"      {step}")
+        for note in verdict.notes:
+            lines.append(f"  note: {note}")
+        lines.append("")
     return "\n".join(lines).rstrip()
 
 
@@ -407,6 +474,8 @@ __all__ = [
     "render_configuration_review",
     "render_health_checks",
     "render_index_recommendations",
+    "render_index_use",
+    "render_lock_tree",
     "render_mapping",
     "render_migration_review",
     "render_model_findings",

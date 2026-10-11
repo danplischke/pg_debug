@@ -1,0 +1,123 @@
+[
+ {
+  "Plan": {
+   "Node Type": "Limit",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Startup Cost": 33189.64,
+   "Total Cost": 33439.64,
+   "Plan Rows": 100000,
+   "Plan Width": 18,
+   "Actual Startup Time": 82.78,
+   "Actual Total Time": 97.069,
+   "Actual Rows": 100000,
+   "Actual Loops": 1,
+   "Output": [
+    "id",
+    "country",
+    "city",
+    "hits"
+   ],
+   "Shared Hit Blocks": 1274,
+   "Shared Read Blocks": 0,
+   "Shared Dirtied Blocks": 0,
+   "Shared Written Blocks": 0,
+   "Local Hit Blocks": 0,
+   "Local Read Blocks": 0,
+   "Local Dirtied Blocks": 0,
+   "Local Written Blocks": 0,
+   "Temp Read Blocks": 2587,
+   "Temp Written Blocks": 3299,
+   "Plans": [
+    {
+     "Node Type": "Sort",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Startup Cost": 33189.64,
+     "Total Cost": 33689.64,
+     "Plan Rows": 200000,
+     "Plan Width": 18,
+     "Actual Startup Time": 82.778,
+     "Actual Total Time": 91.153,
+     "Actual Rows": 100000,
+     "Actual Loops": 1,
+     "Output": [
+      "id",
+      "country",
+      "city",
+      "hits"
+     ],
+     "Sort Key": [
+      "visits.hits",
+      "visits.city"
+     ],
+     "Sort Method": "external merge",
+     "Sort Space Used": 5952,
+     "Sort Space Type": "Disk",
+     "Shared Hit Blocks": 1274,
+     "Shared Read Blocks": 0,
+     "Shared Dirtied Blocks": 0,
+     "Shared Written Blocks": 0,
+     "Local Hit Blocks": 0,
+     "Local Read Blocks": 0,
+     "Local Dirtied Blocks": 0,
+     "Local Written Blocks": 0,
+     "Temp Read Blocks": 2587,
+     "Temp Written Blocks": 3299,
+     "Plans": [
+      {
+       "Node Type": "Seq Scan",
+       "Parent Relationship": "Outer",
+       "Parallel Aware": false,
+       "Async Capable": false,
+       "Relation Name": "visits",
+       "Schema": "public",
+       "Alias": "visits",
+       "Startup Cost": 0.0,
+       "Total Cost": 3274.0,
+       "Plan Rows": 200000,
+       "Plan Width": 18,
+       "Actual Startup Time": 0.004,
+       "Actual Total Time": 11.12,
+       "Actual Rows": 200000,
+       "Actual Loops": 1,
+       "Output": [
+        "id",
+        "country",
+        "city",
+        "hits"
+       ],
+       "Shared Hit Blocks": 1274,
+       "Shared Read Blocks": 0,
+       "Shared Dirtied Blocks": 0,
+       "Shared Written Blocks": 0,
+       "Local Hit Blocks": 0,
+       "Local Read Blocks": 0,
+       "Local Dirtied Blocks": 0,
+       "Local Written Blocks": 0,
+       "Temp Read Blocks": 0,
+       "Temp Written Blocks": 0
+      }
+     ]
+    }
+   ]
+  },
+  "Query Identifier": -6647868115126218640,
+  "Planning": {
+   "Shared Hit Blocks": 11,
+   "Shared Read Blocks": 0,
+   "Shared Dirtied Blocks": 0,
+   "Shared Written Blocks": 0,
+   "Local Hit Blocks": 0,
+   "Local Read Blocks": 0,
+   "Local Dirtied Blocks": 0,
+   "Local Written Blocks": 0,
+   "Temp Read Blocks": 0,
+   "Temp Written Blocks": 0
+  },
+  "Planning Time": 0.068,
+  "Triggers": [],
+  "Execution Time": 101.001
+ }
+]

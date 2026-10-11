@@ -3,6 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from pg_debug.cli.render import render_index_recommendations
+from pg_debug.cli.render import render_lock_tree
 from pg_debug.cli.render import render_mapping
 from pg_debug.cli.render import render_object_details
 from pg_debug.cli.render import render_rows
@@ -158,3 +159,47 @@ def test_render_index_recommendations_includes_warnings():
     assert "1 recommended index(es)" in rendered
     assert "warning: includes a long text column" in rendered
     assert "SELECT * FROM orders WHERE user_id = 1" in rendered
+
+
+def test_the_lock_tree_renders_the_root_first_and_indents_the_waiters():
+    tree = [
+        {
+            "pid": 41,
+            "usename": "app",
+            "datname": "shop",
+            "application_name": "worker",
+            "state": "idle in transaction",
+            "state_seconds": 125.0,
+            "transaction_seconds": 130.0,
+            "query": "UPDATE   orders\n   SET status = 'paid'",
+            "waits_for": None,
+            "blocked_total": 1,
+            "blocking": [
+                {
+                    "pid": 42,
+                    "usename": "app",
+                    "datname": "shop",
+                    "application_name": "",
+                    "state": "active",
+                    "state_seconds": 90.0,
+                    "transaction_seconds": 90.0,
+                    "query": "SELECT count(*) FROM orders",
+                    "waits_for": {"description": "AccessShareLock on public.orders (41 holds AccessExclusiveLock)"},
+                    "blocked_total": 0,
+                    "blocking": [],
+                }
+            ],
+        }
+    ]
+
+    text = render_lock_tree(tree)
+
+    lines = text.splitlines()
+    assert lines[0] == "pid 41: idle in transaction for 2m05s in a transaction open 2m10s (app@shop worker) blocking 1"
+    assert lines[1] == "    UPDATE orders SET status = 'paid'"
+    assert lines[2] == "  pid 42: waits for AccessShareLock on public.orders (41 holds AccessExclusiveLock); active for 1m30s (app@shop)"
+    assert lines[3] == "      SELECT count(*) FROM orders"
+
+
+def test_an_empty_lock_tree_says_so():
+    assert render_lock_tree([]) == "(nothing is blocked)"

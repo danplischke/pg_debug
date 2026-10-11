@@ -5,6 +5,7 @@ executes the user's query, so the decisions here — whether it needs undoing
 afterwards, and whether it may run at all — are the ones worth pinning down.
 """
 
+import json
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
@@ -15,6 +16,9 @@ from pg_debug.db import SqlDriver
 from pg_debug.errors import ExplainPlanError
 from pg_debug.errors import InvalidArgumentError
 from pg_debug.plans.diagnoser import PlanDiagnoser
+from pg_debug.plans.diagnoser import diagnose_plan
+from pg_debug.plans.diagnoser import parse_plan
+from pg_debug.plans.result import PlanIssue
 
 PLAN = {
     "Plan": {
@@ -147,3 +151,100 @@ async def test_a_failure_to_run_the_statement_is_reported_as_a_plan_error():
 @pytest.mark.asyncio
 async def test_a_healthy_plan_diagnoses_to_nothing():
     assert await PlanDiagnoser(driver_returning_a_plan()).diagnose("SELECT * FROM visits") == []
+
+
+# -- Plans that already exist ------------------------------------------------
+
+MISESTIMATE = {
+    "Plan": {
+        "Node Type": "Seq Scan",
+        "Relation Name": "visits",
+        "Schema": "public",
+        "Alias": "visits",
+        "Filter": "((visits.country = 'c0'::text) AND (visits.city = 'city0'::text))",
+        "Total Cost": 100.0,
+        "Startup Cost": 0.0,
+        "Plan Rows": 50,
+        "Plan Width": 8,
+        "Actual Total Time": 25.0,
+        "Actual Startup Time": 0.0,
+        "Actual Rows": 1000,
+        "Actual Loops": 1,
+    },
+    "Execution Time": 26.0,
+}
+
+
+def test_a_plan_is_read_as_text_as_the_list_explain_prints_or_as_the_object_inside():
+    for form in (json.dumps([PLAN]), json.dumps([PLAN]).encode(), [PLAN], PLAN):
+        assert parse_plan(form).node_type == "Seq Scan"
+
+
+def test_the_text_format_is_refused_with_the_options_that_would_work():
+    with pytest.raises(InvalidArgumentError, match="FORMAT JSON"):
+        parse_plan("Seq Scan on orders  (cost=0.00..1.00 rows=1 width=8) (actual time=0.01..0.02 rows=1 loops=1)")
+
+
+def test_a_plan_that_was_never_run_is_refused():
+    """Without ANALYZE there are estimates and nothing to compare them to."""
+    with pytest.raises(InvalidArgumentError, match="never run"):
+        parse_plan({"Plan": {"Node Type": "Seq Scan", "Total Cost": 1.0, "Startup Cost": 0.0, "Plan Rows": 1, "Plan Width": 8}})
+
+
+def test_other_shapes_are_refused():
+    with pytest.raises(InvalidArgumentError, match="list of 2"):
+        parse_plan([PLAN, PLAN])
+    with pytest.raises(InvalidArgumentError, match="'Plan' key"):
+        parse_plan({"Query Text": "SELECT 1"})
+
+
+def test_a_healthy_plan_diagnoses_to_nothing_with_no_database():
+    assert diagnose_plan([PLAN]) == []
+
+
+def test_a_misestimate_with_no_database_says_the_cause_was_not_checked():
+    """Silence from the two catalog rules must not read as a clean bill."""
+    (finding,) = diagnose_plan(MISESTIMATE)
+
+    assert finding.issue is PlanIssue.ROW_ESTIMATE
+    assert finding.relation == "public.visits"
+    assert "needs this database's catalog" in finding.detail
+    assert finding.evidence["catalog_checked"] is False
+
+
+def test_the_top_level_function_is_the_same_thing():
+    import pg_debug
+
+    assert pg_debug.diagnose_plan is diagnose_plan
+
+
+@pytest.mark.asyncio
+async def test_a_driver_makes_the_catalog_questions_get_asked():
+    driver = driver_returning_a_plan()
+
+    (finding,) = await PlanDiagnoser(driver).diagnose_plan(MISESTIMATE)
+
+    asked = [call.args[0] for call in driver.execute_query.await_args_list]
+    assert any("pg_statistic_ext" in query for query in asked), "extended statistics were not looked up"
+    assert any("pg_attribute" in query for query in asked), "the table's columns were not looked up"
+    assert not any("EXPLAIN" in query for query in asked), "nothing should have been run"
+    assert "catalog_checked" not in finding.evidence
+    assert "needs this database's catalog" not in finding.detail
+
+
+@pytest.mark.asyncio
+async def test_a_plan_can_be_read_in_restricted_mode():
+    """Reading runs nothing, so the mode that runs nothing allows it."""
+    assert await PlanDiagnoser(SafeSqlDriver(driver_returning_a_plan())).diagnose_plan([PLAN]) == []
+
+
+@pytest.mark.asyncio
+async def test_running_a_query_needs_a_driver_and_says_what_does_not():
+    with pytest.raises(InvalidArgumentError, match="diagnose_plan"):
+        await PlanDiagnoser().diagnose("SELECT 1")
+
+
+@pytest.mark.asyncio
+async def test_restricted_mode_points_at_the_plan_route():
+    with pytest.raises(InvalidArgumentError, match="--plan"):
+        await PlanDiagnoser(SafeSqlDriver(driver_returning_a_plan())).diagnose("SELECT 1")

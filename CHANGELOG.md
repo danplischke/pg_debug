@@ -6,6 +6,85 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `--baseline FILE` and `--save-baseline FILE` on `health`, `model` and
+  `config`. Their `--exit-code` makes them build gates, and the trouble with
+  a gate on an existing database is the first run: it fails on everything,
+  deliberate findings included, and gets turned off. A baseline is the
+  findings a team has read and accepted; against one, the gate fails only on
+  what is new. It records what each finding is about — the check and the
+  object, the rule and the table, the setting — never the numbers, so a
+  bloated index is the same finding at 31% and 34%, and a finding that goes
+  away is simply not listed. The file is JSON, one finding per line in a
+  stable order, for the repository. Text output ends with what the baseline
+  changed; JSON output marks each finding `known` or `new`.
+
+- A `scan` health check: tables read sequentially far more than through an
+  index, from `pg_stat_user_tables` and no extension. Index tuning finds the
+  same tables, but only with `pg_stat_statements` and `hypopg` installed; the
+  counters are always there. The check argues in bytes, not scan counts: each
+  table is charged the data its sequential scans read, scaled down when a
+  scan returned only part of the table, and reported only when that reading
+  is large, the table is not small, and sequential scans outnumber index
+  scans. Findings carry the counters, the rows each scan returned against the
+  table's rows, when the counting started, and on PostgreSQL 16 and later the
+  time of the last sequential scan.
+
+- `pg-debug index-use` and `PgDebug.explain_index_use()`: why the planner
+  did not use an index for a query. The question has two halves and they need
+  different evidence. Whether the planner *can* use the index is read from
+  the query's text against the index's definition and the catalog: the
+  column each predicate restricts, bare or wrapped in a function or cast the
+  index is not on; an operator a btree cannot search (`<>`, `NOT IN`, a
+  leading-wildcard `LIKE`, `ILIKE`, a regular expression); `LIKE 'prefix%'`
+  under a non-C collation without a pattern operator class; a cast the plan
+  applies to the column; a partial index whose `WHERE` the query does not
+  match; an invalid index; an OR that spans tables. Whether it *chose* to is
+  read by planning the query again with sequential scans disabled: if the
+  index is used then, nothing stopped it, and the finding reports both costs
+  and the share of the table the predicate is expected to match. When another
+  index serves the query either way, that index is named rather than the
+  verdict left unexplained. Each finding is marked proven or candidate and
+  carries the statement or rewrite that addresses it. Nothing is executed;
+  in `restricted` mode the forced plan is skipped and the verdict says so.
+
+- `pg-debug diagnose --plan` and `PgDebug.diagnose_plan()`: diagnose a plan
+  that already exists. `diagnose` had to run the query itself with
+  `EXPLAIN ANALYZE`, in unrestricted mode, which put its best reading behind
+  its heaviest requirement — most people with a slow query hold a plan, not
+  production access. `--plan` takes `EXPLAIN (ANALYZE, FORMAT JSON)` output
+  from a file, stdin or inline, including the object `auto_explain` logs, and
+  runs nothing, so it works in `restricted` mode and, with no database URL,
+  with no connection at all. Connected, the tables the plan reads are checked
+  for stale statistics and missing extended statistics as before; unconnected,
+  a misestimate says those were not checked instead of staying silent.
+  `pg_debug.diagnose_plan(plan)` does the offline reading from Python without
+  a client or an event loop. The unit tests gain a corpus of real PostgreSQL
+  16 plans diagnosed this way.
+
+### Fixed
+
+- `pg-debug diagnose ./slow.sql` ran the literal text `./slow.sql` as the
+  query. The README had promised a file path since the command appeared;
+  it now reads one, as `check-migration` does.
+
+- `pg-debug locks` and `PgDebug.lock_tree()`: who is blocking whom, as a tree.
+  `activity` already reported the pids blocking each waiter, which left the
+  reader to follow them by hand when the database was stuck. This walks the
+  blocking graph from every waiter back to the backend that waits on nothing
+  and prints that root first — usually a session idle in a transaction, with
+  the last statement it ran — and nests everything stuck behind it beneath,
+  each line saying what it waits for (the lock mode and table, or the other
+  transaction and the table of the row) and what the holder has on it. Roots
+  are ordered by how many backends they block. It works in `restricted` mode
+  and needs no extension.
+
+## [0.2.0] - 2026-10-06
+
+First published release. 0.1.0 below was never tagged or uploaded to PyPI;
+its entry is kept because it describes what the package started as.
+
 ### Fixed
 
 - The buffer health checks no longer report a cache hit rate taken over too few
@@ -23,6 +102,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Python 3.13 is supported; CI runs the suite on 3.12 and 3.13.
+- Published wheels declare `License-Expression: MIT` and ship `NOTICE`, which
+  records the derivation from postgres-mcp, alongside `LICENSE`. Package
+  metadata now carries the project URLs.
 - `pg-debug diagnose` and `PgDebug.diagnose_query()`: run a query and report
   what is wrong with the plan it produced, rather than only printing it. Nine
   rules over the parsed plan — the lowest node whose row estimate diverged from
@@ -251,6 +334,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The version is written in one place, `pg_debug.__version__`;
+  `pyproject.toml` reads it from there at build time.
 - Every statement pg_debug issues now carries the `/* pg_debug */` marker, in
   both access modes. Only `SafeSqlDriver` applied it before, so in the default
   unrestricted mode the tool's own catalog reads were indistinguishable from
@@ -284,7 +369,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     module; `pg_debug.tuple_layout` is `pg_debug.queries.tuple_layout`; and
     `pg_debug.formatting` is `pg_debug.cli.render`.
 
-## [0.1.0] - 2026-08-12
+## [0.1.0] - 2026-08-12 (unpublished)
 
 First release. `pg_debug` extracts the analysis engine of
 [crystaldba/postgres-mcp](https://github.com/crystaldba/postgres-mcp) into an
@@ -345,5 +430,6 @@ async Python library with a `pg-debug` CLI, replacing the MCP server layer.
 - The MCP server, its tool registrations and its stdio/SSE/streamable-HTTP
   transports.
 
-[Unreleased]: https://github.com/danplischke/pg_debug/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/danplischke/pg_debug/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/danplischke/pg_debug/compare/332df27...v0.2.0
 [0.1.0]: https://github.com/danplischke/pg_debug/releases/tag/v0.1.0

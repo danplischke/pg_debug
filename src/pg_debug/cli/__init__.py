@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -18,6 +19,13 @@ from typing import Sequence
 from typing import Tuple
 
 from .. import __version__
+from ..baseline import Baseline
+from ..baseline import Partition
+from ..baseline import config_finding_key
+from ..baseline import describe_key
+from ..baseline import health_finding_key
+from ..baseline import model_finding_key
+from ..baseline import partition
 from ..client import DATABASE_URL_ENV_VARS
 from ..client import AccessMode
 from ..client import PgDebug
@@ -33,12 +41,15 @@ from ..model import Severity
 from ..partition import DEFAULT_MIN_PRUNING_SHARE
 from ..partition import DEFAULT_MIN_TABLE_BYTES
 from ..plans import DEFAULT_MIN_RATIO
+from ..plans import diagnose_plan
 from ..schema import ObjectType
 from .render import render_activity
 from .render import render_column_stats
 from .render import render_configuration_review
 from .render import render_health_checks
 from .render import render_index_recommendations
+from .render import render_index_use
+from .render import render_lock_tree
 from .render import render_migration_review
 from .render import render_model_findings
 from .render import render_object_details
@@ -180,8 +191,8 @@ def read_sql(value: str) -> str:
     return value
 
 
-def read_migration(value: str) -> str:
-    """Return a migration from a file path, stdin (``-``) or the argument itself."""
+def read_sql_or_file(value: str) -> str:
+    """Return text from a file path, stdin (``-``) or the argument itself."""
     if value == "-":
         return sys.stdin.read()
     path = Path(value)
@@ -210,6 +221,20 @@ def parse_size(value: str) -> int:
     if unit and unit not in SIZE_UNITS:
         raise argparse.ArgumentTypeError(f"'{match.group(2)}' is not a size unit. Use one of: {', '.join(SIZE_UNITS)}.")
     return int(float(number) * SIZE_UNITS.get(unit or "B", 1))
+
+
+def add_baseline_arguments(parser: argparse.ArgumentParser) -> None:
+    """``--baseline`` and ``--save-baseline``, for the commands that gate a build."""
+    parser.add_argument(
+        "--baseline",
+        metavar="FILE",
+        help="Compare against a saved baseline: findings in it are reported as known and do not affect --exit-code.",
+    )
+    parser.add_argument(
+        "--save-baseline",
+        metavar="FILE",
+        help="Save this run's findings as the baseline to compare later runs against. Do it from a run you have read and accept.",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -295,8 +320,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     explain.set_defaults(func=cmd_explain)
 
-    diagnose = subparsers.add_parser("diagnose", help="Run a query and report what is wrong with its plan")
-    diagnose.add_argument("sql", help="Query to diagnose, a file path, or - to read it from stdin")
+    diagnose = subparsers.add_parser("diagnose", help="Run a query, or read a plan, and report what is wrong with it")
+    diagnose.add_argument("sql", help="Query to diagnose, a file holding it, or - to read it from stdin. With --plan, the plan instead.")
+    diagnose.add_argument(
+        "--plan",
+        action="store_true",
+        help="Read a plan instead of running a query: EXPLAIN (ANALYZE, FORMAT JSON) output, as a file, inline, or - for stdin. "
+        "Runs nothing, so it works in restricted mode. Connects only to check the tables' statistics, and only if a "
+        "database URL is given; without one the findings say what could not be checked.",
+    )
+    diagnose.add_argument("--offline", action="store_true", help="With --plan, do not connect even if a database URL is set.")
     diagnose.add_argument(
         "--min-ratio",
         type=float,
@@ -304,6 +337,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=(f"How far a row estimate has to be from what the query found before it is reported, as a factor (default: {DEFAULT_MIN_RATIO:g})."),
     )
     diagnose.set_defaults(func=cmd_diagnose)
+
+    index_use = subparsers.add_parser("index-use", help="Say whether a query uses each index on its tables, and if not, why")
+    index_use.add_argument("sql", help="Query to plan, a file holding it, or - to read it from stdin")
+    index_use.add_argument("-i", "--index", help="Report only this index.")
+    index_use.set_defaults(func=cmd_index_use)
 
     column_stats = subparsers.add_parser("column-stats", help="Show the planner's statistics for a table")
     column_stats.add_argument("table", help="Table name, optionally schema-qualified")
@@ -334,6 +372,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any high-severity finding is reported, for use in CI.",
     )
+    add_baseline_arguments(model)
     model.set_defaults(func=cmd_model)
 
     config = subparsers.add_parser("config", help="Review the server's settings against what it is actually doing")
@@ -342,6 +381,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any high-severity finding is reported, for use in CI.",
     )
+    add_baseline_arguments(config)
     config.set_defaults(func=cmd_config)
 
     partitions = subparsers.add_parser("partitions", help="Say whether a table is worth partitioning, from what the workload does")
@@ -394,6 +434,9 @@ def build_parser() -> argparse.ArgumentParser:
     activity.add_argument("-b", "--blocked", action="store_true", help="Only show backends waiting on a lock another backend holds.")
     activity.set_defaults(func=cmd_activity)
 
+    locks = subparsers.add_parser("locks", help="Show who is blocking whom, the root blockers first")
+    locks.set_defaults(func=cmd_locks)
+
     vacuum_progress = subparsers.add_parser("vacuum-progress", help="Show running vacuums and how far along they are")
     vacuum_progress.set_defaults(func=cmd_vacuum_progress)
 
@@ -410,6 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any check reports a problem, for use in CI.",
     )
+    add_baseline_arguments(health)
     health.set_defaults(func=cmd_health)
 
     top_queries = subparsers.add_parser("top-queries", help="Report the most expensive queries (needs pg_stat_statements)")
@@ -490,7 +534,13 @@ async def cmd_explain(pg: PgDebug, args: argparse.Namespace) -> Any:
 
 
 async def cmd_diagnose(pg: PgDebug, args: argparse.Namespace) -> Any:
-    return await pg.diagnose_query(read_sql(args.sql), min_ratio=args.min_ratio)
+    if args.plan:
+        return await pg.diagnose_plan(read_sql_or_file(args.sql), min_ratio=args.min_ratio)
+    return await pg.diagnose_query(read_sql_or_file(args.sql), min_ratio=args.min_ratio)
+
+
+async def cmd_index_use(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.explain_index_use(read_sql_or_file(args.sql), index=args.index)
 
 
 async def cmd_column_stats(pg: PgDebug, args: argparse.Namespace) -> Any:
@@ -506,6 +556,10 @@ async def cmd_activity(pg: PgDebug, args: argparse.Namespace) -> Any:
         min_duration_seconds=args.min_duration,
         blocked_only=args.blocked,
     )
+
+
+async def cmd_locks(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.lock_tree()
 
 
 async def cmd_vacuum_progress(pg: PgDebug, args: argparse.Namespace) -> Any:
@@ -529,7 +583,7 @@ async def cmd_partitions(pg: PgDebug, args: argparse.Namespace) -> Any:
 
 
 async def cmd_check_migration(pg: PgDebug, args: argparse.Namespace) -> Any:
-    return await pg.check_migration(read_migration(args.sql))
+    return await pg.check_migration(read_sql_or_file(args.sql))
 
 
 async def cmd_model(pg: PgDebug, args: argparse.Namespace) -> Any:
@@ -562,7 +616,33 @@ async def cmd_tune_queries(pg: PgDebug, args: argparse.Namespace) -> Any:
 # -- Output -----------------------------------------------------------------
 
 
-def format_result(command: str, result: Any, as_json: bool) -> str:
+def _with_baseline(payload: Dict[str, Any], key: Dict[str, Any], baseline: Optional[Baseline]) -> Dict[str, Any]:
+    if baseline is not None:
+        payload["baseline"] = "known" if key in baseline else "new"
+    return payload
+
+
+def _health_check_json(name: str, check: Any, baseline: Optional[Baseline]) -> Dict[str, Any]:
+    payload = check.to_dict()
+    if baseline is None or check.healthy:
+        return payload
+    if not check.findings:
+        payload["baseline"] = "known" if {"check": name} in baseline else "new"
+        return payload
+    payload["findings"] = [_with_baseline(dict(finding), health_finding_key(name, finding), baseline) for finding in check.findings]
+    return payload
+
+
+def render_baseline_trailer(path: str, split: Partition) -> str:
+    """The line after the report that says what the baseline changed."""
+    if not split.new:
+        return f"Baseline {path}: {len(split.known)} known finding(s), nothing new."
+    lines = [f"Baseline {path}: {len(split.known)} known finding(s) ignored, {len(split.new)} new:"]
+    lines.extend(f"  {describe_key(key)}" for key in split.new)
+    return "\n".join(lines)
+
+
+def format_result(command: str, result: Any, as_json: bool, baseline: Optional[Baseline] = None) -> str:
     """Render a command result as JSON or as text."""
     if command == "explain":
         if not as_json:
@@ -576,21 +656,27 @@ def format_result(command: str, result: Any, as_json: bool) -> str:
 
     if as_json:
         if command == "health":
-            return to_json({name: check.to_dict() for name, check in result.items()})
+            return to_json({name: _health_check_json(name, check, baseline) for name, check in result.items()})
         if command == "model":
-            return to_json([finding.to_dict() for finding in result])
+            return to_json([_with_baseline(finding.to_dict(), model_finding_key(finding), baseline) for finding in result])
         if command == "check-migration":
             return to_json([review.to_dict() for review in result])
         if command == "config":
-            return to_json([finding.to_dict() for finding in result])
+            return to_json([_with_baseline(finding.to_dict(), config_finding_key(finding), baseline) for finding in result])
         if command == "partitions":
             return to_json([candidate.to_dict() for candidate in result])
         if command == "diagnose":
             return to_json([finding.to_dict() for finding in result])
+        if command == "index-use":
+            return to_json([verdict.to_dict() for verdict in result])
         return to_json(result)
 
     if command == "activity":
         return render_activity(result)
+    if command == "locks":
+        return render_lock_tree(result)
+    if command == "index-use":
+        return render_index_use(result)
     if command == "column-stats":
         return render_column_stats(result)
     if command == "vacuum-progress":
@@ -624,16 +710,25 @@ def configure_logging(verbosity: int) -> None:
     logging.basicConfig(level=level, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s")
 
 
+def _has_database_url(explicit: Optional[str]) -> bool:
+    return bool(explicit) or any(os.environ.get(var) for var in DATABASE_URL_ENV_VARS)
+
+
 async def run(args: argparse.Namespace) -> int:
     """Run a parsed command, returning the process exit code."""
-    if getattr(args, "offline", False):
-        # The only command that can answer without a database. Reviewing a
-        # migration against a database that is not the one it will run on is
-        # worse than reviewing it against none: a table that is small in staging
-        # softens every verdict about production.
-        result = await MigrationLinter().review(read_migration(args.sql))
+    if args.command == "check-migration" and args.offline:
+        # Reviewing a migration against a database that is not the one it will
+        # run on is worse than reviewing it against none: a table that is small
+        # in staging softens every verdict about production.
+        result = await MigrationLinter().review(read_sql_or_file(args.sql))
         print(format_result(args.command, result, args.json))
         return UNHEALTHY_EXIT_CODE if args.exit_code and any(r.severity is Severity.HIGH for r in result) else 0
+
+    if args.command == "diagnose" and args.plan and (args.offline or not _has_database_url(args.database_url)):
+        # A plan can be read with no database at all. With a URL in hand the
+        # catalog is worth asking, so that path goes through the client below.
+        print(format_result(args.command, diagnose_plan(read_sql_or_file(args.sql), min_ratio=args.min_ratio), args.json))
+        return 0
 
     async with PgDebug(
         database_url=args.database_url,
@@ -644,7 +739,24 @@ async def run(args: argparse.Namespace) -> int:
     ) as pg:
         result = await args.func(pg, args)
 
-    print(format_result(args.command, result, args.json))
+    if getattr(args, "save_baseline", None):
+        saved = Baseline.of(args.command, result)
+        saved.save(args.save_baseline)
+        print(f"Saved a baseline of {len(saved)} finding(s) to {args.save_baseline}.", file=sys.stderr)
+
+    baseline: Optional[Baseline] = None
+    split: Optional[Partition] = None
+    if getattr(args, "baseline", None):
+        baseline = Baseline.load(args.baseline, args.command)
+        split = partition(args.command, result, baseline)
+
+    print(format_result(args.command, result, args.json, baseline))
+    if split is not None and not args.json:
+        print(render_baseline_trailer(args.baseline, split))
+
+    if split is not None and getattr(args, "exit_code", False):
+        # Against a baseline, only what is new can fail the build.
+        return UNHEALTHY_EXIT_CODE if split.new_failures else 0
 
     if args.command == "health" and getattr(args, "exit_code", False):
         return UNHEALTHY_EXIT_CODE if any(not check.healthy for check in result.values()) else 0

@@ -8,6 +8,7 @@ purpose, by editing the lists here.
 
 import argparse
 import importlib
+import importlib.metadata
 import re
 from pathlib import Path
 
@@ -39,6 +40,10 @@ PUBLIC_NAMES = [
     "HealthType",
     "IndexDefinition",
     "IndexRecommendation",
+    "IndexUse",
+    "IndexUseAnalyzer",
+    "IndexUseFinding",
+    "IndexUseReason",
     "InvalidArgumentError",
     "LLMOptimizerTool",
     "LockLevel",
@@ -69,6 +74,7 @@ PUBLIC_NAMES = [
     "SyncPgDebug",
     "TopQueriesCalc",
     "__version__",
+    "diagnose_plan",
     "resolve_database_url",
 ]
 
@@ -82,6 +88,8 @@ CLI_COMMANDS = [
     "execute",
     "explain",
     "health",
+    "index-use",
+    "locks",
     "model",
     "objects",
     "partitions",
@@ -126,3 +134,9 @@ def test_documented_imports_work():
         module = importlib.import_module(module_name)
         broken.extend(f"{document}: from {module_name} import {name}" for name in names if not hasattr(module, name))
     assert broken == []
+
+
+def test_version_is_the_installed_version():
+    """``__version__`` in the package is the one place the version is written;
+    the installed distribution has to carry the same number."""
+    assert pg_debug.__version__ == importlib.metadata.version("pg-debug")

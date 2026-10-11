@@ -14,6 +14,7 @@ from .checks.connection import ConnectionHealthCalc
 from .checks.constraint import ConstraintHealthCalc
 from .checks.index import IndexHealthCalc
 from .checks.replication import ReplicationCalc
+from .checks.seq_scan import SeqScanHealthCalc
 from .checks.sequence import SequenceHealthCalc
 from .checks.statistics import StatisticsHealthCalc
 from .checks.table_bloat import TableBloatCalc
@@ -33,6 +34,7 @@ class HealthType(str, Enum):
     CONSTRAINT = "constraint"
     STATISTICS = "statistics"
     TABLE = "table"
+    SCAN = "scan"
     ALL = "all"
 
     @classmethod
@@ -77,7 +79,7 @@ class DatabaseHealthTool:
             health_type: A single health type, a comma-separated string, or an
                 iterable of health types. Valid values: index, connection,
                 vacuum, sequence, replication, buffer, constraint, statistics,
-                table, all.
+                table, scan, all.
 
         Returns:
             An ordered mapping of check name to its
@@ -126,6 +128,9 @@ class DatabaseHealthTool:
 
         if HealthType.TABLE in health_types:
             results.append(await TableBloatCalc(self.sql_driver).table_bloat_check())
+
+        if HealthType.SCAN in health_types:
+            results.append(await SeqScanHealthCalc(self.sql_driver).sequential_scan_check())
 
         return {result.name: result for result in results}
 

@@ -1,46 +1,115 @@
 name: Publish
 
+# A release is a tag `vX.Y.Z` on a commit that is on main and whose
+# `__version__` is X.Y.Z. Anything else is refused before it is built.
+# `workflow_dispatch` runs the build and its checks only, as a dry run.
+
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Check the tag names the package version
+        if: github.ref_type == 'tag'
+        run: |
+          version="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/pg_debug/__init__.py)"
+          test -n "$version" || { echo "could not read __version__"; exit 1; }
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag is $GITHUB_REF_NAME but __version__ is $version" >&2
+            exit 1
+          fi
+
+      - name: Check the tagged commit is on main
+        if: github.ref_type == 'tag'
+        run: |
+          git fetch --no-tags --depth=200 origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "$GITHUB_SHA is not on main; release from main only" >&2
+            exit 1
+          fi
+
+      - name: Check the changelog has a section for this version
+        if: github.ref_type == 'tag'
+        run: grep -q "^## \[${GITHUB_REF_NAME#v}\] - " CHANGELOG.md
 
       - name: Build distributions
         run: uv build
 
       - name: Check metadata
-        run: uvx twine check dist/*
+        run: uvx twine check --strict dist/*
 
-      - name: Upload distributions
-        uses: actions/upload-artifact@v4
+      - name: Install the wheel into a clean environment and run it
+        run: |
+          uv venv /tmp/smoke
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+          /tmp/smoke/bin/pg-debug --version
+
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
 
   publish:
     needs: build
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
-    environment: pypi
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pg-debug/
     permissions:
-      # Required for PyPI trusted publishing; no API token needed.
+      # PyPI trusted publishing; no API token needed.
       id-token: write
     steps:
-      - name: Download distributions
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    needs: publish
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Extract this version's changelog section
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            /^## \[/ { printing = ($0 ~ "^## \\[" v "\\] - ") ; next }
+            printing { print }
+          ' CHANGELOG.md | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' > notes.md
+          test -s notes.md || { echo "no changelog section for $version" >&2; exit 1; }
+          cat notes.md
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "pg-debug ${GITHUB_REF_NAME#v}" \
+            --notes-file notes.md \
+            --verify-tag

@@ -1,5 +1,10 @@
 # pg_debug
 
+[![CI](https://github.com/danplischke/pg_debug/actions/workflows/ci.yml/badge.svg)](https://github.com/danplischke/pg_debug/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/pg-debug)](https://pypi.org/project/pg-debug/)
+[![Python](https://img.shields.io/pypi/pyversions/pg-debug)](https://pypi.org/project/pg-debug/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 PostgreSQL inspection, health checks and index tuning — as an async Python library with a CLI.
 
 `pg_debug` is an extraction of the analysis engine behind
@@ -12,15 +17,17 @@ without an MCP client in the loop.
 
 - **Schema introspection** — list schemas, tables, views, sequences and extensions; describe an object's columns, constraints and indexes.
 - **Explain plans** — plan or `EXPLAIN ANALYZE` a query, including plans against *hypothetical* indexes that are never created (via [HypoPG](https://github.com/HypoPG/hypopg)).
+- **Index use** — why the planner did not use an index for a query: the query restricts a different column, or the column wrapped in an expression the index is not on, an operator a btree cannot search, a cast the plan applies to the column, a partial index the query does not match, an invalid index — or nothing stops it and it judged another plan cheaper, in which case the finding carries both costs and the row estimate the choice rests on.
 - **Plan diagnosis** — read the plan rather than only print it: the node whose row estimate first diverged from what it found, and whether that is stale statistics or two correlated columns nothing has told the planner about; sorts and hashes that outgrew `work_mem`; scans reading rows in order to discard them; parallel workers asked for and not granted. Each finding is ranked by the share of the query's work behind it.
 - **Live activity** — what every backend is doing right now, what it is waiting on, and which process is blocking it.
+- **Lock tree** — who is blocking whom, as a tree rooted at the session that waits on nothing: what it is doing, what every backend beneath it waits for, and the mode the holder has.
 - **Vacuum progress** — running vacuums, their phase and how far through the heap they are.
 - **Planner statistics** — the per-column numbers behind a plan's row estimates, the extended statistics defined on a table, and which tables the planner is reasoning about with stale numbers.
 - **Configuration review** — the server's settings judged against what it is actually doing: `work_mem` against bytes spilled to temporary files, `shared_buffers` against the cache hit rate it is achieving, `max_wal_size` against how many checkpoints were forced rather than scheduled. A default that is doing no harm is left alone, and nothing here guesses at the machine's memory or storage.
 - **Migration review** — read a migration before running it and see, per statement, the lock it takes, how long it holds it, whether it rewrites the table, and a safer rewrite where one exists. Connected, it reports how big the tables actually are, which is what decides whether a rewrite is a pause or an outage.
 - **Data model review** — foreign keys with no index behind them, keys whose two sides are different types, tables with no primary key, columns ordered so alignment padding costs bytes on every row, and types that do not mean what they look like. Each finding says whether it is proven from the catalog or inferred from statistics, and carries the DDL that fixes it.
 - **Partition advice** — whether a table is worth partitioning, decided by the share of recorded query time that would still prune rather than by the table's size. It is built to say no: a 400 GB table where a third of the query time filters on a timestamp is a worse table after partitioning, and the verdict comes with the number behind it either way.
-- **Health checks** — invalid/duplicate/bloated/unused indexes, table bloat, connection utilization, transaction ID wraparound risk, autovacuum backlog and what is holding the vacuum horizon, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints, statistics freshness.
+- **Health checks** — invalid/duplicate/bloated/unused indexes, table bloat, connection utilization, transaction ID wraparound risk, autovacuum backlog and what is holding the vacuum horizon, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints, statistics freshness, tables read sequentially far more than through an index.
 - **Top queries** — the most expensive queries recorded by `pg_stat_statements`, ranked by resource blend or by execution time, cumulatively or sampled over an interval.
 - **Index tuning** — recommend indexes for your recorded workload or for a specific set of queries, with before/after planner costs, the size HypoPG measures for each candidate, and what each one will cost to keep up to date.
 - **Access modes** — run unrestricted, or in a `restricted` mode that parses each statement, rejects anything that is not read-only, and runs it in a read-only transaction with a statement timeout.
@@ -59,10 +66,16 @@ pg-debug explain --analyze "SELECT * FROM orders LIMIT 10"
 pg-debug diagnose "SELECT * FROM orders WHERE status = 'open' AND region = 'eu'"
 pg-debug diagnose ./slow.sql            # what is wrong with this plan, and why
 pg-debug --json diagnose ./slow.sql | jq '.[] | select(.severity == "high")'
+pg-debug diagnose --plan plan.json       # a plan you already have; no query is run
+pg-debug diagnose --plan - < auto_explain.json   # and no database needed
+
+pg-debug index-use "SELECT * FROM orders WHERE lower(email) = 'a@b.c'"   # why is my index not used?
+pg-debug index-use -i orders_email_idx ./query.sql
 
 pg-debug activity                       # what is running right now
 pg-debug activity --blocked              # only backends waiting on a lock
 pg-debug activity --min-duration 30      # queries running longer than 30s
+pg-debug locks                           # who is blocking whom, root blockers first
 pg-debug vacuum-progress
 
 pg-debug health
@@ -113,21 +126,51 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `describe NAME` | `-s, --schema SCHEMA` (default `public`, ignored if `NAME` is qualified), `-t, --type {table,view,sequence,extension}` |
 | `execute SQL` | — |
 | `explain SQL` | `--analyze`, `-i, --hypothetical-index SPEC` (repeatable) |
-| `diagnose SQL` | a file path, inline SQL, or `-` for stdin; `--min-ratio N` (default 10) |
+| `diagnose SQL` | a file path, inline SQL, or `-` for stdin; `--min-ratio N` (default 10); `--plan` to read `EXPLAIN (ANALYZE, FORMAT JSON)` output instead of running a query, `--offline` to not connect even with a URL set |
 | `activity` | `-a, --all` (include idle), `-m, --min-duration SECONDS`, `-b, --blocked` |
+| `locks` | — |
 | `vacuum-progress` | — |
+| `index-use SQL` | a file path, inline SQL, or `-` for stdin; `-i, --index NAME` to report one index |
 | `column-stats TABLE` | — |
-| `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--exit-code` |
-| `config` | `--exit-code` |
+| `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
+| `config` | `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
 | `partitions` | `--min-size SIZE` (default 1GB, accepts `500MB`/`2GB`), `--min-pruning-share SHARE` (default 0.5), `--limit N` (default 200) |
 | `check-migration SQL` | a file path, inline SQL, or `-` for stdin; `--offline`, `--exit-code` |
-| `model` | `-s, --schema SCHEMA`, `-r, --rule RULES` (comma-separated, default `all`), `--proven-only`, `--min-rows N` (default 1000), `--exit-code` |
+| `model` | `-s, --schema SCHEMA`, `-r, --rule RULES` (comma-separated, default `all`), `--proven-only`, `--min-rows N` (default 1000), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
 | `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10, ignored for cumulative `resources`), `-i, --interval SECONDS` |
 | `tune-workload` | `--max-index-size-mb MB` (default 10000), `--method {dta,llm}` (default `dta`) |
 | `tune-queries QUERY...` | up to 10 queries, same options as `tune-workload` |
 
 Health checks are `index`, `connection`, `vacuum`, `sequence`, `replication`,
-`buffer`, `constraint`, `statistics`, `table` and `all`.
+`buffer`, `constraint`, `statistics`, `table`, `scan` and `all`.
+
+`health`, `model` and `config` can gate a build with `--exit-code`. The
+trouble with adopting such a gate is the first run: an existing database has
+findings, some of them deliberate, and a gate that fails on all of them on day
+one is a gate that gets turned off. A baseline is the set of findings a team
+has read and accepted:
+
+```bash
+pg-debug health --save-baseline health-baseline.json     # from a run you accept
+pg-debug health --exit-code --baseline health-baseline.json   # fails only on what is new
+```
+
+A baseline records what each finding is about — the check and the object it
+names, the rule and the table, the setting — and never the numbers, so a
+bloated index is the same finding at 31% and at 34%. A finding that goes away
+simply stops being listed. The file is JSON, one finding per line in a stable
+order, meant to live in the repository next to the workflow that reads it. In
+JSON output each finding carries `"baseline": "known"` or `"new"`.
+
+`scan` reports tables read sequentially far more than through an index, from
+`pg_stat_user_tables` — no extension needed. It argues in bytes rather than
+scan counts: each table is charged the data its sequential scans read (scans
+times size, scaled down when a scan returned only part of the table, which is
+what a `LIMIT` that stopped early looks like), and reported only when that
+reading reaches 1 GB, the table is at least 10 MB, and sequential scans
+outnumber index scans. The queries behind the scans are not visible from the
+counters; `top-queries` lists them and `tune-queries` says which index serves
+them.
 
 `table` estimates how much of each table's heap holds no live rows, from
 `pg_stats` and `pg_class` — no extension needed. It builds a row the way
@@ -209,6 +252,35 @@ refuses outright rather than half-answering — its promise is that nothing
 executes. A statement that writes is run in a transaction that is rolled back,
 which undoes the rows but not a sequence it consumed or a trigger that reached
 outside the database.
+
+A plan that already exists can be read instead: `--plan` takes
+`EXPLAIN (ANALYZE, FORMAT JSON)` output — a file, stdin, or the object
+`auto_explain` logs with `auto_explain.log_format = 'json'` — and runs nothing,
+so it works in `restricted` mode and, with no database URL at all, with no
+connection. Connected, the tables the plan reads are checked for stale
+statistics and for extended statistics covering their correlated columns, which
+is why the plan should come from this database or one with the same schema and
+data. Unconnected, those two questions go unanswered and a misestimate says so,
+rather than letting the silence read as a clean bill. The text format EXPLAIN
+prints by default is not read.
+
+`index-use` answers "why is my index not used?", which has two halves that
+need different evidence. Whether the planner *can* use the index is read from
+the query's text against the index's definition and the catalog: which column
+each predicate restricts, bare or wrapped in a function or cast (`lower(email)`
+and `email` are different keys), with which operator (`<>`, `NOT IN`, a
+leading-wildcard `LIKE`, `ILIKE` and regular expressions cannot be looked up
+in a btree; `LIKE 'prefix%'` needs the C collation or `text_pattern_ops`),
+whether the index is valid, whether a partial index's `WHERE` is matched, and
+whether the plan casts the column before comparing it. Whether it *chose* to
+is read by planning the query again with sequential scans disabled: if the
+index is used then, nothing stopped it, and the finding reports both costs and
+the share of the table the planner expects the predicate to match, which is
+the number the choice turns on. If another index serves the query either way,
+that index is named: the planner cannot be made to prefer one index over
+another. Nothing is executed; the query is planned, not run. The forced plan
+needs a `SET` for the session, which `restricted` mode does not allow, and the
+verdict says it was skipped rather than guessing.
 
 `check-migration` answers a different question from the rest: not what the
 database is, but what a change will do to everyone using it while it runs. The
@@ -361,8 +433,11 @@ bad URL instead.
 | `execute_sql(sql)` | `list[dict]` — one per row, empty for statements with no result set |
 | `explain_query(sql, analyze=False, hypothetical_indexes=None)` | `ExplainPlanArtifact` |
 | `diagnose_query(sql, min_ratio=10)` | `list[PlanFinding]` — most severe first |
+| `diagnose_plan(plan, min_ratio=10)` | `list[PlanFinding]` — the same, over `EXPLAIN (ANALYZE, FORMAT JSON)` output; works in restricted mode. `pg_debug.diagnose_plan(plan)` does it with no database at all |
 | `list_activity(include_idle=False, min_duration_seconds=None, blocked_only=False)` | `list[dict]` — one per backend, with `blocked_by` |
+| `lock_tree()` | `list[dict]` — one per root blocker, waiters nested under `blocking` |
 | `vacuum_progress()` | `list[dict]` — one per running vacuum |
+| `explain_index_use(sql, index=None)` | `list[IndexUse]` — one per index on the query's tables, unused first, each with `findings` |
 | `column_stats(table)` / `extended_statistics(table)` | `list[dict]` — planner statistics |
 | `analyze_db_health(health_type="all")` | `dict[str, HealthCheckResult]` — check name to result |
 | `review_data_model(rules="all", schema=None, min_rows=1000, proven_only=False)` | `list[ModelFinding]` — most severe first |
@@ -525,14 +600,17 @@ session started in this repository.
 ## Development
 
 ```bash
-uv sync --all-extras          # install into .venv
-uv run ruff check .
-uv run pytest tests/unit      # unit tests, no database needed
-uv run pytest tests/integration   # spins up PostgreSQL containers, needs Docker
+uv sync --all-extras              # install into .venv
+uv run pre-commit install         # ruff, pyright and uv.lock checks on every commit
+uv run ruff format --check . && uv run ruff check . && uv run pyright
+uv run pytest tests/unit          # unit tests, no database needed
+uv run pytest                     # everything; spins up PostgreSQL containers, needs Docker
 ```
 
 Some tests under `tests/unit` also start containers (`test_explain_real_db.py`,
-`test_db_conn_pool.py`); see `tests/README.md`.
+`test_db_conn_pool.py`); see `tests/README.md`. [CONTRIBUTING.md](CONTRIBUTING.md)
+covers conventions, the changelog and how a release is cut; [AGENTS.md](AGENTS.md)
+is the same for coding agents.
 
 ### Package layout
 
@@ -577,4 +655,4 @@ during extraction:
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE); [NOTICE](NOTICE) records the derivation from postgres-mcp.

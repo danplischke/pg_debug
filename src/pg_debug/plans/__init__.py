@@ -1,6 +1,9 @@
 """Execution plans: running EXPLAIN, reading the plan, and planning against indexes that do not exist."""
 
 from .diagnoser import PlanDiagnoser
+from .diagnoser import PlanInput
+from .diagnoser import diagnose_plan
+from .diagnoser import parse_plan
 from .explain import ExplainPlanTool
 from .hypothetical import IndexDefinition
 from .result import DEFAULT_MIN_RATIO
@@ -19,7 +22,10 @@ __all__ = [
     "IndexDefinition",
     "PlanDiagnoser",
     "PlanFinding",
+    "PlanInput",
     "PlanIssue",
     "PlanNode",
     "RuleContext",
+    "diagnose_plan",
+    "parse_plan",
 ]

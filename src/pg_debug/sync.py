@@ -27,6 +27,7 @@ from .configuration import ConfigFinding
 from .db import DbConnPool
 from .health import HealthCheckResult
 from .health import HealthType
+from .index_use import IndexUse
 from .migration import StatementReview
 from .model import DEFAULT_MIN_ROWS
 from .model import ModelFinding
@@ -36,6 +37,7 @@ from .partition import DEFAULT_MIN_TABLE_BYTES
 from .partition import PartitionCandidate
 from .plans import DEFAULT_MIN_RATIO
 from .plans import PlanFinding
+from .plans import PlanInput
 from .plans.tree import ExplainPlanArtifact
 from .schema import ObjectType
 
@@ -185,6 +187,16 @@ class SyncPgDebug:
         """Run a query and say what is wrong with the plan it produced."""
         return self._call(self._client.diagnose_query, sql, min_ratio=min_ratio)
 
+    def diagnose_plan(self, plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
+        """Diagnose a plan that already exists, checking this database's catalog."""
+        return self._call(self._client.diagnose_plan, plan, min_ratio=min_ratio)
+
+    # -- Index use -----------------------------------------------------------
+
+    def explain_index_use(self, sql: str, index: Optional[str] = None) -> List[IndexUse]:
+        """Say whether the planner uses each index on the query's tables, and if not, why."""
+        return self._call(self._client.explain_index_use, sql, index=index)
+
     # -- Planner statistics --------------------------------------------------
 
     def column_stats(self, table: str) -> List[Dict[str, Any]]:
@@ -258,6 +270,10 @@ class SyncPgDebug:
     def vacuum_progress(self) -> List[Dict[str, Any]]:
         """Report running vacuums and how far along they are."""
         return self._call(self._client.vacuum_progress)
+
+    def lock_tree(self) -> List[Dict[str, Any]]:
+        """Report who is blocking whom, root blockers first."""
+        return self._call(self._client.lock_tree)
 
     # -- Diagnostics ---------------------------------------------------------
 

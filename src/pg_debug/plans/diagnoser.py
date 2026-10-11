@@ -14,10 +14,19 @@ whose promise is that nothing executes. For a statement that writes, the run
 happens inside a transaction that is rolled back — see
 :meth:`~pg_debug.db.SqlDriver.execute_query_and_rollback` for what that does
 and does not undo.
+
+A plan that already exists — ``auto_explain`` output, a plan a colleague
+pasted, one taken on a replica — can be read instead of produced:
+:meth:`PlanDiagnoser.diagnose_plan` and the module-level :func:`diagnose_plan`
+take ``EXPLAIN (ANALYZE, FORMAT JSON)`` output. Reading runs nothing, so it is
+allowed in restricted mode, and with no connection at all. Without one the
+catalog questions go unanswered, and the findings say so rather than passing
+the silence off as a clean bill.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 from typing import Dict
@@ -79,10 +88,111 @@ WHERE (n.nspname || '.' || c.relname) = ANY({}::text[])
 """
 
 
-class PlanDiagnoser:
-    """Runs a query, reads the plan it produced, and reports what went wrong."""
+#: What :func:`parse_plan` accepts: the JSON text EXPLAIN printed, or that
+#: text already decoded — the list EXPLAIN wraps its one plan in, or the plan
+#: object itself, which is also the shape ``auto_explain`` logs.
+PlanInput = str | bytes | Dict[str, Any] | List[Any]
 
-    def __init__(self, sql_driver: SqlDriver | SafeSqlDriver):
+
+def parse_plan(plan: PlanInput) -> PlanNode:
+    """Read ``EXPLAIN (ANALYZE, FORMAT JSON)`` output into a plan tree.
+
+    Args:
+        plan: The output as text, or already decoded. EXPLAIN wraps its plan
+            in a one-element list; ``auto_explain`` logs the object inside
+            it, alongside ``Query Text``. Both are taken.
+
+    Raises:
+        InvalidArgumentError: If it is not JSON, not the shape EXPLAIN
+            produces, or was produced without ANALYZE — a diagnosis compares
+            the planner's estimates with what the run found, so a plan that
+            was never run has nothing to compare.
+        ExplainPlanError: If the plan JSON could not be read into a tree.
+    """
+    data: Any = plan
+    if isinstance(data, (str, bytes)):
+        try:
+            data = json.loads(data)
+        except ValueError as e:
+            raise InvalidArgumentError(
+                "The plan is not JSON. Produce it with EXPLAIN (ANALYZE, FORMAT JSON), or auto_explain.log_format = 'json'; "
+                "the text format EXPLAIN prints by default is not read."
+            ) from e
+    if isinstance(data, list):
+        if len(data) != 1 or not isinstance(data[0], dict):
+            raise InvalidArgumentError(f"Expected EXPLAIN's one-element list holding the plan, got a list of {len(data)}.")
+        data = data[0]
+    if not isinstance(data, dict) or "Plan" not in data:
+        raise InvalidArgumentError("Expected EXPLAIN (FORMAT JSON) output: an object with a 'Plan' key, or the one-element list EXPLAIN wraps it in.")
+
+    try:
+        root = ExplainPlanArtifact.from_json_data(data).plan_tree
+    except Exception as e:
+        raise ExplainPlanError(f"Could not read the plan: {e}") from e
+
+    if root.actual_rows is None:
+        raise InvalidArgumentError(
+            "The plan was never run: it has the planner's estimates but no actual rows, and a diagnosis is the comparison "
+            "of the two. Produce it with EXPLAIN (ANALYZE, FORMAT JSON)."
+        )
+    return root
+
+
+def offline_context(root: PlanNode, min_ratio: float = DEFAULT_MIN_RATIO) -> RuleContext:
+    """A rule context over the plan alone, with the catalog marked unconsulted."""
+    return RuleContext(
+        parents={id(node): parent for node, parent in walk_with_parent(root)},
+        total_ms=total_self_ms(root),
+        min_ratio=min_ratio,
+        catalog=False,
+    )
+
+
+def run_rules(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
+    """Every rule over the tree, most severe finding first."""
+    findings: List[PlanFinding] = []
+    for rule in RULES:
+        findings.extend(rule(root, context))
+    return sorted(findings, key=lambda finding: finding.sort_key)
+
+
+def _check_min_ratio(min_ratio: float) -> None:
+    if min_ratio < 1:
+        raise InvalidArgumentError(f"min_ratio must be at least 1, since an estimate cannot be less than 1x out. Got {min_ratio}.")
+
+
+def diagnose_plan(plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
+    """Diagnose a plan with no database behind it.
+
+    Everything the plan itself can answer is answered: the lowest misestimate
+    and what it misled, nested loops that blew up, scans discarding rows,
+    sorts and hashes and bitmaps that outgrew ``work_mem``, workers not
+    granted. The two findings that explain an estimate — stale statistics,
+    correlated columns — need the catalog, so a misestimate here says that it
+    could not be checked rather than implying it was.
+
+    Args:
+        plan: ``EXPLAIN (ANALYZE, FORMAT JSON)`` output; see :func:`parse_plan`.
+        min_ratio: How far an estimate has to be from the truth before it is
+            reported, as a factor.
+
+    Returns:
+        Findings, most severe first. An empty list means the plan is a
+        reasonable one, as far as the plan alone can tell.
+    """
+    _check_min_ratio(min_ratio)
+    root = parse_plan(plan)
+    return run_rules(root, offline_context(root, min_ratio))
+
+
+class PlanDiagnoser:
+    """Runs a query, reads the plan it produced, and reports what went wrong.
+
+    Given no driver, it can still read plans handed to it; it just cannot run
+    anything or ask the catalog anything.
+    """
+
+    def __init__(self, sql_driver: SqlDriver | SafeSqlDriver | None = None):
         self.sql_driver = sql_driver
 
     async def diagnose(self, sql: str, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
@@ -98,25 +208,46 @@ class PlanDiagnoser:
             An empty list means the plan is a reasonable one, which is a real
             answer and the one worth trusting most.
         """
+        if self.sql_driver is None:
+            raise InvalidArgumentError("Running a statement needs a connection. diagnose_plan() reads a plan that already exists without one.")
         if isinstance(self.sql_driver, SafeSqlDriver):
             raise InvalidArgumentError(
-                "Diagnosing a plan needs EXPLAIN ANALYZE, which runs the query, and restricted mode does not run "
-                "queries. Use --access-mode unrestricted against a database where executing this statement is "
-                "acceptable — a write is rolled back, but a sequence it consumes is not given back."
+                "Diagnosing a query needs EXPLAIN ANALYZE, which runs it, and restricted mode does not run queries. "
+                "Use --access-mode unrestricted against a database where executing this statement is acceptable — a "
+                "write is rolled back, but a sequence it consumes is not given back — or hand over a plan you already "
+                "have with --plan, which runs nothing."
             )
-        if min_ratio < 1:
-            raise InvalidArgumentError(f"min_ratio must be at least 1, since an estimate cannot be less than 1x out. Got {min_ratio}.")
+        _check_min_ratio(min_ratio)
 
         read_only = self._is_read_only(sql)
         prepared = await self._substitute_bind_variables(sql)
 
         plan = await self._explain(prepared, read_only=read_only)
-        context = await self._context(plan.plan_tree, min_ratio=min_ratio)
+        return await self._diagnose_tree(plan.plan_tree, min_ratio)
 
-        findings: List[PlanFinding] = []
-        for rule in RULES:
-            findings.extend(rule(plan.plan_tree, context))
-        return sorted(findings, key=lambda finding: finding.sort_key)
+    async def diagnose_plan(self, plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
+        """Diagnose a plan that already exists, consulting the catalog where there is one.
+
+        With a driver, the tables the plan reads are checked for stale
+        statistics and for extended statistics covering their correlated
+        columns, exactly as :meth:`diagnose` does after running the query.
+        That is pure reading, so it works in restricted mode. Without a
+        driver it is :func:`diagnose_plan`.
+
+        Args:
+            plan: ``EXPLAIN (ANALYZE, FORMAT JSON)`` output; see :func:`parse_plan`.
+            min_ratio: How far an estimate has to be from the truth before it
+                is reported, as a factor.
+
+        Returns:
+            Findings, most severe first.
+        """
+        _check_min_ratio(min_ratio)
+        return await self._diagnose_tree(parse_plan(plan), min_ratio)
+
+    async def _diagnose_tree(self, root: PlanNode, min_ratio: float) -> List[PlanFinding]:
+        context = offline_context(root, min_ratio) if self.sql_driver is None else await self._context(root, min_ratio=min_ratio)
+        return run_rules(root, context)
 
     def _is_read_only(self, sql: str) -> bool:
         """Whether the statement can simply be run, or has to be undone after.
@@ -136,6 +267,13 @@ class PlanDiagnoser:
             raise InvalidArgumentError(f"Diagnose one statement at a time. This is {len(parsed)} statements.")
         return isinstance(parsed[0], _READ_ONLY_STATEMENTS)
 
+    @property
+    def _driver(self) -> SqlDriver | SafeSqlDriver:
+        """The driver, for the paths that cannot be reached without one."""
+        if self.sql_driver is None:
+            raise InvalidArgumentError("This needs a connection.")
+        return self.sql_driver
+
     async def _substitute_bind_variables(self, sql: str) -> str:
         """Replace ``$1``-style parameters with values the planner can use.
 
@@ -146,7 +284,7 @@ class PlanDiagnoser:
         """
         if "$" not in sql:
             return sql
-        return await SqlBindParams(self.sql_driver).replace_parameters(sql)
+        return await SqlBindParams(self._driver).replace_parameters(sql)
 
     async def _explain(self, sql: str, read_only: bool) -> ExplainPlanArtifact:
         """Run the statement under EXPLAIN and return the parsed plan.
@@ -159,9 +297,9 @@ class PlanDiagnoser:
 
         try:
             if read_only:
-                rows = await self.sql_driver.execute_query(query)
+                rows = await self._driver.execute_query(query)
             else:
-                rows = await self.sql_driver.execute_query_and_rollback(query)
+                rows = await self._driver.execute_query_and_rollback(query)
         except Exception as e:
             raise ExplainPlanError(f"Could not run the statement to diagnose it: {e}") from e
 
@@ -195,7 +333,7 @@ class PlanDiagnoser:
         """Which of these relations the analyze bookkeeping calls out of date."""
         if not relations:
             return {}
-        rows = await StatisticsInspector(self.sql_driver).stale_tables()
+        rows = await StatisticsInspector(self._driver).stale_tables()
         stale = {f"{row['schema']}.{row['table']}": row for row in rows}
         return {name: stale[name] for name in relations if name in stale}
 
@@ -221,17 +359,17 @@ class PlanDiagnoser:
     async def _rows(self, query: LiteralString, relations: Sequence[str]) -> List[Dict[str, Any]]:
         if not relations:
             return []
-        rows = await SafeSqlDriver.execute_param_query(self.sql_driver, query, [list(relations)])
+        rows = await SafeSqlDriver.execute_param_query(self._driver, query, [list(relations)])
         return [row.cells for row in rows] if rows else []
 
     async def _work_mem(self) -> Optional[str]:
         """The session's ``work_mem``, quoted back in any spill finding."""
         try:
-            rows = await self.sql_driver.execute_query("SELECT current_setting('work_mem') AS work_mem")
+            rows = await self._driver.execute_query("SELECT current_setting('work_mem') AS work_mem")
         except Exception as e:
             logger.debug(f"Could not read work_mem: {e}")
             return None
         return str(rows[0].cells["work_mem"]) if rows else None
 
 
-__all__ = ["COLUMNS_SQL", "EXTENDED_STATISTICS_SQL", "PlanDiagnoser"]
+__all__ = ["COLUMNS_SQL", "EXTENDED_STATISTICS_SQL", "PlanDiagnoser", "PlanInput", "diagnose_plan", "offline_context", "parse_plan", "run_rules"]

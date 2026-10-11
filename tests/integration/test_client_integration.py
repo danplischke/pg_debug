@@ -531,6 +531,150 @@ async def test_explain_with_a_hypothetical_index_on_a_qualified_table(pg):
 
 
 @pytest.mark.asyncio
+async def test_a_plan_taken_elsewhere_is_diagnosed_against_this_catalog_in_restricted_mode(pg):
+    """The plan comes from one connection; the diagnosis runs nothing and asks
+    the catalog from another, in the mode that runs nothing."""
+    await pg.execute_sql(f"CREATE TABLE {SCHEMA}.visits (id serial PRIMARY KEY, country text NOT NULL, city text NOT NULL)")
+    await pg.execute_sql(
+        f"INSERT INTO {SCHEMA}.visits (country, city) SELECT 'c' || (i % 200) % 20, 'city' || (i % 200) FROM generate_series(1, 100000) i"
+    )
+    await pg.execute_sql(f"ANALYZE {SCHEMA}.visits")
+    rows = await pg.execute_sql(
+        f"EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON) SELECT count(*) FROM {SCHEMA}.visits WHERE country = 'c0' AND city = 'city0'"
+    )
+    plan = rows[0]["QUERY PLAN"]
+
+    async with PgDebug(DATABASE_URI, access_mode=AccessMode.RESTRICTED) as restricted:
+        findings = await restricted.diagnose_plan(plan)
+
+    issues = [finding.issue.value for finding in findings]
+    assert "row_estimate" in issues, issues
+    (correlated,) = [finding for finding in findings if finding.issue.value == "correlated_columns"]
+    assert correlated.evidence["columns"] == ["country", "city"]
+    assert correlated.remediation[0].startswith("CREATE STATISTICS ") and f"ON country, city FROM {SCHEMA}.visits;" in correlated.remediation[0]
+    assert all("catalog_checked" not in finding.evidence for finding in findings)
+
+
+@pytest_asyncio.fixture
+async def indexed_users(pg):
+    """A table with the indexes the index-use scenarios need."""
+    await pg.execute_sql(
+        f"""
+        CREATE TABLE {SCHEMA}.users (
+            id bigserial PRIMARY KEY,
+            email text NOT NULL,
+            status text NOT NULL,
+            org_id integer NOT NULL
+        )
+        """
+    )
+    await pg.execute_sql(
+        f"INSERT INTO {SCHEMA}.users (email, status, org_id) "
+        f"SELECT 'user' || i || '@example.com', CASE WHEN i % 10 = 0 THEN 'open' ELSE 'closed' END, i % 100 FROM generate_series(1, 20000) i"
+    )
+    await pg.execute_sql(f"CREATE INDEX users_lower_email ON {SCHEMA}.users (lower(email))")
+    await pg.execute_sql(f"CREATE INDEX users_status ON {SCHEMA}.users (status)")
+    await pg.execute_sql(f"CREATE INDEX users_org ON {SCHEMA}.users (org_id)")
+    await pg.execute_sql(f"ANALYZE {SCHEMA}.users")
+    return f"{SCHEMA}.users"
+
+
+@pytest.mark.asyncio
+async def test_index_use_reports_the_index_the_plan_reads(pg, indexed_users):
+    verdicts = await pg.explain_index_use(f"SELECT * FROM {indexed_users} WHERE org_id = 7", index="users_org")
+
+    (verdict,) = verdicts
+    assert verdict.used is True
+    assert verdict.node_type in ("Index Scan", "Bitmap Index Scan", "Index Only Scan")
+    assert verdict.findings == []
+
+
+@pytest.mark.asyncio
+async def test_index_use_names_the_expression_the_query_does_not_use(pg, indexed_users):
+    verdicts = await pg.explain_index_use(f"SELECT * FROM {indexed_users} WHERE email = 'user1@example.com'", index="users_lower_email")
+
+    (verdict,) = verdicts
+    assert verdict.used is False
+    reasons = [f.reason.value for f in verdict.findings]
+    assert reasons == ["expression_mismatch"], reasons
+    assert "lower(email)" in verdict.findings[0].summary
+
+
+@pytest.mark.asyncio
+async def test_index_use_measures_why_an_unselective_predicate_is_scanned(pg, indexed_users):
+    """Nine rows in ten are 'closed'. The planner can use the index and does
+    not, and the finding carries both costs and the share."""
+    verdicts = await pg.explain_index_use(f"SELECT * FROM {indexed_users} WHERE status = 'closed'", index="users_status")
+
+    (verdict,) = verdicts
+    assert verdict.used is False
+    (finding,) = [f for f in verdict.findings if f.reason.value == "planner_preferred_other"]
+    assert finding.evidence["forced_cost"] > finding.evidence["chosen_cost"]
+    assert finding.evidence["share"] > 0.8
+    assert "users_status" in finding.evidence["forced_scan"]
+
+
+@pytest.mark.asyncio
+async def test_index_use_reads_a_cast_off_the_plan(pg, indexed_users):
+    verdicts = await pg.explain_index_use(f"SELECT * FROM {indexed_users} WHERE org_id = 7::numeric", index="users_org")
+
+    (verdict,) = verdicts
+    (finding,) = [f for f in verdict.findings if f.reason.value == "type_mismatch"]
+    assert finding.evidence["cast_to"] == "numeric"
+    assert finding.evidence["column_type"] == "integer"
+
+
+@pytest.mark.asyncio
+async def test_index_use_says_when_no_column_of_the_index_is_restricted(pg, indexed_users):
+    verdicts = await pg.explain_index_use(f"SELECT * FROM {indexed_users} WHERE org_id = 7", index="users_status")
+
+    (verdict,) = verdicts
+    assert [f.reason.value for f in verdict.findings] == ["no_predicate"]
+
+
+@pytest.mark.asyncio
+async def test_index_use_in_restricted_mode_skips_the_forced_plan_and_says_so(indexed_users):
+    async with PgDebug(DATABASE_URI, access_mode=AccessMode.RESTRICTED) as restricted:
+        verdicts = await restricted.explain_index_use(f"SELECT * FROM {indexed_users} WHERE status = 'closed'", index="users_status")
+
+    (verdict,) = verdicts
+    assert verdict.used is False
+    assert verdict.findings == []
+    assert verdict.notes and "restricted mode" in verdict.notes[0]
+
+
+@pytest.mark.asyncio
+async def test_index_use_leaves_the_session_setting_as_it_found_it(pg, indexed_users):
+    await pg.explain_index_use(f"SELECT * FROM {indexed_users} WHERE status = 'closed'")
+
+    rows = await pg.execute_sql("SHOW enable_seqscan")
+    assert rows[0]["enable_seqscan"] == "on"
+
+
+def test_cli_index_use_against_a_real_database(capsys, monkeypatch):
+    """cli.main() runs its own event loop, so this sets up through SyncPgDebug."""
+    monkeypatch.setenv("DATABASE_URI", DATABASE_URI or "")
+    table = "pgdebug_index_use_test"
+
+    with SyncPgDebug(DATABASE_URI) as pg:
+        pg.execute_sql(f"DROP TABLE IF EXISTS {table}")
+        pg.execute_sql(f"CREATE TABLE {table} (id serial PRIMARY KEY, status text NOT NULL)")
+        pg.execute_sql(f"INSERT INTO {table} (status) SELECT CASE WHEN i % 10 = 0 THEN 'open' ELSE 'closed' END FROM generate_series(1, 5000) i")
+        pg.execute_sql(f"ANALYZE {table}")
+        try:
+            assert cli.main(["index-use", f"SELECT * FROM {table} WHERE id = 1"]) == 0
+            out = capsys.readouterr().out
+            assert f"{table}_pkey" in out and "used by" in out
+
+            assert cli.main(["--json", "index-use", "-i", f"{table}_pkey", f"SELECT * FROM {table} WHERE status = 'open'"]) == 0
+            payload = json.loads(capsys.readouterr().out)
+            assert payload[0]["index"] == f"{table}_pkey" and payload[0]["used"] is False
+            assert payload[0]["findings"][0]["reason"] == "no_predicate"
+        finally:
+            pg.execute_sql(f"DROP TABLE IF EXISTS {table}")
+
+
+@pytest.mark.asyncio
 async def test_list_activity_sees_a_running_query(pg):
     """A second connection running a slow query shows up as active."""
     async with PgDebug(DATABASE_URI) as other:
@@ -583,6 +727,95 @@ async def test_list_activity_reports_who_is_blocking_whom(pg):
 
 
 @pytest.mark.asyncio
+async def test_lock_tree_puts_the_root_blocker_first_and_names_the_lock(pg):
+    """One session holds the table and goes idle in its transaction, two wait
+    on it. The tree has to start at the idle one, say what each waiter wants
+    and what the holder has, and count both beneath it."""
+    async with await psycopg.AsyncConnection.connect(DATABASE_URI or "") as holder:
+        await holder.execute(f"LOCK TABLE {SCHEMA}.orders IN ACCESS EXCLUSIVE MODE")
+        holder_pid = (await (await holder.execute("SELECT pg_backend_pid()")).fetchone() or [None])[0]
+
+        async def run_blocked(sql: LiteralString):
+            async with await psycopg.AsyncConnection.connect(DATABASE_URI or "", autocommit=True) as app:
+                await app.execute(sql)
+
+        reader = asyncio.create_task(run_blocked(f"SELECT count(*) FROM {SCHEMA}.orders"))
+        writer = asyncio.create_task(run_blocked(f"UPDATE {SCHEMA}.orders SET status = status WHERE id = 1"))
+        try:
+            await asyncio.sleep(0.7)
+            roots = await pg.lock_tree()
+        finally:
+            await holder.rollback()
+            await asyncio.gather(reader, writer)
+
+    (root,) = [r for r in roots if r["pid"] == holder_pid]
+    assert root["state"] == "idle in transaction"
+    assert root["waits_for"] is None
+    assert root["blocked_total"] == 2
+
+    waits = {child["query"]: child["waits_for"] for child in root["blocking"]}
+    read = next(w for q, w in waits.items() if "count(*)" in q)
+    assert read["locktype"] == "relation"
+    assert read["mode"] == "AccessShareLock"
+    assert read["relation"] == f"{SCHEMA}.orders"
+    assert read["held_modes"] == ["AccessExclusiveLock"]
+    assert read["description"] == f"AccessShareLock on {SCHEMA}.orders ({holder_pid} holds AccessExclusiveLock)"
+    write = next(w for q, w in waits.items() if "UPDATE" in q)
+    assert write["mode"] == "RowExclusiveLock"
+
+
+@pytest.mark.asyncio
+async def test_lock_tree_names_the_table_behind_a_row_lock(pg):
+    """A row lock waits on the holder's transaction id, which names no table;
+    the waiter's own tuple lock does."""
+    async with await psycopg.AsyncConnection.connect(DATABASE_URI or "") as holder:
+        await holder.execute(f"UPDATE {SCHEMA}.orders SET status = 'held' WHERE id = 2")
+        holder_pid = (await (await holder.execute("SELECT pg_backend_pid()")).fetchone() or [None])[0]
+
+        async def run_blocked():
+            async with await psycopg.AsyncConnection.connect(DATABASE_URI or "", autocommit=True) as app:
+                await app.execute(f"UPDATE {SCHEMA}.orders SET status = 'waited' WHERE id = 2")
+
+        waiter = asyncio.create_task(run_blocked())
+        try:
+            await asyncio.sleep(0.7)
+            roots = await pg.lock_tree()
+        finally:
+            await holder.rollback()
+            await waiter
+
+    (root,) = [r for r in roots if r["pid"] == holder_pid]
+    (child,) = root["blocking"]
+    waits_for = child["waits_for"]
+    assert waits_for["locktype"] == "transactionid"
+    assert waits_for["tuple_relation"] == f"{SCHEMA}.orders"
+    assert waits_for["held_modes"] == ["ExclusiveLock"]
+    assert waits_for["description"].endswith(f", to lock a row in {SCHEMA}.orders ({holder_pid} holds ExclusiveLock)")
+
+
+@pytest.mark.asyncio
+async def test_lock_tree_is_empty_when_nothing_waits(pg):
+    assert await pg.lock_tree() == []
+
+
+@pytest.mark.asyncio
+async def test_lock_tree_works_in_restricted_mode():
+    async with PgDebug(DATABASE_URI, access_mode=AccessMode.RESTRICTED) as restricted:
+        assert isinstance(await restricted.lock_tree(), list)
+
+
+def test_cli_locks_against_a_real_database(capsys, monkeypatch):
+    monkeypatch.setenv("DATABASE_URI", DATABASE_URI or "")
+
+    assert cli.main(["locks"]) == 0
+    out = capsys.readouterr().out
+    assert out.strip() == "(nothing is blocked)" or out.startswith("pid ")
+
+    assert cli.main(["--json", "locks"]) == 0
+    assert isinstance(json.loads(capsys.readouterr().out), list)
+
+
+@pytest.mark.asyncio
 async def test_list_activity_min_duration_filters(pg):
     assert await pg.list_activity(include_idle=True, min_duration_seconds=100_000) == []
 
@@ -621,6 +854,51 @@ async def test_extended_statistics_round_trip(pg):
     (stats,) = await pg.extended_statistics(f"{SCHEMA}.orders")
     assert stats["name"] == "orders_customer_status"
     assert sorted(stats["columns"]) == ["customer_id", "status"]
+
+
+@pytest.mark.asyncio
+async def test_sequential_scan_health_reports_a_table_read_whole_over_and_over(pg):
+    """Read the orders table in full a few times and never through an index.
+    With the size and byte thresholds lowered to the test's scale, it has to
+    come back with the counters behind the verdict."""
+    from pg_debug.health.checks.seq_scan import SeqScanHealthCalc
+
+    await pg.execute_sql(f"SELECT pg_stat_reset_single_table_counters('{SCHEMA}.orders'::regclass)")
+    for _ in range(5):
+        await pg.execute_sql(f"SELECT count(*) FROM {SCHEMA}.orders WHERE total >= 0")
+
+    calc = SeqScanHealthCalc(await pg.sql_driver(), min_table_bytes=0, min_bytes_read=0)
+
+    def reported(check):
+        return next((f for f in check.findings if f["table"] == "orders" and f["seq_scans"] >= 5), None)
+
+    check = await calc.sequential_scan_check()
+    finding = reported(check)
+    for _ in range(20):
+        if finding:
+            break
+        # Backends flush their table counters shortly after each transaction;
+        # give the collector a moment rather than asserting on the first read.
+        await asyncio.sleep(0.25)
+        check = await calc.sequential_scan_check()
+        finding = reported(check)
+
+    assert finding, "the five full scans of orders should be reported"
+    assert finding["index_scans"] == 0
+    assert finding["seq_share"] == 1.0
+    # n_live_tup is the planner's count, not an exact one, and a stray scan
+    # from the fixture can land in the window; the shape is what matters.
+    assert finding["scanned_fraction"] >= 0.8
+    assert finding["estimated_bytes_read"] >= 4 * finding["size_bytes"]
+    assert check.metrics["min_table_bytes"] == 0
+
+
+@pytest.mark.asyncio
+async def test_sequential_scan_health_runs_with_the_default_thresholds(pg):
+    check = (await pg.analyze_db_health("scan"))["Sequential scan health"]
+
+    assert check.metrics["min_bytes_read"] == 1024**3
+    assert all(f["size_bytes"] >= check.metrics["min_table_bytes"] for f in check.findings)
 
 
 @pytest.mark.asyncio
