@@ -1,4 +1,5 @@
 import asyncio
+import sys
 import threading
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -110,6 +111,17 @@ def test_the_pool_survives_across_calls(pg):
         pg.list_schemas()
 
     assert loops[0] is loops[1]
+
+
+def test_windows_gets_a_loop_psycopg_can_connect_on(pool, monkeypatch):
+    """psycopg's async connections refuse the proactor loop Windows makes by default."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(asyncio, "new_event_loop", lambda: pytest.fail("the default loop on Windows is the proactor"))
+    pg = SyncPgDebug(pool=pool)
+    try:
+        assert isinstance(pg._loop._loop, asyncio.SelectorEventLoop)
+    finally:
+        pg.close()
 
 
 def test_close_shuts_the_loop_down(pool):
