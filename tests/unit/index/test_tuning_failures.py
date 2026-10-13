@@ -18,6 +18,7 @@ from pg_debug.errors import InvalidArgumentError
 from pg_debug.errors import QueryError
 from pg_debug.index.base import HIDDEN_QUERY_TEXT
 from pg_debug.index.dta import DatabaseTuningAdvisor
+from pg_debug.index.llm import LLMOptimizerTool
 from pg_debug.index.presentation import TextPresentation
 
 
@@ -128,3 +129,29 @@ async def test_presentation_lets_a_tuning_failure_through():
 
     with hypopg(installed=True), pytest.raises(IndexTuningError, match="Statistics are not up-to-date"):
         await presentation.analyze_queries(["SELECT * FROM orders WHERE id = 1"])
+
+
+@pytest.mark.asyncio
+async def test_queries_from_a_file_that_cannot_be_read_are_an_argument_error(tmp_path):
+    advisor = DatabaseTuningAdvisor(answering(ANALYZED))
+
+    with hypopg(installed=True), pytest.raises(InvalidArgumentError, match=r"Error loading queries from file .*missing\.sql"):
+        await advisor.analyze_workload(sql_file=str(tmp_path / "missing.sql"))
+
+
+@pytest.mark.asyncio
+async def test_a_failure_inside_the_search_names_its_cause():
+    """'Error evaluating configuration' on its own gave the reader nothing to act on."""
+    advisor = DatabaseTuningAdvisor(answering(ANALYZED))
+    advisor.get_explain_plan_with_indexes = AsyncMock(side_effect=QueryError('relation "orders" does not exist'))
+
+    with pytest.raises(IndexTuningError, match=r'^Error evaluating configuration: .*relation "orders" does not exist$'):
+        await advisor._evaluate_configuration_cost([("SELECT * FROM orders", MagicMock(), 1.0)], frozenset())
+
+
+@pytest.mark.asyncio
+async def test_the_llm_method_refuses_a_workload_of_more_than_one_query():
+    tool = LLMOptimizerTool(answering(ANALYZED))
+
+    with pytest.raises(IndexTuningError, match="one query at a time, and the workload has 2"):
+        await tool._generate_recommendations([("SELECT 1", MagicMock(), 1.0), ("SELECT 2", MagicMock(), 1.0)])

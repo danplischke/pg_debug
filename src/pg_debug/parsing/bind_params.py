@@ -9,6 +9,7 @@ from pglast.ast import SelectStmt
 
 from ..db.driver import SqlDriver
 from ..db.restricted import SafeSqlDriver
+from ..errors import InvalidArgumentError
 from .visitors import ColumnCollector
 from .visitors import TableAliasVisitor
 
@@ -148,7 +149,7 @@ class SqlBindParams:
 
             return modified_query
         except Exception as e:
-            raise ValueError("Error replacing parameters") from e
+            raise InvalidArgumentError(f"Error replacing parameters: {e}") from e
 
     def _get_bound_values(self, stats: dict[str, Any], is_lower: bool = True) -> Any:
         """Get appropriate bound values for range queries based on column statistics.

@@ -15,6 +15,7 @@ from pglast.ast import SelectStmt
 from ..db import SafeSqlDriver
 from ..db import SqlDriver
 from ..db import split_table_reference
+from ..errors import IndexTuningError
 from ..parsing import ColumnCollector
 from ..parsing import TableAliasVisitor
 from ..parsing import resolve_table_reference
@@ -426,7 +427,7 @@ class DatabaseTuningAdvisor(IndexTuningBase):
                     condition_columns[table].update(cols)
 
             except Exception as e:
-                raise ValueError("Error extracting condition columns from query") from e
+                raise IndexTuningError(f"Error extracting condition columns from query: {e}") from e
 
         # Filter candidates - keep only those where all columns are in condition_columns
         filtered_candidates = []
@@ -623,11 +624,11 @@ class DatabaseTuningAdvisor(IndexTuningBase):
                     if existing_info and self._is_same_index(candidate_info, existing_info):
                         return True
                 except Exception as e:
-                    raise ValueError("Error parsing existing index") from e
+                    raise IndexTuningError(f"Error parsing existing index: {e}") from e
 
             return False
         except Exception as e:
-            raise ValueError("Error in robust index comparison") from e
+            raise IndexTuningError(f"Error in robust index comparison: {e}") from e
 
     def _extract_index_info(self, node) -> dict[str, Any] | None:
         """Extract key information from a parsed index node."""
@@ -674,7 +675,7 @@ class DatabaseTuningAdvisor(IndexTuningBase):
             }
         except Exception as e:
             self.dta_trace(f"Error extracting index info: {e}")
-            raise ValueError("Error extracting index info") from e
+            raise IndexTuningError(f"Error extracting index info: {e}") from e
 
     def _ast_expr_to_string(self, expr) -> str:
         """Convert an AST expression (like FuncCall) to a proper string representation.
@@ -720,7 +721,7 @@ class DatabaseTuningAdvisor(IndexTuningBase):
             # Fallback for other expression types
             return str(expr)
         except Exception as e:
-            raise ValueError("Error converting expression to string") from e
+            raise IndexTuningError(f"Error converting expression to string: {e}") from e
 
     def _is_same_index(self, index1: dict[str, Any], index2: dict[str, Any]) -> bool:
         """Check if two indexes are functionally equivalent."""
