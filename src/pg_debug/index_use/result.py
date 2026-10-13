@@ -16,7 +16,7 @@ from dataclasses import field
 from enum import Enum
 from typing import Any
 
-from ..model.result import Confidence
+from ..severity import Confidence
 
 
 class IndexUseReason(str, Enum):

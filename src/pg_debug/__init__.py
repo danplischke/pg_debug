@@ -55,11 +55,9 @@ from .index_use import IndexUseReason
 from .migration import LockLevel
 from .migration import MigrationLinter
 from .migration import StatementReview
-from .model import Confidence
 from .model import ModelFinding
 from .model import ModelReviewer
 from .model import RuleId
-from .model import Severity
 from .partition import PartitionAdvisor
 from .partition import PartitionCandidate
 from .partition import Strategy
@@ -73,6 +71,8 @@ from .plans.tree import ExplainPlanArtifact
 from .plans.tree import PlanNode
 from .schema import ObjectType
 from .schema import SchemaInspector
+from .severity import Confidence
+from .severity import Severity
 from .statistics import StatisticsInspector
 from .sync import SyncPgDebug
 from .top_queries import TopQueriesCalc

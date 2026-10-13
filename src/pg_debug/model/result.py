@@ -19,22 +19,13 @@ from typing import Any
 
 from ..errors import InvalidArgumentError
 from ..severity import SEVERITY_ORDER
+from ..severity import Confidence
 from ..severity import Severity
 
 #: Ignore tables smaller than this when a rule reasons from sampled statistics.
 #: Below it a sample is most of the table, and "no NULLs in 200 rows" says
 #: nothing about the column.
 DEFAULT_MIN_ROWS = 1000
-
-
-class Confidence(str, Enum):
-    """Whether a finding is a fact or an inference."""
-
-    #: Read straight from the catalog. It cannot be wrong.
-    PROVEN = "proven"
-    #: Inferred from sampled planner statistics. Confirm before acting; every
-    #: candidate carries a ``verify`` query that does exactly that.
-    CANDIDATE = "candidate"
 
 
 class RuleId(str, Enum):

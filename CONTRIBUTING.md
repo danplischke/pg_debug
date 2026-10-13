@@ -62,9 +62,11 @@ together. `src/pg_debug/queries/` is for a statement more than one module runs,
 such as the tuple layout the data model review and the bloat check share.
 
 **Argue from what the server records.** A finding is backed by a counter,
-catalog row or plan node, says which, and says whether it is proven or
-inferred. Nothing guesses at hardware. A tool that cannot tell says so rather
-than inventing a number.
+catalog row or plan node and carries it as evidence. A kind of finding that
+can be either read or inferred carries a `Confidence`, `proven` or
+`candidate`, as the data model review and the index-use analysis do. Nothing
+guesses at hardware. A tool that cannot tell says so rather than inventing a
+number.
 
 **Every statement pg_debug runs is marked.** `SqlDriver` prefixes
 `/* pg_debug */` so `top-queries` and the index advisor can leave the tool's

@@ -46,9 +46,14 @@ above need nothing else.
 ## Rules the code follows
 
 - **Every finding is argued from something the server recorded**: a counter, a
-  catalog row, a plan node. It names its source and says whether it is proven
-  or inferred. Nothing guesses at RAM or disk type. When the tool cannot tell,
-  it says so instead of inventing a number.
+  catalog row, a plan node. It carries that evidence, so a reader can check
+  the argument. A kind of finding that can be either read or inferred carries
+  a `Confidence` from `severity.py`: `proven` when read from the catalog or the
+  plan, `candidate` when inferred from sampled statistics or from a query's
+  text, with a way to confirm it where there is one. The data model review and
+  the index-use analysis do; a new kind of finding that infers does too.
+  Nothing guesses at RAM or disk type. When the tool cannot tell, it says so
+  instead of inventing a number.
 - **Built to say no.** Advisors report what they examined and refused, with
   the figure the refusal rests on, rather than staying silent.
 - **Every statement the tool runs is marked** `/* pg_debug */` by `SqlDriver`,

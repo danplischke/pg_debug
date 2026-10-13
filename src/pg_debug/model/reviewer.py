@@ -9,11 +9,11 @@ from collections.abc import Iterable
 
 from ..db import SafeSqlDriver
 from ..db import SqlDriver
+from ..severity import Confidence
 from . import columns
 from . import keys
 from . import layout
 from .result import DEFAULT_MIN_ROWS
-from .result import Confidence
 from .result import ModelFinding
 from .result import ReviewOptions
 from .result import RuleId

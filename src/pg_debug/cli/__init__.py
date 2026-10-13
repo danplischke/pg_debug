@@ -35,12 +35,12 @@ from ..index.llm_settings import DEFAULT_LLM_MODEL
 from ..migration import MigrationLinter
 from ..model import DEFAULT_MIN_ROWS
 from ..model import RuleId
-from ..model import Severity
 from ..partition import DEFAULT_MIN_PRUNING_SHARE
 from ..partition import DEFAULT_MIN_TABLE_BYTES
 from ..plans import DEFAULT_MIN_RATIO
 from ..plans import diagnose_plan
 from ..schema import ObjectType
+from ..severity import Severity
 from .render import render_activity
 from .render import render_column_stats
 from .render import render_configuration_review

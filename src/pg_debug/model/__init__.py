@@ -7,12 +7,12 @@ catalog for what can be proven and the planner's statistics for what can only
 be suggested, and it says which of the two each finding is.
 """
 
+from ..severity import Confidence
+from ..severity import Severity
 from .result import DEFAULT_MIN_ROWS
-from .result import Confidence
 from .result import ModelFinding
 from .result import ReviewOptions
 from .result import RuleId
-from .result import Severity
 from .reviewer import RULES
 from .reviewer import ModelReviewer
 
