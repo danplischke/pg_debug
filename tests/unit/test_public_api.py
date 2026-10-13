@@ -31,7 +31,6 @@ PUBLIC_NAMES = [
     "DatabaseHealthTool",
     "DatabaseTuningAdvisor",
     "DbConnPool",
-    "ErrorResult",
     "ExplainPlanArtifact",
     "ExplainPlanError",
     "ExplainPlanTool",

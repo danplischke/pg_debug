@@ -4,8 +4,8 @@ import logging
 import pytest
 
 from pg_debug.db import SqlDriver
+from pg_debug.errors import ExplainPlanError
 from pg_debug.plans import ExplainPlanTool
-from pg_debug.plans.tree import ErrorResult
 from pg_debug.plans.tree import ExplainPlanArtifact
 
 logger = logging.getLogger(__name__)
@@ -255,11 +255,11 @@ async def test_explain_invalid_query_with_real_db(local_sql_driver):
 
         # Test invalid query
         query = "SELECT * FROM nonexistent_table"
-        result = await tool.explain(query)
+        with pytest.raises(ExplainPlanError) as excinfo:
+            await tool.explain(query)
 
         # Verify error handling
-        assert isinstance(result, ErrorResult)
-        error_msg = result.value.lower()
+        error_msg = str(excinfo.value).lower()
         assert "relation" in error_msg and "not exist" in error_msg
     finally:
         await cleanup_test_tables(local_sql_driver)

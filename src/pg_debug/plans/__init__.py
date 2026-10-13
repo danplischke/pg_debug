@@ -10,13 +10,11 @@ from .result import DEFAULT_MIN_RATIO
 from .result import PlanFinding
 from .result import PlanIssue
 from .rules import RuleContext
-from .tree import ErrorResult
 from .tree import ExplainPlanArtifact
 from .tree import PlanNode
 
 __all__ = [
     "DEFAULT_MIN_RATIO",
-    "ErrorResult",
     "ExplainPlanArtifact",
     "ExplainPlanTool",
     "IndexDefinition",

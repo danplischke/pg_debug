@@ -5,8 +5,9 @@ from unittest.mock import MagicMock
 import pytest
 import pytest_asyncio
 
+from pg_debug.errors import ExplainPlanError
+from pg_debug.errors import InvalidArgumentError
 from pg_debug.plans import ExplainPlanTool
-from pg_debug.plans.tree import ErrorResult
 from pg_debug.plans.tree import ExplainPlanArtifact
 
 
@@ -176,8 +177,6 @@ async def test_explain_with_bind_variables_pg15(mock_sql_driver, monkeypatch):
     result = await tool.explain("SELECT * FROM users WHERE id = $1")
 
     # We now expect a successful result with parameter replacement
-    if isinstance(result, ErrorResult):
-        print(f"Got error: {result.value}")
     assert isinstance(result, ExplainPlanArtifact)
 
     # Verify that the version check was called
@@ -243,8 +242,6 @@ async def test_explain_analyze_with_bind_variables(mock_sql_driver, monkeypatch)
     result = await tool.explain_analyze("SELECT * FROM users WHERE id = $1")
 
     # Should return successful result with replaced parameters
-    if isinstance(result, ErrorResult):
-        print(f"Got error: {result.value}")
     assert isinstance(result, ExplainPlanArtifact)
 
     # Verify that the query was executed with ANALYZE but not GENERIC_PLAN
@@ -296,11 +293,8 @@ async def test_explain_with_error(mock_sql_driver):
     mock_sql_driver.execute_query.side_effect = Exception("Database error")
 
     tool = ExplainPlanTool(sql_driver=mock_sql_driver)
-    result = await tool.explain("SELECT * FROM users")
-
-    # Verify error handling
-    assert isinstance(result, ErrorResult)
-    assert "Database error" in result.value
+    with pytest.raises(ExplainPlanError, match="Database error"):
+        await tool.explain("SELECT * FROM users")
 
 
 @pytest.mark.asyncio
@@ -312,11 +306,8 @@ async def test_explain_with_invalid_response(mock_sql_driver):
     ]
 
     tool = ExplainPlanTool(sql_driver=mock_sql_driver)
-    result = await tool.explain("SELECT * FROM users")
-
-    # Verify error handling
-    assert isinstance(result, ErrorResult)
-    assert "Expected list" in result.value
+    with pytest.raises(ExplainPlanError, match="Expected list"):
+        await tool.explain("SELECT * FROM users")
 
 
 @pytest.mark.asyncio
@@ -326,11 +317,8 @@ async def test_explain_with_empty_result(mock_sql_driver):
     mock_sql_driver.execute_query.return_value = None
 
     tool = ExplainPlanTool(sql_driver=mock_sql_driver)
-    result = await tool.explain("SELECT * FROM users")
-
-    # Verify error handling
-    assert isinstance(result, ErrorResult)
-    assert "No results" in result.value
+    with pytest.raises(ExplainPlanError, match="No results"):
+        await tool.explain("SELECT * FROM users")
 
 
 @pytest.mark.asyncio
@@ -340,11 +328,8 @@ async def test_explain_with_empty_plan_data(mock_sql_driver):
     mock_sql_driver.execute_query.return_value = [MockCell({"QUERY PLAN": []})]
 
     tool = ExplainPlanTool(sql_driver=mock_sql_driver)
-    result = await tool.explain("SELECT * FROM users")
-
-    # Verify error handling
-    assert isinstance(result, ErrorResult)
-    assert "No results" in result.value
+    with pytest.raises(ExplainPlanError, match="No results"):
+        await tool.explain("SELECT * FROM users")
 
 
 @pytest.mark.asyncio
@@ -391,8 +376,6 @@ async def test_explain_with_like_and_bind_variables_pg16(mock_sql_driver, monkey
     result = await tool.explain("SELECT * FROM users WHERE name LIKE $1")
 
     # We expect a successful result with parameter replacement despite PostgreSQL 16
-    if isinstance(result, ErrorResult):
-        print(f"Got error: {result.value}")
     assert isinstance(result, ExplainPlanArtifact)
 
     # Verify that the version check was called
@@ -457,7 +440,6 @@ async def test_explain_with_functional_hypothetical_indexes(mock_sql_driver):
     result = await tool.explain_with_hypothetical_indexes(sql_query, hypothetical_indexes)
 
     # Verify the result is successful
-    assert not isinstance(result, ErrorResult), f"Got error: {result.value if isinstance(result, ErrorResult) else ''}"
     assert isinstance(result, ExplainPlanArtifact)
 
     # Check that explain query was called correctly
@@ -475,3 +457,21 @@ async def test_explain_with_functional_hypothetical_indexes(mock_sql_driver):
     assert "LOWER(primary_title)" in explain_call
     assert "LOWER(original_title)" in explain_call
     assert "start_year DESC" in explain_call
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("indexes", "reason"),
+    [
+        ({"table": "users", "columns": ["id"]}, "Expected list of index definitions"),
+        (["users(id)"], "Expected dictionary for index definition"),
+        ([{"columns": ["id"]}], "Missing 'table'"),
+        ([{"table": "users"}], "Missing 'columns'"),
+    ],
+)
+async def test_a_malformed_hypothetical_index_is_an_argument_error(mock_sql_driver, indexes, reason):
+    tool = ExplainPlanTool(sql_driver=mock_sql_driver)
+
+    with pytest.raises(InvalidArgumentError, match=reason):
+        await tool.explain_with_hypothetical_indexes("SELECT * FROM users WHERE id = 1", indexes)
+    mock_sql_driver.execute_query.assert_not_awaited()

@@ -9,9 +9,10 @@ from typing import Any
 
 from ..db import SafeSqlDriver
 from ..db import check_postgres_version_requirement
+from ..errors import ExplainPlanError
+from ..errors import InvalidArgumentError
 from ..parsing import SqlBindParams
 from .hypothetical import IndexDefinition
-from .tree import ErrorResult
 from .tree import ExplainPlanArtifact
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,7 @@ class ExplainPlanTool:
 
         return sql_query, use_generic_plan
 
-    async def explain(self, sql_query: str, do_analyze: bool = False) -> ExplainPlanArtifact | ErrorResult:
+    async def explain(self, sql_query: str, do_analyze: bool = False) -> ExplainPlanArtifact:
         """
         Generate an EXPLAIN plan for a SQL query.
 
@@ -63,12 +64,16 @@ class ExplainPlanTool:
             sql_query: The SQL query to explain
 
         Returns:
-            ExplainPlanArtifact or ErrorResult
+            The plan.
+
+        Raises:
+            ExplainPlanError: If PostgreSQL could not plan the query, or its
+                plan could not be read.
         """
         modified_sql_query, use_generic_plan = await self.replace_query_parameters_if_needed(sql_query)
         return await self._run_explain_query(modified_sql_query, analyze=do_analyze, generic_plan=use_generic_plan)
 
-    async def explain_analyze(self, sql_query: str) -> ExplainPlanArtifact | ErrorResult:
+    async def explain_analyze(self, sql_query: str) -> ExplainPlanArtifact:
         """
         Generate an EXPLAIN ANALYZE plan for a SQL query.
 
@@ -76,13 +81,14 @@ class ExplainPlanTool:
             sql_query: The SQL query to explain and analyze
 
         Returns:
-            ExplainPlanArtifact or ErrorResult
+            The plan, with what the run measured.
+
+        Raises:
+            ExplainPlanError: If PostgreSQL could not run or plan the query.
         """
         return await self.explain(sql_query, do_analyze=True)
 
-    async def explain_with_hypothetical_indexes(
-        self, sql_query: str, hypothetical_indexes: list[dict[str, Any]]
-    ) -> ExplainPlanArtifact | ErrorResult:
+    async def explain_with_hypothetical_indexes(self, sql_query: str, hypothetical_indexes: list[dict[str, Any]]) -> ExplainPlanArtifact:
         """
         Generate an explain plan for a query as if certain indexes existed.
 
@@ -91,26 +97,30 @@ class ExplainPlanTool:
             hypothetical_indexes: List of index definitions as dictionaries
 
         Returns:
-            ExplainPlanArtifact or ErrorResult
+            The plan with the indexes in place.
+
+        Raises:
+            InvalidArgumentError: If an index definition is malformed.
+            ExplainPlanError: If no plan could be produced with the indexes.
         """
         try:
             # Validate index definitions format
             if not isinstance(hypothetical_indexes, list):
-                return ErrorResult(f"Expected list of index definitions, got {type(hypothetical_indexes)}")
+                raise InvalidArgumentError(f"Expected list of index definitions, got {type(hypothetical_indexes)}")
 
             for idx in hypothetical_indexes:
                 if not isinstance(idx, dict):
-                    return ErrorResult(f"Expected dictionary for index definition, got {type(idx)}")
+                    raise InvalidArgumentError(f"Expected dictionary for index definition, got {type(idx)}")
                 if "table" not in idx:
-                    return ErrorResult("Missing 'table' in index definition")
+                    raise InvalidArgumentError("Missing 'table' in index definition")
                 if "columns" not in idx:
-                    return ErrorResult("Missing 'columns' in index definition")
+                    raise InvalidArgumentError("Missing 'columns' in index definition")
                 if not isinstance(idx["columns"], list):
                     # Try to convert to list if it's not already
                     try:
                         idx["columns"] = list(idx["columns"]) if hasattr(idx["columns"], "__iter__") else [idx["columns"]]
                     except Exception as e:
-                        return ErrorResult(f"Expected list for 'columns', got {type(idx['columns'])}: {e}")
+                        raise InvalidArgumentError(f"Expected list for 'columns', got {type(idx['columns'])}: {e}") from e
 
             # Convert the index definitions to IndexConfig objects
             indexes = frozenset(
@@ -130,17 +140,19 @@ class ExplainPlanTool:
 
             # Check if we got a valid plan
             if not plan_data or not isinstance(plan_data, dict) or "Plan" not in plan_data:
-                return ErrorResult("Failed to generate a valid explain plan with the hypothetical indexes")
+                raise ExplainPlanError("Failed to generate a valid explain plan with the hypothetical indexes")
 
             try:
                 # Convert the plan data to an ExplainPlanArtifact
                 return ExplainPlanArtifact.from_json_data(plan_data)
             except Exception as e:
-                return ErrorResult(f"Error converting explain plan: {e}")
+                raise ExplainPlanError(f"Error converting explain plan: {e}") from e
 
+        except (InvalidArgumentError, ExplainPlanError):
+            raise
         except Exception as e:
             logger.error("Error in explain_with_hypothetical_indexes: %s", e, exc_info=True)
-            return ErrorResult(f"Error generating explain plan with hypothetical indexes: {e}")
+            raise ExplainPlanError(f"Error generating explain plan with hypothetical indexes: {e}") from e
 
     def _has_bind_variables(self, query: str) -> bool:
         """Check if a query contains bind variables ($1, $2, etc)."""
@@ -150,7 +162,7 @@ class ExplainPlanTool:
         """Check if a query contains LIKE expressions, which don't work with GENERIC_PLAN."""
         return bool(re.search(r"\bLIKE\b", query, re.IGNORECASE))
 
-    async def _run_explain_query(self, query: str, analyze: bool = False, generic_plan: bool = False) -> ExplainPlanArtifact | ErrorResult:
+    async def _run_explain_query(self, query: str, analyze: bool = False, generic_plan: bool = False) -> ExplainPlanArtifact:
         try:
             explain_options = ["FORMAT JSON"]
             if analyze:
@@ -162,25 +174,27 @@ class ExplainPlanTool:
             logger.debug("RUNNING EXPLAIN QUERY: %s", explain_q)
             rows = await self.sql_driver.execute_query(explain_q)  # type: ignore
             if rows is None:
-                return ErrorResult("No results returned from EXPLAIN")
+                raise ExplainPlanError("No results returned from EXPLAIN")
 
             query_plan_data = rows[0].cells["QUERY PLAN"]
 
             if not isinstance(query_plan_data, list):
-                return ErrorResult(f"Expected list from EXPLAIN, got {type(query_plan_data)}")
+                raise ExplainPlanError(f"Expected list from EXPLAIN, got {type(query_plan_data)}")
             if len(query_plan_data) == 0:
-                return ErrorResult("No results returned from EXPLAIN")
+                raise ExplainPlanError("No results returned from EXPLAIN")
 
             plan_dict = query_plan_data[0]
             if not isinstance(plan_dict, dict):
-                return ErrorResult(f"Expected dict in EXPLAIN result list, got {type(plan_dict)} with value {plan_dict}")
+                raise ExplainPlanError(f"Expected dict in EXPLAIN result list, got {type(plan_dict)} with value {plan_dict}")
 
             try:
                 return ExplainPlanArtifact.from_json_data(plan_dict)
             except Exception as e:
-                return ErrorResult(f"Internal error converting explain plan - do not retry: {e}")
+                raise ExplainPlanError(f"Internal error converting explain plan - do not retry: {e}") from e
+        except ExplainPlanError:
+            raise
         except Exception as e:
-            return ErrorResult(f"Error executing explain plan: {e}")
+            raise ExplainPlanError(f"Error executing explain plan: {e}") from e
 
     async def generate_explain_plan_with_hypothetical_indexes(
         self,

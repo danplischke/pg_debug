@@ -33,7 +33,6 @@ from ..model.result import Confidence
 from ..plans.explain import ExplainPlanTool
 from ..plans.metrics import conditions
 from ..plans.metrics import walk
-from ..plans.tree import ErrorResult
 from ..plans.tree import ExplainPlanArtifact
 from ..plans.tree import PlanNode
 from ..statistics import StatisticsInspector
@@ -174,10 +173,10 @@ class IndexUseAnalyzer:
         return [row.cells for row in rows] if rows else []
 
     async def _plan(self, driver: SqlDriver | SafeSqlDriver, sql: str) -> ExplainPlanArtifact:
-        result = await ExplainPlanTool(cast(SqlDriver, driver)).explain(sql)
-        if isinstance(result, ErrorResult):
-            raise ExplainPlanError(f"Could not plan the query: {result.value}")
-        return result
+        try:
+            return await ExplainPlanTool(cast(SqlDriver, driver)).explain(sql)
+        except ExplainPlanError as e:
+            raise ExplainPlanError(f"Could not plan the query: {e}") from e
 
     async def _forced_plan(self, sql: str) -> tuple[ExplainPlanArtifact | None, str | None]:
         """The plan with sequential scans disabled, or why there is none."""

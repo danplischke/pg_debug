@@ -95,6 +95,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   1, where it printed `Index tuning failed: ...`, or an `error` object under
   `--json`, on standard output.
 
+- `ExplainPlanTool.explain()`, `explain_analyze()` and
+  `explain_with_hypothetical_indexes()` raise `ExplainPlanError` instead of
+  returning an `ErrorResult`, and `ErrorResult` is no longer exported from
+  `pg_debug` or `pg_debug.plans`. A return value that was either a plan or an
+  error had to be checked with `isinstance` after every call, and a caller who
+  did not check met an `AttributeError` somewhere else. A malformed
+  hypothetical index definition, one that is not a dict or lacks `table` or
+  `columns`, is an `InvalidArgumentError`, from `PgDebug.explain_query()` as
+  well, where it was an `ExplainPlanError`.
+
 ### Fixed
 
 - Restricted mode refused a statement with a bare `ValueError` reading
