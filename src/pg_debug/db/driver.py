@@ -10,6 +10,7 @@ from typing import LiteralString
 from urllib.parse import urlparse
 from urllib.parse import urlunparse
 
+import psycopg
 from psycopg.rows import dict_row
 from psycopg.sql import SQL
 from psycopg.sql import Composed
@@ -20,6 +21,7 @@ from psycopg_pool import AsyncConnectionPool
 from ..errors import ConnectionFailedError
 from ..errors import InvalidArgumentError
 from ..errors import NotConnectedError
+from ..errors import QueryError
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +96,15 @@ def obfuscate_password(text: str | None) -> str | None:
     text = re.sub(dsn_double_quote, r"\1****\3", text)
 
     return text
+
+
+def _rejected(error: psycopg.Error) -> QueryError:
+    """PostgreSQL's refusal of a statement, as the error pg_debug raises.
+
+    The psycopg exception stays attached as ``__cause__``, with its SQLSTATE
+    and diagnostics, for a caller that needs more than the message.
+    """
+    return QueryError(str(error))
 
 
 def build_session_setup(
@@ -302,12 +313,15 @@ class SqlDriver:
             return
 
         pool = await self.conn.pool_connect()
-        async with pool.connection() as connection:
-            self._pinned_connection = connection
-            try:
-                yield self
-            finally:
-                self._pinned_connection = None
+        try:
+            async with pool.connection() as connection:
+                self._pinned_connection = connection
+                try:
+                    yield self
+                finally:
+                    self._pinned_connection = None
+        except psycopg.Error as e:
+            raise _rejected(e) from e
 
     async def execute_query(
         self,
@@ -324,7 +338,12 @@ class SqlDriver:
             force_readonly: Whether to enforce read-only mode
 
         Returns:
-            List of RowResult objects or None on error
+            The rows of the last statement, or None when it returns none
+            (DDL, for example).
+
+        Raises:
+            QueryError: If PostgreSQL rejected the statement or it failed to
+                run. The psycopg exception is its ``__cause__``.
         """
         try:
             if self.conn is None:
@@ -368,7 +387,9 @@ class SqlDriver:
             elif self.conn and not self.is_pool:
                 self.conn = None
 
-            raise e
+            if isinstance(e, psycopg.Error):
+                raise _rejected(e) from e
+            raise
 
     @staticmethod
     def tagged(query: LiteralString) -> LiteralString:
@@ -464,13 +485,16 @@ class SqlDriver:
 
         query = self.tagged(query)
 
-        if self._pinned_connection is not None:
-            return await self._execute_rolled_back(self._pinned_connection, query, params)
-        if self.is_pool:
-            pool = await self.conn.pool_connect()
-            async with pool.connection() as connection:
-                return await self._execute_rolled_back(connection, query, params)
-        return await self._execute_rolled_back(self.conn, query, params)
+        try:
+            if self._pinned_connection is not None:
+                return await self._execute_rolled_back(self._pinned_connection, query, params)
+            if self.is_pool:
+                pool = await self.conn.pool_connect()
+                async with pool.connection() as connection:
+                    return await self._execute_rolled_back(connection, query, params)
+            return await self._execute_rolled_back(self.conn, query, params)
+        except psycopg.Error as e:
+            raise _rejected(e) from e
 
     async def _execute_rolled_back(self, connection, query, params) -> list[RowResult] | None:
         """Execute on a connection inside a transaction that is always undone."""

@@ -1,13 +1,17 @@
 # ruff: noqa: B017
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import call
 from unittest.mock import patch
 
+import psycopg
 import pytest
+from psycopg_pool import PoolTimeout
 
 from pg_debug.db import DbConnPool
 from pg_debug.db import SqlDriver
+from pg_debug.errors import QueryError
 
 
 class AsyncContextManagerMock(AsyncMock):
@@ -365,3 +369,103 @@ async def test_engine_url_connection():
         # Verify driver state
         assert driver.is_pool is True
         assert driver.conn is not None
+
+
+# -- What PostgreSQL rejects -------------------------------------------------
+
+
+class RejectingCursor:
+    """A cursor on which every statement fails the way PostgreSQL fails it."""
+
+    def __init__(self, error):
+        self.error = error
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def execute(self, query, params=None):
+        raise self.error
+
+
+class RejectingConnection:
+    autocommit = False
+
+    def __init__(self, error):
+        self.error = error
+
+    def cursor(self, row_factory=None):
+        return RejectingCursor(self.error)
+
+    async def rollback(self):
+        pass
+
+
+class OneConnectionPool(DbConnPool):
+    """A pool that hands out one connection, or fails to hand out any."""
+
+    def __init__(self, connection=None, error=None):
+        super().__init__("postgresql://localhost/test")
+        self.connection_ = connection
+        self.error = error
+
+    async def pool_connect(self, connection_url=None):  # type: ignore[override]
+        return self  # type: ignore[return-value]
+
+    @asynccontextmanager
+    async def connection(self):
+        if self.error is not None:
+            raise self.error
+        yield self.connection_
+
+
+def undefined_table():
+    return psycopg.errors.UndefinedTable('relation "nope" does not exist')
+
+
+@pytest.mark.asyncio
+async def test_a_statement_postgresql_rejects_is_a_query_error():
+    """psycopg's exceptions are not PgDebugErrors, so `except PgDebugError`
+    let the most common failure of all straight past."""
+    error = undefined_table()
+    driver = SqlDriver(conn=RejectingConnection(error))
+
+    with pytest.raises(QueryError, match='relation "nope" does not exist') as excinfo:
+        await driver.execute_query("SELECT * FROM nope")
+    # The SQLSTATE and diagnostics are still there for a caller that needs them.
+    assert excinfo.value.__cause__ is error
+
+
+@pytest.mark.asyncio
+async def test_a_statement_rejected_inside_a_session_is_a_query_error():
+    error = undefined_table()
+    driver = SqlDriver(conn=OneConnectionPool(RejectingConnection(error)))
+
+    async with driver.session():
+        with pytest.raises(QueryError) as excinfo:
+            await driver.execute_query("SELECT * FROM nope")
+    assert excinfo.value.__cause__ is error
+
+
+@pytest.mark.asyncio
+async def test_a_statement_rejected_while_rolled_back_is_a_query_error():
+    error = undefined_table()
+    driver = SqlDriver(conn=RejectingConnection(error))
+
+    with pytest.raises(QueryError) as excinfo:
+        await driver.execute_query_and_rollback("SELECT * FROM nope")
+    assert excinfo.value.__cause__ is error
+
+
+@pytest.mark.asyncio
+async def test_a_connection_the_pool_cannot_hand_out_is_a_query_error():
+    error = PoolTimeout("couldn't get a connection after 30.00 sec")
+    driver = SqlDriver(conn=OneConnectionPool(error=error))
+
+    with pytest.raises(QueryError, match="couldn't get a connection"):
+        await driver.execute_query("SELECT 1")
+    with pytest.raises(QueryError, match="couldn't get a connection"):
+        async with driver.session():
+            pass

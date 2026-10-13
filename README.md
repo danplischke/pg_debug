@@ -467,6 +467,9 @@ Failures raise instead of returning error strings. All exceptions derive from
 `PgDebugError`: `ConnectionFailedError`, `NotConnectedError`,
 `InvalidArgumentError`, `ExtensionRequiredError` (carries the missing
 `extension` name), `ExplainPlanError`, `QueryError`, `MissingDependencyError`.
+A statement PostgreSQL rejects, or restricted mode refuses, raises
+`QueryError`; when PostgreSQL rejected it, psycopg's exception, SQLSTATE and
+all, is its `__cause__`.
 
 ### Without async
 
