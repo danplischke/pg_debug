@@ -1,26 +1,105 @@
 """Rendering helpers shared by the CLI.
 
 Everything the library returns is JSON-friendly Python data; these helpers turn
-it into something readable in a terminal.
+it into something readable in a terminal, or into what ``--json`` prints. Each
+command names its own two in ``build_parser``.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from decimal import Decimal
+from typing import TYPE_CHECKING
 from typing import Any
 
 import humanize
+
+from ..baseline import Baseline
+from ..baseline import Key
+from ..baseline import Partition
+from ..baseline import describe_key
+from ..baseline import health_finding_key
+
+if TYPE_CHECKING:
+    from ..plans.tree import ExplainPlanArtifact
 
 MAX_CELL_WIDTH = 60
 
 
 def to_json(value: Any, indent: int = 2) -> str:
-    """Serialize a value as JSON, stringifying anything JSON cannot represent."""
-    return json.dumps(value, indent=indent, default=str, sort_keys=False)
+    """Serialize a value as JSON: a result through its ``to_dict()``, and
+    anything else JSON cannot represent as its string."""
+    return json.dumps(value, indent=indent, default=_jsonable, sort_keys=False)
+
+
+def _jsonable(value: Any) -> Any:
+    to_dict = getattr(value, "to_dict", None)
+    return to_dict() if callable(to_dict) else str(value)
+
+
+# -- What --json prints -------------------------------------------------------
+#
+# Each takes the command's result and the baseline it is compared against, if
+# any. Most commands print their result as it is.
+
+
+def as_is(result: Any, baseline: Baseline | None) -> Any:
+    return result
+
+
+def plan_document(plan: ExplainPlanArtifact, baseline: Baseline | None) -> Any:
+    """The plan EXPLAIN returned, as JSON rather than a JSON-encoded string."""
+    try:
+        return json.loads(plan.value)
+    except ValueError:
+        return plan.value
+
+
+def marked_against(key: Callable[[Any], Key]) -> Callable[[Sequence[Any], Baseline | None], list[dict[str, Any]]]:
+    """Findings as dicts, each marked ``known`` or ``new`` when there is a baseline."""
+
+    def payload(findings: Sequence[Any], baseline: Baseline | None) -> list[dict[str, Any]]:
+        return [_with_baseline(finding.to_dict(), key(finding), baseline) for finding in findings]
+
+    return payload
+
+
+def health_checks_json(results: Mapping[str, Any], baseline: Baseline | None) -> dict[str, Any]:
+    return {name: _health_check_json(name, check, baseline) for name, check in results.items()}
+
+
+def _with_baseline(payload: dict[str, Any], key: Key, baseline: Baseline | None) -> dict[str, Any]:
+    if baseline is not None:
+        payload["baseline"] = "known" if key in baseline else "new"
+    return payload
+
+
+def _health_check_json(name: str, check: Any, baseline: Baseline | None) -> dict[str, Any]:
+    payload = check.to_dict()
+    if baseline is None or check.healthy:
+        return payload
+    if not check.findings:
+        payload["baseline"] = "known" if {"check": name} in baseline else "new"
+        return payload
+    payload["findings"] = [_with_baseline(dict(finding), health_finding_key(name, finding), baseline) for finding in check.findings]
+    return payload
+
+
+def render_baseline_trailer(path: str, split: Partition) -> str:
+    """The line after the report that says what the baseline changed."""
+    if not split.new:
+        return f"Baseline {path}: {len(split.known)} known finding(s), nothing new."
+    lines = [f"Baseline {path}: {len(split.known)} known finding(s) ignored, {len(split.new)} new:"]
+    lines.extend(f"  {describe_key(key)}" for key in split.new)
+    return "\n".join(lines)
+
+
+def render_plan(plan: ExplainPlanArtifact) -> str:
+    return plan.to_text()
 
 
 def _cell(value: Any, max_width: int = MAX_CELL_WIDTH) -> str:
