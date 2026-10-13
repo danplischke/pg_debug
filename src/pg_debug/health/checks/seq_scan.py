@@ -19,7 +19,6 @@ when that reading is large and sequential reads outnumber index reads.
 from __future__ import annotations
 
 from typing import Any
-from typing import Dict
 from typing import LiteralString
 from typing import cast
 
@@ -85,7 +84,7 @@ class SeqScanHealthCalc:
         tables = [row.cells for row in rows] if rows else []
 
         counting_since = tables[0].get("counting_since") if tables else None
-        metrics: Dict[str, Any] = {**thresholds, "counting_since": str(counting_since) if counting_since else None}
+        metrics: dict[str, Any] = {**thresholds, "counting_since": str(counting_since) if counting_since else None}
 
         findings = [finding for finding in (self._assess(row) for row in tables) if finding is not None]
         findings.sort(key=lambda f: -f["estimated_bytes_read"])
@@ -113,7 +112,7 @@ class SeqScanHealthCalc:
             metrics=metrics,
         )
 
-    def _assess(self, row: Dict[str, Any]) -> Dict[str, Any] | None:
+    def _assess(self, row: dict[str, Any]) -> dict[str, Any] | None:
         """The finding for one table, or None when its reading is within reason."""
         seq_scans = int(row.get("seq_scans") or 0)
         index_scans = int(row.get("index_scans") or 0)
@@ -151,7 +150,7 @@ class SeqScanHealthCalc:
         }
 
     @staticmethod
-    def _describe(finding: Dict[str, Any]) -> str:
+    def _describe(finding: dict[str, Any]) -> str:
         qualified = f"{finding['schema']}.{finding['table']}"
         size = humanize.naturalsize(finding["size_bytes"], binary=True)
         read = humanize.naturalsize(finding["estimated_bytes_read"], binary=True)

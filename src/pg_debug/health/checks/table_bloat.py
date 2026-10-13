@@ -23,9 +23,8 @@ it is flagged. ``pgstattuple`` measures the real figure by scanning the table,
 which is exact and far more expensive.
 """
 
+from typing import LiteralString
 from typing import cast
-
-from typing_extensions import LiteralString
 
 from ...db import SafeSqlDriver
 from ...db import SqlDriver

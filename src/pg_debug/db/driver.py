@@ -2,13 +2,11 @@
 
 import logging
 import re
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
-from typing import AsyncIterator
-from typing import Dict
-from typing import List
-from typing import Optional
+from typing import LiteralString
 from urllib.parse import urlparse
 from urllib.parse import urlunparse
 
@@ -18,7 +16,6 @@ from psycopg.sql import Composed
 from psycopg.sql import Identifier
 from psycopg.sql import Literal
 from psycopg_pool import AsyncConnectionPool
-from typing_extensions import LiteralString
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +93,9 @@ def obfuscate_password(text: str | None) -> str | None:
 
 
 def build_session_setup(
-    search_path: Optional[str] = None,
-    statement_timeout: Optional[int] = None,
-) -> Optional[List[Composed]]:
+    search_path: str | None = None,
+    statement_timeout: int | None = None,
+) -> list[Composed] | None:
     """Build the SET statements to run on every pooled connection.
 
     Args:
@@ -108,7 +105,7 @@ def build_session_setup(
     Returns:
         The statements to run, or None when there is nothing to configure.
     """
-    statements: List[Composed] = []
+    statements: list[Composed] = []
 
     if search_path:
         schemas = [s.strip() for s in search_path.split(",") if s.strip()]
@@ -128,9 +125,9 @@ class DbConnPool:
 
     def __init__(
         self,
-        connection_url: Optional[str] = None,
-        search_path: Optional[str] = None,
-        statement_timeout: Optional[int] = None,
+        connection_url: str | None = None,
+        search_path: str | None = None,
+        statement_timeout: int | None = None,
     ):
         """
         Args:
@@ -155,7 +152,7 @@ class DbConnPool:
             await conn.execute(statement)
         await conn.commit()
 
-    async def pool_connect(self, connection_url: Optional[str] = None) -> AsyncConnectionPool:
+    async def pool_connect(self, connection_url: str | None = None) -> AsyncConnectionPool:
         """Initialize connection pool with retry logic."""
         # If we already have a valid pool, return it
         if self.pool and self._is_valid:
@@ -219,7 +216,7 @@ class DbConnPool:
         return self._is_valid
 
     @property
-    def last_error(self) -> Optional[str]:
+    def last_error(self) -> str | None:
         """Get the last error message."""
         return self._last_error
 
@@ -231,7 +228,7 @@ class SqlDriver:
     class RowResult:
         """Simple class to match the Griptape RowResult interface."""
 
-        cells: Dict[str, Any]
+        cells: dict[str, Any]
 
     # Set by session(). Declared on the class so subclasses that do not call
     # this __init__ (SafeSqlDriver) still read a sane default.
@@ -313,7 +310,7 @@ class SqlDriver:
         query: LiteralString,
         params: list[Any] | None = None,
         force_readonly: bool = False,
-    ) -> Optional[List[RowResult]]:
+    ) -> list[RowResult] | None:
         """
         Execute a query and return results.
 
@@ -392,7 +389,7 @@ class SqlDriver:
             # Never let this replace the error that caused it.
             logger.error(f"Error clearing the session's aborted transaction: {rollback_error}")
 
-    async def _execute_with_connection(self, connection, query, params, force_readonly) -> Optional[List[RowResult]]:
+    async def _execute_with_connection(self, connection, query, params, force_readonly) -> list[RowResult] | None:
         """Execute query with the given connection."""
         transaction_started = False
         try:
@@ -442,7 +439,7 @@ class SqlDriver:
             logger.error(f"Error executing query ({query}): {e}")
             raise e
 
-    async def execute_query_and_rollback(self, query: LiteralString, params: list[Any] | None = None) -> Optional[List[RowResult]]:
+    async def execute_query_and_rollback(self, query: LiteralString, params: list[Any] | None = None) -> list[RowResult] | None:
         """Run a statement and undo it, keeping only what it returned.
 
         This exists for ``EXPLAIN ANALYZE``, which is the only way to learn what
@@ -471,7 +468,7 @@ class SqlDriver:
                 return await self._execute_rolled_back(connection, query, params)
         return await self._execute_rolled_back(self.conn, query, params)
 
-    async def _execute_rolled_back(self, connection, query, params) -> Optional[List[RowResult]]:
+    async def _execute_rolled_back(self, connection, query, params) -> list[RowResult] | None:
         """Execute on a connection inside a transaction that is always undone."""
         try:
             async with connection.cursor(row_factory=dict_row) as cursor:

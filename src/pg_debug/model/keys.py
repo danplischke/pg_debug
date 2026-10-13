@@ -9,8 +9,6 @@ statistics collector already keeps.
 from __future__ import annotations
 
 from typing import Any
-from typing import Dict
-from typing import List
 
 from ..db import SafeSqlDriver
 from ..db import SqlDriver
@@ -150,7 +148,7 @@ WHERE c.relkind IN ('r', 'p')
 """
 
 
-async def unindexed_foreign_keys(sql_driver: SqlDriver, options: ReviewOptions) -> List[ModelFinding]:
+async def unindexed_foreign_keys(sql_driver: SqlDriver, options: ReviewOptions) -> list[ModelFinding]:
     """Find foreign keys with no index behind them on the child side.
 
     PostgreSQL indexes the parent side of a foreign key for you — it has to,
@@ -164,7 +162,7 @@ async def unindexed_foreign_keys(sql_driver: SqlDriver, options: ReviewOptions) 
     return [_unindexed_foreign_key_finding(dict(row.cells)) for row in rows or []]
 
 
-def _unindexed_foreign_key_finding(row: Dict[str, Any]) -> ModelFinding:
+def _unindexed_foreign_key_finding(row: dict[str, Any]) -> ModelFinding:
     table_bytes = int(row["table_bytes"] or 0)
     deletes = int(row["referenced_deletes"] or 0)
     big = table_bytes >= SIGNIFICANT_TABLE_BYTES
@@ -215,7 +213,7 @@ def _unindexed_foreign_key_finding(row: Dict[str, Any]) -> ModelFinding:
     )
 
 
-async def foreign_key_type_mismatches(sql_driver: SqlDriver, options: ReviewOptions) -> List[ModelFinding]:
+async def foreign_key_type_mismatches(sql_driver: SqlDriver, options: ReviewOptions) -> list[ModelFinding]:
     """Find foreign keys whose two sides are not the same type.
 
     PostgreSQL will let you reference a ``bigint`` from an ``integer`` as long
@@ -229,7 +227,7 @@ async def foreign_key_type_mismatches(sql_driver: SqlDriver, options: ReviewOpti
     return [_type_mismatch_finding(dict(row.cells)) for row in rows or []]
 
 
-def _type_mismatch_finding(row: Dict[str, Any]) -> ModelFinding:
+def _type_mismatch_finding(row: dict[str, Any]) -> ModelFinding:
     table_bytes = int(row["table_bytes"] or 0)
     severity = Severity.HIGH if table_bytes >= SIGNIFICANT_TABLE_BYTES else Severity.MEDIUM
     referenced = f"{row['referenced_schema']}.{row['referenced_table']}.{row['referenced_column']}"
@@ -265,7 +263,7 @@ def _type_mismatch_finding(row: Dict[str, Any]) -> ModelFinding:
     )
 
 
-async def missing_primary_keys(sql_driver: SqlDriver, options: ReviewOptions) -> List[ModelFinding]:
+async def missing_primary_keys(sql_driver: SqlDriver, options: ReviewOptions) -> list[ModelFinding]:
     """Find tables with no primary key.
 
     Without one there is no agreed way to name a row: no ON CONFLICT, no
@@ -278,7 +276,7 @@ async def missing_primary_keys(sql_driver: SqlDriver, options: ReviewOptions) ->
     return [_missing_primary_key_finding(dict(row.cells)) for row in rows or []]
 
 
-def _missing_primary_key_finding(row: Dict[str, Any]) -> ModelFinding:
+def _missing_primary_key_finding(row: dict[str, Any]) -> ModelFinding:
     unique_index = row["unique_index"]
     # 'f' means REPLICA IDENTITY FULL: no key, but every column is the key, so
     # replication can still identify a row.

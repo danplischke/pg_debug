@@ -23,11 +23,7 @@ testable without a server.
 
 from __future__ import annotations
 
-from typing import Dict
-from typing import Iterator
-from typing import List
-from typing import Optional
-from typing import Tuple
+from collections.abc import Iterator
 
 from .result import MIN_MISESTIMATED_ROWS
 from .tree import PlanNode
@@ -40,7 +36,7 @@ def walk(node: PlanNode) -> Iterator[PlanNode]:
         yield from walk(child)
 
 
-def walk_with_parent(node: PlanNode, parent: Optional[PlanNode] = None) -> Iterator[Tuple[PlanNode, Optional[PlanNode]]]:
+def walk_with_parent(node: PlanNode, parent: PlanNode | None = None) -> Iterator[tuple[PlanNode, PlanNode | None]]:
     """Yield ``(node, parent)`` for every node, the root paired with ``None``."""
     yield node, parent
     for child in node.children:
@@ -85,7 +81,7 @@ def total_self_ms(root: PlanNode) -> float:
     return sum(self_ms(node) for node in walk(root))
 
 
-def shares(root: PlanNode) -> Dict[int, float]:
+def shares(root: PlanNode) -> dict[int, float]:
     """Each node's share of the query's work, keyed by :func:`id`."""
     total = total_self_ms(root)
     if total <= 0:
@@ -121,13 +117,13 @@ def is_misestimated(node: PlanNode, min_ratio: float) -> bool:
     return estimate_ratio(node) >= min_ratio
 
 
-def lowest_misestimates(root: PlanNode, min_ratio: float) -> List[PlanNode]:
+def lowest_misestimates(root: PlanNode, min_ratio: float) -> list[PlanNode]:
     """The diverging nodes that have no diverging node beneath them.
 
     These are the causes. Everything above them in the tree is being fed a
     wrong row count and cannot be blamed for believing it.
     """
-    found: List[PlanNode] = []
+    found: list[PlanNode] = []
 
     def visit(node: PlanNode) -> bool:
         """Return whether this subtree contains a misestimate."""
@@ -143,7 +139,7 @@ def lowest_misestimates(root: PlanNode, min_ratio: float) -> List[PlanNode]:
     return found
 
 
-def qualified_relation(node: PlanNode) -> Optional[str]:
+def qualified_relation(node: PlanNode) -> str | None:
     """``schema.table`` for a node that reads one, else ``None``.
 
     The schema is only there when the plan was taken with VERBOSE. Without it
@@ -156,7 +152,7 @@ def qualified_relation(node: PlanNode) -> Optional[str]:
     return node.relation_name
 
 
-def conditions(node: PlanNode) -> List[str]:
+def conditions(node: PlanNode) -> list[str]:
     """Every predicate the node applies, whichever slot the plan put it in."""
     return [text for text in (node.filter, node.index_cond, node.recheck_cond, node.join_filter, node.hash_cond) if text]
 

@@ -2,8 +2,6 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any
-from typing import Dict
-from typing import List
 from typing import Literal
 from typing import LiteralString
 from typing import cast
@@ -110,7 +108,7 @@ class TopQueriesCalc:
         interval_seconds: float,
         sort_by: Literal["resources", "mean", "total"] = "total",
         limit: int = 10,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Measure query activity over an interval instead of since the last reset.
 
         pg_stat_statements counters are cumulative, so the usual ranking is
@@ -149,7 +147,7 @@ class TopQueriesCalc:
         deltas = self._diff_snapshots(before, after)
         return self._rank(deltas, sort_by=sort_by, limit=limit)
 
-    async def _counter_snapshot(self) -> Dict[Any, Dict[str, Any]]:
+    async def _counter_snapshot(self) -> dict[Any, dict[str, Any]]:
         """Read the raw per-query counters, keyed by query identity."""
         pg_version = await get_postgres_version(self.sql_driver)
         cols = _get_pg_stat_statements_columns(pg_version)
@@ -191,10 +189,10 @@ class TopQueriesCalc:
         return text.upper().rstrip(";").split(" ", 1)[0] in _TRANSACTION_CONTROL
 
     @staticmethod
-    def _diff_snapshots(before: Dict[Any, Dict[str, Any]], after: Dict[Any, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _diff_snapshots(before: dict[Any, dict[str, Any]], after: dict[Any, dict[str, Any]]) -> list[dict[str, Any]]:
         """Subtract two snapshots, keeping only queries that ran in between."""
         counters = ("calls", "total_exec_time", "rows", "shared_blks_hit", "shared_blks_read", "shared_blks_dirtied", "wal_bytes")
-        deltas: List[Dict[str, Any]] = []
+        deltas: list[dict[str, Any]] = []
 
         for key, row in after.items():
             # Reading the statistics registers queries of its own — the
@@ -226,7 +224,7 @@ class TopQueriesCalc:
         return deltas
 
     @staticmethod
-    def _rank(deltas: List[Dict[str, Any]], sort_by: str, limit: int) -> List[Dict[str, Any]]:
+    def _rank(deltas: list[dict[str, Any]], sort_by: str, limit: int) -> list[dict[str, Any]]:
         """Order sampled queries by the requested criterion."""
         if sort_by == "resources":
             # Mirror the cumulative report: rank by the largest share of any one
@@ -244,7 +242,7 @@ class TopQueriesCalc:
 
         return deltas[:limit]
 
-    async def get_top_queries_by_time(self, limit: int = 10, sort_by: Literal["total", "mean"] = "mean") -> List[Dict[str, Any]]:
+    async def get_top_queries_by_time(self, limit: int = 10, sort_by: Literal["total", "mean"] = "mean") -> list[dict[str, Any]]:
         """Reports the slowest SQL queries based on execution time.
 
         Args:
@@ -295,7 +293,7 @@ class TopQueriesCalc:
         logger.info(f"Found {len(slow_queries)} slow queries")
         return slow_queries
 
-    async def get_top_resource_queries(self, frac_threshold: float = 0.05) -> List[Dict[str, Any]]:
+    async def get_top_resource_queries(self, frac_threshold: float = 0.05) -> list[dict[str, Any]]:
         """Reports the most time consuming queries based on a resource blend.
 
         A query is reported when it accounts for more than ``frac_threshold`` of

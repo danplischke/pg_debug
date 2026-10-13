@@ -10,14 +10,10 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Iterator
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
-from typing import Dict
-from typing import Iterator
-from typing import List
-from typing import Optional
-from typing import Sequence
-from typing import Tuple
 
 from .. import __version__
 from ..baseline import Baseline
@@ -77,7 +73,7 @@ INDEX_SPEC_HELP = (
 )
 
 
-def _scan_sql(text: str) -> Iterator[Tuple[int, str, int, bool]]:
+def _scan_sql(text: str) -> Iterator[tuple[int, str, int, bool]]:
     """Walk SQL text, tracking parenthesis depth and quoting.
 
     Yields ``(position, character, depth, quoted)``, where depth counts
@@ -117,13 +113,13 @@ def _scan_sql(text: str) -> Iterator[Tuple[int, str, int, bool]]:
         index += 1
 
 
-def split_index_columns(text: str) -> List[str]:
+def split_index_columns(text: str) -> list[str]:
     """Split an index column list on the commas that separate its entries.
 
     Commas inside a function call or a quoted string belong to that entry, so
     ``date_trunc('day', created_at), status`` is two columns, not three.
     """
-    columns: List[str] = []
+    columns: list[str] = []
     start = 0
 
     for position, char, depth, quoted in _scan_sql(text):
@@ -135,7 +131,7 @@ def split_index_columns(text: str) -> List[str]:
     return [column.strip() for column in columns if column.strip()]
 
 
-def parse_index_spec(spec: str) -> Dict[str, Any]:
+def parse_index_spec(spec: str) -> dict[str, Any]:
     """Parse a hypothetical index spec such as ``users(lower(email)):btree``.
 
     Columns may be plain names or expressions, matching what PostgreSQL accepts
@@ -646,7 +642,7 @@ async def cmd_tune_workload(pg: PgDebug, args: argparse.Namespace) -> Any:
 
 
 async def cmd_tune_queries(pg: PgDebug, args: argparse.Namespace) -> Any:
-    queries: List[str] = []
+    queries: list[str] = []
     for query in args.queries:
         if query == "-":
             queries.extend(line.strip() for line in sys.stdin.read().splitlines() if line.strip())
@@ -658,13 +654,13 @@ async def cmd_tune_queries(pg: PgDebug, args: argparse.Namespace) -> Any:
 # -- Output -----------------------------------------------------------------
 
 
-def _with_baseline(payload: Dict[str, Any], key: Dict[str, Any], baseline: Optional[Baseline]) -> Dict[str, Any]:
+def _with_baseline(payload: dict[str, Any], key: dict[str, Any], baseline: Baseline | None) -> dict[str, Any]:
     if baseline is not None:
         payload["baseline"] = "known" if key in baseline else "new"
     return payload
 
 
-def _health_check_json(name: str, check: Any, baseline: Optional[Baseline]) -> Dict[str, Any]:
+def _health_check_json(name: str, check: Any, baseline: Baseline | None) -> dict[str, Any]:
     payload = check.to_dict()
     if baseline is None or check.healthy:
         return payload
@@ -684,7 +680,7 @@ def render_baseline_trailer(path: str, split: Partition) -> str:
     return "\n".join(lines)
 
 
-def format_result(command: str, result: Any, as_json: bool, baseline: Optional[Baseline] = None) -> str:
+def format_result(command: str, result: Any, as_json: bool, baseline: Baseline | None = None) -> str:
     """Render a command result as JSON or as text."""
     if command == "explain":
         if not as_json:
@@ -752,7 +748,7 @@ def configure_logging(verbosity: int) -> None:
     logging.basicConfig(level=level, stream=sys.stderr, format="%(levelname)s %(name)s: %(message)s")
 
 
-def _has_database_url(explicit: Optional[str]) -> bool:
+def _has_database_url(explicit: str | None) -> bool:
     return bool(explicit) or any(os.environ.get(var) for var in DATABASE_URL_ENV_VARS)
 
 
@@ -786,8 +782,8 @@ async def run(args: argparse.Namespace) -> int:
         saved.save(args.save_baseline)
         print(f"Saved a baseline of {len(saved)} finding(s) to {args.save_baseline}.", file=sys.stderr)
 
-    baseline: Optional[Baseline] = None
-    split: Optional[Partition] = None
+    baseline: Baseline | None = None
+    split: Partition | None = None
     if getattr(args, "baseline", None):
         baseline = Baseline.load(args.baseline, args.command)
         split = partition(args.command, result, baseline)
@@ -819,7 +815,7 @@ async def run(args: argparse.Namespace) -> int:
     return 1 if isinstance(result, dict) and result.get("error") else 0
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``pg-debug`` command."""
     if sys.platform == "win32":
         use_utf8_output()

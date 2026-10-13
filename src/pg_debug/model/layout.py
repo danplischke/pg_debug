@@ -15,8 +15,6 @@ bloat check will not accuse of padding.
 from __future__ import annotations
 
 from typing import Any
-from typing import Dict
-from typing import List
 
 from ..db import SafeSqlDriver
 from ..db import SqlDriver
@@ -104,14 +102,14 @@ WHERE p.current_pages > p.packed_pages
 """
 
 
-async def column_order_padding(sql_driver: SqlDriver, options: ReviewOptions) -> List[ModelFinding]:
+async def column_order_padding(sql_driver: SqlDriver, options: ReviewOptions) -> list[ModelFinding]:
     """Find tables whose columns would pack into fewer bytes in another order."""
     sql, params = scoped(COLUMN_ORDER_PADDING_SQL, options, "n.nspname")
     rows = await SafeSqlDriver.execute_param_query(sql_driver, sql, [MIN_PADDING_BYTES, options.min_rows, *params])
     return [_padding_finding(dict(row.cells)) for row in rows or []]
 
 
-def _padding_finding(row: Dict[str, Any]) -> ModelFinding:
+def _padding_finding(row: dict[str, Any]) -> ModelFinding:
     impact_bytes = int(row["impact_bytes"] or 0)
     per_row = int(row["saved_bytes_per_row"] or 0)
     row_count = int(row["row_count"] or 0)

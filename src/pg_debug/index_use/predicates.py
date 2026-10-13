@@ -15,16 +15,11 @@ question.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
-from typing import Dict
-from typing import Iterator
-from typing import List
-from typing import Optional
-from typing import Sequence
-from typing import Set
-from typing import Tuple
 
 from pglast import ast
 from pglast import parse_sql
@@ -66,15 +61,15 @@ class Predicate:
         text: The predicate as written.
     """
 
-    table: Optional[str]
+    table: str | None
     column: str
     expression: str
     bare: bool
     operator: str
-    pattern: Optional[str] = None
+    pattern: str | None = None
     negated: bool = False
-    or_group: Optional[int] = None
-    join_table: Optional[str] = None
+    or_group: int | None = None
+    join_table: str | None = None
     text: str = ""
 
 
@@ -83,21 +78,21 @@ class QueryPredicates:
     """Every predicate of a statement, with the tables it reads."""
 
     #: Table references as the query writes them, ``schema.name`` or ``name``.
-    tables: Set[str]
+    tables: set[str]
     #: Alias to table reference.
-    aliases: Dict[str, str]
-    predicates: List[Predicate] = field(default_factory=list)
+    aliases: dict[str, str]
+    predicates: list[Predicate] = field(default_factory=list)
 
-    def on(self, table: str) -> List[Predicate]:
+    def on(self, table: str) -> list[Predicate]:
         """The predicates restricting ``table``."""
         return [p for p in self.predicates if p.table == table]
 
-    def or_group_tables(self, group: int) -> Set[str]:
+    def or_group_tables(self, group: int) -> set[str]:
         """The tables restricted anywhere inside one OR."""
         return {p.table for p in self.predicates if p.or_group == group and p.table}
 
 
-def read_predicates(sql: str, columns_by_table: Optional[Dict[str, Set[str]]] = None) -> QueryPredicates:
+def read_predicates(sql: str, columns_by_table: dict[str, set[str]] | None = None) -> QueryPredicates:
     """Read the predicates of one SELECT, UPDATE or DELETE.
 
     Args:
@@ -159,12 +154,12 @@ _PARENS = re.compile(r"[()]")
 
 
 class _Reader:
-    def __init__(self, result: QueryPredicates, columns_by_table: Dict[str, Set[str]]):
+    def __init__(self, result: QueryPredicates, columns_by_table: dict[str, set[str]]):
         self.result = result
         self.columns_by_table = columns_by_table
         self._next_or_group = 0
 
-    def read(self, node: Any, negated: bool, or_group: Optional[int]) -> None:
+    def read(self, node: Any, negated: bool, or_group: int | None) -> None:
         if isinstance(node, ast.BoolExpr):
             if node.boolop == BoolExprType.AND_EXPR:
                 for arg in node.args or ():
@@ -202,7 +197,7 @@ class _Reader:
         self._next_or_group += 1
         return self._next_or_group
 
-    def _read_comparison(self, node: ast.A_Expr, negated: bool, or_group: Optional[int]) -> None:
+    def _read_comparison(self, node: ast.A_Expr, negated: bool, or_group: int | None) -> None:
         operator = _operator_name(node)
         if operator is None:
             return
@@ -231,11 +226,11 @@ class _Reader:
         self,
         side: Any,
         operator: str,
-        pattern: Optional[str],
+        pattern: str | None,
         negated: bool,
-        or_group: Optional[int],
+        or_group: int | None,
         whole: Any,
-        join_table: Optional[str] = None,
+        join_table: str | None = None,
     ) -> None:
         refs = list(_column_refs(side))
         if len(refs) != 1:
@@ -262,7 +257,7 @@ class _Reader:
             )
         )
 
-    def _table_of(self, column_ref: Sequence[str]) -> Optional[str]:
+    def _table_of(self, column_ref: Sequence[str]) -> str | None:
         """Which table a column reference belongs to."""
         if len(column_ref) >= 2:
             return resolve_table_reference(column_ref[-2], self.result.aliases, self.result.tables)
@@ -272,7 +267,7 @@ class _Reader:
         return owners[0] if len(owners) == 1 else None
 
 
-def _operator_name(node: ast.A_Expr) -> Optional[str]:
+def _operator_name(node: ast.A_Expr) -> str | None:
     """PostgreSQL's name for the comparison, or None for one no index serves."""
     name = "".join(str(part.sval) for part in (node.name or ()) if isinstance(part, ast.String))
     if node.kind == A_Expr_Kind.AEXPR_OP:
@@ -302,7 +297,7 @@ def _mirror(operator: str) -> str:
     return _MIRROR.get(operator, operator)
 
 
-def _column_refs(node: Any) -> Iterator[Tuple[str, ...]]:
+def _column_refs(node: Any) -> Iterator[tuple[str, ...]]:
     """Every column reference under a node, as tuples of name parts."""
     if isinstance(node, ast.ColumnRef):
         parts = tuple(str(part.sval) for part in (node.fields or ()) if isinstance(part, ast.String))
@@ -320,7 +315,7 @@ def _column_refs(node: Any) -> Iterator[Tuple[str, ...]]:
             yield from _column_refs(item)
 
 
-def _string_literal(node: Any) -> Optional[str]:
+def _string_literal(node: Any) -> str | None:
     if isinstance(node, ast.A_Const) and isinstance(node.val, ast.String):
         return str(node.val.sval)
     if isinstance(node, ast.TypeCast):

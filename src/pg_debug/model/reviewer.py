@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Awaitable
-from typing import Callable
-from typing import Dict
-from typing import Iterable
-from typing import List
-from typing import Optional
+from collections.abc import Awaitable
+from collections.abc import Callable
+from collections.abc import Iterable
 
 from ..db import SafeSqlDriver
 from ..db import SqlDriver
@@ -23,11 +20,11 @@ from .result import RuleId
 
 logger = logging.getLogger(__name__)
 
-Rule = Callable[[SqlDriver, ReviewOptions], Awaitable[List[ModelFinding]]]
+Rule = Callable[[SqlDriver, ReviewOptions], Awaitable[list[ModelFinding]]]
 
 #: Every rule, by the id that selects it. Adding one here is all it takes to
 #: put it in the review, the CLI's --rule list and the documented vocabulary.
-RULES: Dict[RuleId, Rule] = {
+RULES: dict[RuleId, Rule] = {
     RuleId.UNINDEXED_FOREIGN_KEY: keys.unindexed_foreign_keys,
     RuleId.FOREIGN_KEY_TYPE_MISMATCH: keys.foreign_key_type_mismatches,
     RuleId.MISSING_PRIMARY_KEY: keys.missing_primary_keys,
@@ -48,10 +45,10 @@ class ModelReviewer:
     async def review(
         self,
         rules: str | RuleId | Iterable[str | RuleId] = RuleId.ALL,
-        schema: Optional[str] = None,
+        schema: str | None = None,
         min_rows: int = DEFAULT_MIN_ROWS,
         proven_only: bool = False,
-    ) -> List[ModelFinding]:
+    ) -> list[ModelFinding]:
         """Review the data model.
 
         Args:
@@ -74,7 +71,7 @@ class ModelReviewer:
         """
         selected = RuleId.parse(rules)
         options = ReviewOptions(schema=schema, min_rows=min_rows)
-        findings: List[ModelFinding] = []
+        findings: list[ModelFinding] = []
 
         # One pinned connection for the whole review, so every rule reads the
         # same session. The rules run one after another rather than at once for

@@ -1,8 +1,6 @@
 """Table references and identifiers, as PostgreSQL reads them."""
 
 import re
-from typing import Optional
-from typing import Tuple
 
 from psycopg.sql import Identifier
 
@@ -27,7 +25,7 @@ def table_identifier(table: str) -> Identifier:
     return Identifier(schema, name) if schema else Identifier(name)
 
 
-def split_table_reference(table: str) -> Tuple[Optional[str], str]:
+def split_table_reference(table: str) -> tuple[str | None, str]:
     """Split a table reference into its schema and table name.
 
     Args:

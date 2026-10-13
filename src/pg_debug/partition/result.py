@@ -14,8 +14,6 @@ from dataclasses import dataclass
 from dataclasses import field
 from enum import Enum
 from typing import Any
-from typing import Dict
-from typing import List
 
 
 class Strategy(str, Enum):
@@ -75,17 +73,17 @@ class PartitionCandidate:
     strategy: Strategy
     pruning_share: float
     recommended: bool
-    reasons: List[str] = field(default_factory=list)
-    blockers: List[str] = field(default_factory=list)
-    ddl: List[str] = field(default_factory=list)
-    evidence: Dict[str, Any] = field(default_factory=dict)
+    reasons: list[str] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    ddl: list[str] = field(default_factory=list)
+    evidence: dict[str, Any] = field(default_factory=dict)
 
     @property
     def qualified_table(self) -> str:
         """``schema.table``, as it would be written in a statement."""
         return f"{self.schema}.{self.table}"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return the candidate as a JSON-friendly dict."""
         return {
             "schema": self.schema,

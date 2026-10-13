@@ -17,7 +17,6 @@ finding, because no amount of tuning autovacuum will fix it.
 from __future__ import annotations
 
 from typing import Any
-from typing import Dict
 
 from ...db import SafeSqlDriver
 from ...db import SqlDriver
@@ -253,7 +252,7 @@ class AutovacuumCalc:
         )
 
 
-def _describe_backlog(finding: Dict[str, Any]) -> str:
+def _describe_backlog(finding: dict[str, Any]) -> str:
     table = f"{finding['schema']}.{finding['table']}"
     dead = int(finding["dead_rows"] or 0)
     threshold = int(finding["vacuum_threshold"] or 0)
@@ -272,7 +271,7 @@ def _describe_backlog(finding: Dict[str, Any]) -> str:
     )
 
 
-def _describe_horizon(finding: Dict[str, Any]) -> str:
+def _describe_horizon(finding: dict[str, Any]) -> str:
     kind = finding["kind"]
     held = int(finding["transactions_held"] or 0)
     seconds = finding["seconds_held"]

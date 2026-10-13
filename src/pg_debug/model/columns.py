@@ -11,8 +11,6 @@ DDL applied on a guess is how a deployment fails.
 from __future__ import annotations
 
 from typing import Any
-from typing import Dict
-from typing import List
 
 from ..db import SafeSqlDriver
 from ..db import SqlDriver
@@ -133,7 +131,7 @@ SELECT {_COLUMN_IDENTITY},
 """
 
 
-async def naive_timestamps(sql_driver: SqlDriver, options: ReviewOptions) -> List[ModelFinding]:
+async def naive_timestamps(sql_driver: SqlDriver, options: ReviewOptions) -> list[ModelFinding]:
     """Find ``timestamp without time zone`` columns.
 
     The type does not record an instant. It records the reading on a clock,
@@ -148,7 +146,7 @@ async def naive_timestamps(sql_driver: SqlDriver, options: ReviewOptions) -> Lis
     return [_naive_timestamp_finding(dict(row.cells)) for row in rows or []]
 
 
-def _naive_timestamp_finding(row: Dict[str, Any]) -> ModelFinding:
+def _naive_timestamp_finding(row: dict[str, Any]) -> ModelFinding:
     return ModelFinding(
         rule=RuleId.NAIVE_TIMESTAMP,
         confidence=Confidence.PROVEN,
@@ -175,7 +173,7 @@ def _naive_timestamp_finding(row: Dict[str, Any]) -> ModelFinding:
     )
 
 
-async def blank_padded_chars(sql_driver: SqlDriver, options: ReviewOptions) -> List[ModelFinding]:
+async def blank_padded_chars(sql_driver: SqlDriver, options: ReviewOptions) -> list[ModelFinding]:
     """Find ``character(n)`` columns.
 
     ``char(n)`` pads every value out to n with spaces and then, depending on the
@@ -189,7 +187,7 @@ async def blank_padded_chars(sql_driver: SqlDriver, options: ReviewOptions) -> L
     return [_blank_padded_finding(dict(row.cells)) for row in rows or []]
 
 
-def _blank_padded_finding(row: Dict[str, Any]) -> ModelFinding:
+def _blank_padded_finding(row: dict[str, Any]) -> ModelFinding:
     declared_length = row["declared_length"]
     return ModelFinding(
         rule=RuleId.BLANK_PADDED_CHAR,
@@ -217,7 +215,7 @@ def _blank_padded_finding(row: Dict[str, Any]) -> ModelFinding:
     )
 
 
-async def nullable_never_null(sql_driver: SqlDriver, options: ReviewOptions) -> List[ModelFinding]:
+async def nullable_never_null(sql_driver: SqlDriver, options: ReviewOptions) -> list[ModelFinding]:
     """Find key columns that are nullable but hold no NULLs.
 
     Deliberately narrow. Most columns in most databases hold no NULLs, so
@@ -234,7 +232,7 @@ async def nullable_never_null(sql_driver: SqlDriver, options: ReviewOptions) -> 
     return [_never_null_finding(dict(row.cells)) for row in rows or []]
 
 
-def _never_null_finding(row: Dict[str, Any]) -> ModelFinding:
+def _never_null_finding(row: dict[str, Any]) -> ModelFinding:
     table_ident = row["table_ident"]
     column_ident = row["column_ident"]
     constraint = row["constraint_name"]
@@ -288,7 +286,7 @@ def _never_null_finding(row: Dict[str, Any]) -> ModelFinding:
     )
 
 
-async def low_cardinality_text(sql_driver: SqlDriver, options: ReviewOptions) -> List[ModelFinding]:
+async def low_cardinality_text(sql_driver: SqlDriver, options: ReviewOptions) -> list[ModelFinding]:
     """Find text columns holding a handful of distinct values.
 
     A status, a country code, a type discriminator: stored as text it costs its
@@ -302,7 +300,7 @@ async def low_cardinality_text(sql_driver: SqlDriver, options: ReviewOptions) ->
     return [_low_cardinality_finding(dict(row.cells)) for row in rows or []]
 
 
-def _low_cardinality_finding(row: Dict[str, Any]) -> ModelFinding:
+def _low_cardinality_finding(row: dict[str, Any]) -> ModelFinding:
     distinct_values = int(row["distinct_values"] or 0)
     avg_width = int(row["avg_width"] or 0)
     row_count = int(row["row_count"] or 0)

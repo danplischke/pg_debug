@@ -17,10 +17,6 @@ DROP.
 from __future__ import annotations
 
 from typing import Any
-from typing import Dict
-from typing import List
-from typing import Set
-from typing import Tuple
 
 from pglast import ast
 
@@ -37,15 +33,15 @@ class Predicates:
 
     def __init__(self) -> None:
         #: table -> {(column, "equality" | "range")}
-        self.by_table: Dict[str, Set[Tuple[str, str]]] = {}
+        self.by_table: dict[str, set[tuple[str, str]]] = {}
 
     def add(self, table: str, column: str, kind: str) -> None:
         self.by_table.setdefault(table, set()).add((column, kind))
 
-    def columns(self, table: str) -> Set[str]:
+    def columns(self, table: str) -> set[str]:
         return {column for column, _kind in self.by_table.get(table, set())}
 
-    def kinds(self, table: str, column: str) -> Set[str]:
+    def kinds(self, table: str, column: str) -> set[str]:
         return {kind for name, kind in self.by_table.get(table, set()) if name == column}
 
 
@@ -82,9 +78,9 @@ def extract_predicates(stmt: Any) -> Predicates:
     return predicates
 
 
-def _cte_names(node: Any) -> Set[str]:
+def _cte_names(node: Any) -> set[str]:
     """The names bound by every WITH clause in the statement."""
-    names: Set[str] = set()
+    names: set[str] = set()
 
     if isinstance(node, (list, tuple)):
         for item in node:
@@ -103,7 +99,7 @@ def _cte_names(node: Any) -> Set[str]:
     return names
 
 
-def _restricting_clauses(node: Any) -> List[Any]:
+def _restricting_clauses(node: Any) -> list[Any]:
     """Every clause whose predicates can prune: WHERE, and each join's ON.
 
     Walks the whole statement rather than its top level, because the clauses
@@ -117,7 +113,7 @@ def _restricting_clauses(node: Any) -> List[Any]:
     walking the tree indiscriminately for comparisons would count time as
     pruning that does not.
     """
-    clauses: List[Any] = []
+    clauses: list[Any] = []
 
     if isinstance(node, (list, tuple)):
         for item in node:
@@ -142,9 +138,9 @@ def _restricting_clauses(node: Any) -> List[Any]:
     return clauses
 
 
-def _comparisons(node: Any) -> List[Tuple[str, str, str]]:
+def _comparisons(node: Any) -> list[tuple[str, str, str]]:
     """Walk a clause, yielding (column, table_qualifier, kind) per comparison."""
-    found: List[Tuple[str, str, str]] = []
+    found: list[tuple[str, str, str]] = []
 
     if isinstance(node, ast.A_Expr):
         operator = ".".join(part.sval for part in (node.name or ()))
@@ -171,7 +167,7 @@ def _comparisons(node: Any) -> List[Tuple[str, str, str]]:
     return found
 
 
-def _column_reference(node: Any) -> Tuple[str, str] | None:
+def _column_reference(node: Any) -> tuple[str, str] | None:
     """``(column, qualifier)`` for a column reference, or None for anything else."""
     if not isinstance(node, ast.ColumnRef) or not node.fields:
         return None

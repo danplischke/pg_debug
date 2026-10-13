@@ -18,15 +18,10 @@ does not.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
-from typing import Dict
-from typing import List
-from typing import Optional
-from typing import Sequence
-from typing import Set
-from typing import Tuple
 
 from ..severity import Severity
 from .metrics import conditions
@@ -91,13 +86,13 @@ class RuleContext:
             looked, and the findings have to say which.
     """
 
-    parents: Dict[int, Optional[PlanNode]] = field(default_factory=dict)
+    parents: dict[int, PlanNode | None] = field(default_factory=dict)
     total_ms: float = 0.0
     min_ratio: float = 10.0
-    stale: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    covered: Dict[str, List[Set[str]]] = field(default_factory=dict)
-    columns: Dict[str, Set[str]] = field(default_factory=dict)
-    work_mem: Optional[str] = None
+    stale: dict[str, dict[str, Any]] = field(default_factory=dict)
+    covered: dict[str, list[set[str]]] = field(default_factory=dict)
+    columns: dict[str, set[str]] = field(default_factory=dict)
+    work_mem: str | None = None
     catalog: bool = True
 
     def share(self, ms: float) -> float:
@@ -128,7 +123,7 @@ def _contaminated_root(node: PlanNode, context: RuleContext) -> PlanNode:
         top = parent
 
 
-def _columns_in(text: str, known: Set[str]) -> List[str]:
+def _columns_in(text: str, known: set[str]) -> list[str]:
     """The table's own columns named in a rendered plan condition.
 
     PostgreSQL renders a condition as its own expression output, not as SQL a
@@ -139,7 +134,7 @@ def _columns_in(text: str, known: Set[str]) -> List[str]:
     mistaken for one.
     """
     stripped = _CAST_RE.sub(" ", _LITERAL_RE.sub(" ", text))
-    found: List[str] = []
+    found: list[str] = []
     for quoted, bare in _IDENTIFIER_RE.findall(stripped):
         name = quoted or bare
         if not quoted and name.lower() in _NOT_COLUMNS:
@@ -163,9 +158,9 @@ def _statistics_name(relation: str, columns: Sequence[str]) -> str:
     return f"{schema}.{name}" if schema else name
 
 
-def row_estimate(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
+def row_estimate(root: PlanNode, context: RuleContext) -> list[PlanFinding]:
     """Report the lowest node whose estimate diverged, and what it misled."""
-    findings: List[PlanFinding] = []
+    findings: list[PlanFinding] = []
     for node in lowest_misestimates(root, context.min_ratio):
         estimated, actual = node.plan_rows, node.actual_rows or 0
         top = _contaminated_root(node, context)
@@ -183,7 +178,7 @@ def row_estimate(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
         if node.actual_loops and node.actual_loops > 1:
             detail += f" Counts are per loop, and this node ran {_fmt(node.actual_loops)} times."
 
-        evidence: Dict[str, Any] = {
+        evidence: dict[str, Any] = {
             "estimated_rows": estimated,
             "actual_rows": actual,
             "loops": loops(node),
@@ -218,14 +213,14 @@ def row_estimate(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
     return findings
 
 
-def stale_statistics(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
+def stale_statistics(root: PlanNode, context: RuleContext) -> list[PlanFinding]:
     """A misestimate whose table has not been analyzed recently enough.
 
     This is the first thing to rule out, and the cheapest: if the planner is
     working from numbers taken when the table was a tenth of its present size,
     nothing else about the estimate is worth reasoning about yet.
     """
-    findings: List[PlanFinding] = []
+    findings: list[PlanFinding] = []
     for node in lowest_misestimates(root, context.min_ratio):
         relation = qualified_relation(node)
         stale = context.stale.get(relation or "")
@@ -261,7 +256,7 @@ def stale_statistics(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
     return findings
 
 
-def correlated_columns(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
+def correlated_columns(root: PlanNode, context: RuleContext) -> list[PlanFinding]:
     """An underestimate over several columns of one table, with no extended statistics.
 
     Without an extended statistics object the planner multiplies each column's
@@ -270,7 +265,7 @@ def correlated_columns(root: PlanNode, context: RuleContext) -> List[PlanFinding
     which is why this only fires on an *under*estimate. An overestimate has some
     other cause and ``CREATE STATISTICS`` would not touch it.
     """
-    findings: List[PlanFinding] = []
+    findings: list[PlanFinding] = []
     for node in lowest_misestimates(root, context.min_ratio):
         relation = qualified_relation(node)
         if not relation or (node.actual_rows or 0) <= node.plan_rows:
@@ -330,14 +325,14 @@ def correlated_columns(root: PlanNode, context: RuleContext) -> List[PlanFinding
     return findings
 
 
-def nested_loop_blowup(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
+def nested_loop_blowup(root: PlanNode, context: RuleContext) -> list[PlanFinding]:
     """A nested loop whose inner side ran far more often than planned for.
 
     A nested loop is the right choice over a handful of outer rows and the
     wrong one over a hundred thousand, and the planner commits to it from the
     outer estimate. This is what that mistake looks like from the other side.
     """
-    findings: List[PlanFinding] = []
+    findings: list[PlanFinding] = []
     for node in walk(root):
         if node.node_type != "Nested Loop" or len(node.children) < 2:
             continue
@@ -381,13 +376,13 @@ def nested_loop_blowup(root: PlanNode, context: RuleContext) -> List[PlanFinding
     return findings
 
 
-def discarded_rows(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
+def discarded_rows(root: PlanNode, context: RuleContext) -> list[PlanFinding]:
     """A scan reading rows in order to throw them away.
 
     This is the shape an index is for: the rows were fetched, tested and
     dropped, and every one of them was a page read that need not have happened.
     """
-    findings: List[PlanFinding] = []
+    findings: list[PlanFinding] = []
     for node in walk(root):
         removed = node.rows_removed_by_filter
         if not removed:
@@ -431,9 +426,9 @@ def discarded_rows(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
     return findings
 
 
-def sort_spilled(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
+def sort_spilled(root: PlanNode, context: RuleContext) -> list[PlanFinding]:
     """A sort that did not fit in work_mem and went to disk."""
-    findings: List[PlanFinding] = []
+    findings: list[PlanFinding] = []
     for node in walk(root):
         if node.sort_space_type != "Disk":
             continue
@@ -456,9 +451,9 @@ def sort_spilled(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
     return findings
 
 
-def hash_spilled(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
+def hash_spilled(root: PlanNode, context: RuleContext) -> list[PlanFinding]:
     """A hash that did not fit in work_mem and was split into batches."""
-    findings: List[PlanFinding] = []
+    findings: list[PlanFinding] = []
     for node in walk(root):
         batches = node.hash_batches
         if not batches or batches <= 1:
@@ -499,14 +494,14 @@ def hash_spilled(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
     return findings
 
 
-def lossy_bitmap(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
+def lossy_bitmap(root: PlanNode, context: RuleContext) -> list[PlanFinding]:
     """A bitmap too large for work_mem, degraded to whole-page granularity.
 
     Once the bitmap goes lossy it stops recording which rows on a page matched,
     so the heap scan reads every row on those pages and re-tests them. The
     ``Rows Removed by Index Recheck`` on the same node is that cost.
     """
-    findings: List[PlanFinding] = []
+    findings: list[PlanFinding] = []
     for node in walk(root):
         lossy = node.lossy_heap_blocks
         if not lossy:
@@ -539,13 +534,13 @@ def lossy_bitmap(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
     return findings
 
 
-def workers_not_launched(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
+def workers_not_launched(root: PlanNode, context: RuleContext) -> list[PlanFinding]:
     """Parallel workers the plan asked for and the server did not grant.
 
     Not a fault in the query. The plan's costs were worked out assuming the
     workers, so the query ran a plan chosen for parallelism without it.
     """
-    findings: List[PlanFinding] = []
+    findings: list[PlanFinding] = []
     for node in walk(root):
         planned, launched = node.workers_planned, node.workers_launched
         if planned is None or launched is None or launched >= planned:
@@ -585,7 +580,7 @@ RULES = (
 )
 
 
-def _join_sides(node: PlanNode) -> Tuple[Optional[PlanNode], Optional[PlanNode]]:
+def _join_sides(node: PlanNode) -> tuple[PlanNode | None, PlanNode | None]:
     """``(outer, inner)`` for a join node.
 
     ``Parent Relationship`` names them explicitly; where it is missing the plan

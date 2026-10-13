@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from typing import Dict
-from typing import List
 
 from .db import SafeSqlDriver
 from .db import SqlDriver
@@ -34,7 +32,7 @@ class StatisticsInspector:
     def __init__(self, sql_driver: SqlDriver | SafeSqlDriver):
         self.sql_driver = sql_driver
 
-    async def column_stats(self, table: str) -> List[Dict[str, Any]]:
+    async def column_stats(self, table: str) -> list[dict[str, Any]]:
         """Report the planner's per-column statistics for a table.
 
         Args:
@@ -67,7 +65,7 @@ class StatisticsInspector:
             FROM pg_stats s
             WHERE s.tablename = {}
         """
-        params: List[Any] = [name]
+        params: list[Any] = [name]
         if schema:
             query += " AND s.schemaname = {}"
             params.append(schema)
@@ -80,7 +78,7 @@ class StatisticsInspector:
         rows = await SafeSqlDriver.execute_param_query(self.sql_driver, query, params)
         return [row.cells for row in rows] if rows else []
 
-    async def extended_statistics(self, table: str) -> List[Dict[str, Any]]:
+    async def extended_statistics(self, table: str) -> list[dict[str, Any]]:
         """List the extended statistics objects defined on a table.
 
         Extended statistics are how you tell the planner that columns are
@@ -107,7 +105,7 @@ class StatisticsInspector:
             JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE c.relname = {}
         """
-        params: List[Any] = [name]
+        params: list[Any] = [name]
         if schema:
             query += " AND n.nspname = {}"
             params.append(schema)
@@ -122,7 +120,7 @@ class StatisticsInspector:
         self,
         stale_fraction: float = DEFAULT_STALE_FRACTION,
         min_changed_rows: int = DEFAULT_MIN_CHANGED_ROWS,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Find tables whose statistics no longer describe their contents.
 
         Args:

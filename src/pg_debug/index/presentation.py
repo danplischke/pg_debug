@@ -3,8 +3,6 @@
 import logging
 import os
 from typing import Any
-from typing import Dict
-from typing import List
 
 import humanize
 
@@ -174,7 +172,7 @@ class TextPresentation:
             logger.error(f"Error analyzing queries: {e}", exc_info=True)
             return {"error": f"Error analyzing queries: {e}"}
 
-    def _build_recommendations_list(self, session: IndexTuningResult) -> List[Dict[str, Any]]:
+    def _build_recommendations_list(self, session: IndexTuningResult) -> list[dict[str, Any]]:
         recommendations = []
         for index_apply_order, rec in enumerate(session.recommendations):
             rec_dict = {
@@ -210,7 +208,7 @@ class TextPresentation:
         return recommendations
 
     @staticmethod
-    def _describe_write_cost(rec) -> Dict[str, Any] | None:
+    def _describe_write_cost(rec) -> dict[str, Any] | None:
         """What this index will cost to keep up to date.
 
         An index is not paid for once. Every insert, every delete and every
@@ -223,7 +221,7 @@ class TextPresentation:
         if not index_writes:
             return None
 
-        cost: Dict[str, Any] = {
+        cost: dict[str, Any] = {
             "index_touching_writes": index_writes,
             "inserts": int(load.get("inserts") or 0),
             "updates": int(load.get("updates") or 0),
@@ -243,7 +241,7 @@ class TextPresentation:
             )
         return cost
 
-    async def _generate_query_impact(self, session: IndexTuningResult) -> List[Dict[str, Any]]:
+    async def _generate_query_impact(self, session: IndexTuningResult) -> list[dict[str, Any]]:
         """
         Generate the query impact section showing before/after explain plans.
 

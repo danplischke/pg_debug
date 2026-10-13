@@ -10,14 +10,11 @@ from __future__ import annotations
 import asyncio
 import sys
 import threading
+from collections.abc import Awaitable
+from collections.abc import Callable
+from collections.abc import Iterable
 from concurrent.futures import Future
 from typing import Any
-from typing import Awaitable
-from typing import Callable
-from typing import Dict
-from typing import Iterable
-from typing import List
-from typing import Optional
 from typing import TypeVar
 
 from .client import AccessMode
@@ -97,12 +94,12 @@ class SyncPgDebug:
 
     def __init__(
         self,
-        database_url: Optional[str] = None,
+        database_url: str | None = None,
         access_mode: AccessMode | str = AccessMode.UNRESTRICTED,
-        timeout: Optional[int] = None,
-        search_path: Optional[str] = None,
-        llm_model: Optional[str] = None,
-        pool: Optional[DbConnPool] = None,
+        timeout: int | None = None,
+        search_path: str | None = None,
+        llm_model: str | None = None,
+        pool: DbConnPool | None = None,
     ):
         """Takes the same arguments as :class:`~pg_debug.client.PgDebug`."""
         self._closed = False
@@ -152,11 +149,11 @@ class SyncPgDebug:
 
     # -- Schema introspection ------------------------------------------------
 
-    def list_schemas(self) -> List[Dict[str, Any]]:
+    def list_schemas(self) -> list[dict[str, Any]]:
         """List all schemas in the database."""
         return self._call(self._client.list_schemas)
 
-    def list_objects(self, schema_name: str, object_type: str | ObjectType = ObjectType.TABLE) -> List[Dict[str, Any]]:
+    def list_objects(self, schema_name: str, object_type: str | ObjectType = ObjectType.TABLE) -> list[dict[str, Any]]:
         """List objects of a given type (table, view, sequence, extension)."""
         return self._call(self._client.list_objects, schema_name, object_type)
 
@@ -165,13 +162,13 @@ class SyncPgDebug:
         schema_name: str,
         object_name: str,
         object_type: str | ObjectType = ObjectType.TABLE,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Describe a single database object, including columns and indexes."""
         return self._call(self._client.get_object_details, schema_name, object_name, object_type)
 
     # -- Query execution -----------------------------------------------------
 
-    def execute_sql(self, sql: str) -> List[Dict[str, Any]]:
+    def execute_sql(self, sql: str) -> list[dict[str, Any]]:
         """Run a SQL statement and return its rows."""
         return self._call(self._client.execute_sql, sql)
 
@@ -179,34 +176,34 @@ class SyncPgDebug:
         self,
         sql: str,
         analyze: bool = False,
-        hypothetical_indexes: Optional[List[Dict[str, Any]]] = None,
+        hypothetical_indexes: list[dict[str, Any]] | None = None,
     ) -> ExplainPlanArtifact:
         """Return the execution plan for a query."""
         return self._call(self._client.explain_query, sql, analyze=analyze, hypothetical_indexes=hypothetical_indexes)
 
     # -- Plan diagnosis ------------------------------------------------------
 
-    def diagnose_query(self, sql: str, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
+    def diagnose_query(self, sql: str, min_ratio: float = DEFAULT_MIN_RATIO) -> list[PlanFinding]:
         """Run a query and say what is wrong with the plan it produced."""
         return self._call(self._client.diagnose_query, sql, min_ratio=min_ratio)
 
-    def diagnose_plan(self, plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
+    def diagnose_plan(self, plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> list[PlanFinding]:
         """Diagnose a plan that already exists, checking this database's catalog."""
         return self._call(self._client.diagnose_plan, plan, min_ratio=min_ratio)
 
     # -- Index use -----------------------------------------------------------
 
-    def explain_index_use(self, sql: str, index: Optional[str] = None) -> List[IndexUse]:
+    def explain_index_use(self, sql: str, index: str | None = None) -> list[IndexUse]:
         """Say whether the planner uses each index on the query's tables, and if not, why."""
         return self._call(self._client.explain_index_use, sql, index=index)
 
     # -- Planner statistics --------------------------------------------------
 
-    def column_stats(self, table: str) -> List[Dict[str, Any]]:
+    def column_stats(self, table: str) -> list[dict[str, Any]]:
         """Report the planner's per-column statistics for a table."""
         return self._call(self._client.column_stats, table)
 
-    def extended_statistics(self, table: str) -> List[Dict[str, Any]]:
+    def extended_statistics(self, table: str) -> list[dict[str, Any]]:
         """List the extended statistics objects defined on a table."""
         return self._call(self._client.extended_statistics, table)
 
@@ -215,10 +212,10 @@ class SyncPgDebug:
     def review_data_model(
         self,
         rules: str | RuleId | Iterable[str | RuleId] = RuleId.ALL,
-        schema: Optional[str] = None,
+        schema: str | None = None,
         min_rows: int = DEFAULT_MIN_ROWS,
         proven_only: bool = False,
-    ) -> List[ModelFinding]:
+    ) -> list[ModelFinding]:
         """Review the data model for defects, and say how to fix each one."""
         return self._call(
             self._client.review_data_model,
@@ -228,11 +225,11 @@ class SyncPgDebug:
             proven_only=proven_only,
         )
 
-    def check_migration(self, sql: str) -> List[StatementReview]:
+    def check_migration(self, sql: str) -> list[StatementReview]:
         """Review a migration before running it."""
         return self._call(self._client.check_migration, sql)
 
-    def review_configuration(self) -> List[ConfigFinding]:
+    def review_configuration(self) -> list[ConfigFinding]:
         """Review the server's settings against what it is actually doing."""
         return self._call(self._client.review_configuration)
 
@@ -240,11 +237,11 @@ class SyncPgDebug:
 
     def suggest_partitions(
         self,
-        sql: Optional[str | List[str]] = None,
+        sql: str | list[str] | None = None,
         min_table_bytes: int = DEFAULT_MIN_TABLE_BYTES,
         min_pruning_share: float = DEFAULT_MIN_PRUNING_SHARE,
         limit: int = 200,
-    ) -> List[PartitionCandidate]:
+    ) -> list[PartitionCandidate]:
         """Decide whether a table is worth partitioning, from what the workload does."""
         return self._call(
             self._client.suggest_partitions,
@@ -259,9 +256,9 @@ class SyncPgDebug:
     def list_activity(
         self,
         include_idle: bool = False,
-        min_duration_seconds: Optional[float] = None,
+        min_duration_seconds: float | None = None,
         blocked_only: bool = False,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Report what the server is doing right now."""
         return self._call(
             self._client.list_activity,
@@ -270,11 +267,11 @@ class SyncPgDebug:
             blocked_only=blocked_only,
         )
 
-    def vacuum_progress(self) -> List[Dict[str, Any]]:
+    def vacuum_progress(self) -> list[dict[str, Any]]:
         """Report running vacuums and how far along they are."""
         return self._call(self._client.vacuum_progress)
 
-    def lock_tree(self) -> List[Dict[str, Any]]:
+    def lock_tree(self) -> list[dict[str, Any]]:
         """Report who is blocking whom, root blockers first."""
         return self._call(self._client.lock_tree)
 
@@ -283,7 +280,7 @@ class SyncPgDebug:
     def analyze_db_health(
         self,
         health_type: str | HealthType | Iterable[str | HealthType] = HealthType.ALL,
-    ) -> Dict[str, HealthCheckResult]:
+    ) -> dict[str, HealthCheckResult]:
         """Run database health checks."""
         return self._call(self._client.analyze_db_health, health_type)
 
@@ -291,8 +288,8 @@ class SyncPgDebug:
         self,
         sort_by: SortBy = "resources",
         limit: int = 10,
-        interval_seconds: Optional[float] = None,
-    ) -> List[Dict[str, Any]]:
+        interval_seconds: float | None = None,
+    ) -> list[dict[str, Any]]:
         """Report the most expensive queries recorded by pg_stat_statements."""
         return self._call(self._client.get_top_queries, sort_by=sort_by, limit=limit, interval_seconds=interval_seconds)
 
@@ -302,8 +299,8 @@ class SyncPgDebug:
         self,
         max_index_size_mb: int = 10000,
         method: TuningMethod = "dta",
-        llm_model: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        llm_model: str | None = None,
+    ) -> dict[str, Any]:
         """Recommend indexes for the workload recorded by pg_stat_statements."""
         return self._call(
             self._client.analyze_workload_indexes,
@@ -314,11 +311,11 @@ class SyncPgDebug:
 
     def analyze_query_indexes(
         self,
-        queries: List[str],
+        queries: list[str],
         max_index_size_mb: int = 10000,
         method: TuningMethod = "dta",
-        llm_model: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        llm_model: str | None = None,
+    ) -> dict[str, Any]:
         """Recommend indexes for a specific list of queries."""
         return self._call(
             self._client.analyze_query_indexes,

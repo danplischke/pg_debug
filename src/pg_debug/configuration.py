@@ -17,13 +17,10 @@ assuming either.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
-from typing import Callable
-from typing import Dict
-from typing import List
-from typing import Optional
 
 from .db import SafeSqlDriver
 from .db import SqlDriver
@@ -89,12 +86,12 @@ class ConfigFinding:
     severity: Severity
     summary: str
     detail: str
-    recommended: Optional[str] = None
-    evidence: Dict[str, Any] = field(default_factory=dict)
+    recommended: str | None = None
+    evidence: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return the finding as a JSON-friendly dict."""
-        result: Dict[str, Any] = {
+        result: dict[str, Any] = {
             "setting": self.setting,
             "current": self.current,
             "severity": self.severity.value,
@@ -113,7 +110,7 @@ class ConfigurationReviewer:
     def __init__(self, sql_driver: SqlDriver | SafeSqlDriver):
         self.sql_driver = sql_driver
 
-    async def review(self) -> List[ConfigFinding]:
+    async def review(self) -> list[ConfigFinding]:
         """Review the server's configuration.
 
         Returns:
@@ -132,11 +129,11 @@ class ConfigurationReviewer:
 
         return sorted(findings, key=lambda finding: SEVERITY_ORDER[finding.severity])
 
-    async def _settings(self) -> Dict[str, Dict[str, Any]]:
+    async def _settings(self) -> dict[str, dict[str, Any]]:
         rows = await SafeSqlDriver.execute_param_query(self.sql_driver, SETTINGS_SQL, [list(_SETTINGS)])
         return {row.cells["name"]: dict(row.cells) for row in rows or []}
 
-    async def _measurements(self) -> Dict[str, Any]:
+    async def _measurements(self) -> dict[str, Any]:
         """The counters the rules argue from."""
         version = await get_postgres_version(self.sql_driver)
         # PostgreSQL 17 moved the checkpoint counters out of pg_stat_bgwriter
@@ -169,7 +166,7 @@ class ConfigurationReviewer:
 # -- Units ------------------------------------------------------------------
 
 
-def _as_bytes(setting: Optional[Dict[str, Any]]) -> Optional[int]:
+def _as_bytes(setting: dict[str, Any] | None) -> int | None:
     """A memory setting in bytes, whatever unit pg_settings reports it in."""
     if not setting:
         return None
@@ -184,7 +181,7 @@ def _as_bytes(setting: Optional[Dict[str, Any]]) -> Optional[int]:
     return int(value * multipliers[unit])
 
 
-def _humanize(size: Optional[int]) -> str:
+def _humanize(size: int | None) -> str:
     if size is None:
         return "unknown"
     remaining = float(size)
@@ -195,21 +192,21 @@ def _humanize(size: Optional[int]) -> str:
     return f"{size} bytes"
 
 
-def _is_default(setting: Optional[Dict[str, Any]]) -> bool:
+def _is_default(setting: dict[str, Any] | None) -> bool:
     return bool(setting) and setting.get("source") == "default"
 
 
-def _off(setting: Optional[Dict[str, Any]]) -> bool:
+def _off(setting: dict[str, Any] | None) -> bool:
     return bool(setting) and str(setting.get("setting")).lower() in ("off", "false", "0")
 
 
-Rule = Callable[[Dict[str, Dict[str, Any]], Dict[str, Any]], Optional[ConfigFinding]]
+Rule = Callable[[dict[str, dict[str, Any]], dict[str, Any]], ConfigFinding | None]
 
 
 # -- Rules ------------------------------------------------------------------
 
 
-def _durability(settings: Dict[str, Dict[str, Any]], _measurements: Dict[str, Any]) -> Optional[ConfigFinding]:
+def _durability(settings: dict[str, dict[str, Any]], _measurements: dict[str, Any]) -> ConfigFinding | None:
     """fsync and full_page_writes exist to survive a crash."""
     for name, consequence in (
         ("fsync", "a crash or power loss can leave the database unrecoverably corrupt, not merely missing recent commits"),
@@ -233,7 +230,7 @@ def _durability(settings: Dict[str, Dict[str, Any]], _measurements: Dict[str, An
     return None
 
 
-def _autovacuum_off(settings: Dict[str, Dict[str, Any]], _measurements: Dict[str, Any]) -> Optional[ConfigFinding]:
+def _autovacuum_off(settings: dict[str, dict[str, Any]], _measurements: dict[str, Any]) -> ConfigFinding | None:
     setting = settings.get("autovacuum")
     if not _off(setting):
         return None
@@ -252,7 +249,7 @@ def _autovacuum_off(settings: Dict[str, Dict[str, Any]], _measurements: Dict[str
     )
 
 
-def _work_mem(settings: Dict[str, Dict[str, Any]], measurements: Dict[str, Any]) -> Optional[ConfigFinding]:
+def _work_mem(settings: dict[str, dict[str, Any]], measurements: dict[str, Any]) -> ConfigFinding | None:
     """Only worth raising if queries are actually spilling to disk."""
     temp_bytes = int(measurements.get("temp_bytes") or 0)
     temp_files = int(measurements.get("temp_files") or 0)
@@ -278,7 +275,7 @@ def _work_mem(settings: Dict[str, Dict[str, Any]], measurements: Dict[str, Any])
     )
 
 
-def _checkpoints(settings: Dict[str, Dict[str, Any]], measurements: Dict[str, Any]) -> Optional[ConfigFinding]:
+def _checkpoints(settings: dict[str, dict[str, Any]], measurements: dict[str, Any]) -> ConfigFinding | None:
     """Requested checkpoints usually mean WAL filled up before the timer.
 
     Usually, not always: an explicit CHECKPOINT, a base backup and a shutdown
@@ -311,7 +308,7 @@ def _checkpoints(settings: Dict[str, Dict[str, Any]], measurements: Dict[str, An
     )
 
 
-def _shared_buffers(settings: Dict[str, Dict[str, Any]], measurements: Dict[str, Any]) -> Optional[ConfigFinding]:
+def _shared_buffers(settings: dict[str, dict[str, Any]], measurements: dict[str, Any]) -> ConfigFinding | None:
     """Small shared_buffers is only a problem when the cache is missing."""
     reads = int(measurements.get("blks_read") or 0)
     hits = int(measurements.get("blks_hit") or 0)
@@ -345,7 +342,7 @@ def _shared_buffers(settings: Dict[str, Dict[str, Any]], measurements: Dict[str,
     )
 
 
-def _effective_cache_size(settings: Dict[str, Dict[str, Any]], measurements: Dict[str, Any]) -> Optional[ConfigFinding]:
+def _effective_cache_size(settings: dict[str, dict[str, Any]], measurements: dict[str, Any]) -> ConfigFinding | None:
     setting = settings.get("effective_cache_size")
     if not _is_default(setting):
         return None
@@ -370,7 +367,7 @@ def _effective_cache_size(settings: Dict[str, Dict[str, Any]], measurements: Dic
     )
 
 
-def _random_page_cost(settings: Dict[str, Dict[str, Any]], measurements: Dict[str, Any]) -> Optional[ConfigFinding]:
+def _random_page_cost(settings: dict[str, dict[str, Any]], measurements: dict[str, Any]) -> ConfigFinding | None:
     """The default assumes a spinning disk, and says so in the documentation."""
     setting = settings.get("random_page_cost")
     if not _is_default(setting):
@@ -401,7 +398,7 @@ def _random_page_cost(settings: Dict[str, Dict[str, Any]], measurements: Dict[st
     )
 
 
-def _slow_query_log(settings: Dict[str, Dict[str, Any]], _measurements: Dict[str, Any]) -> Optional[ConfigFinding]:
+def _slow_query_log(settings: dict[str, dict[str, Any]], _measurements: dict[str, Any]) -> ConfigFinding | None:
     setting = settings.get("log_min_duration_statement")
     if not setting or str(setting.get("setting")) != "-1":
         return None
@@ -421,7 +418,7 @@ def _slow_query_log(settings: Dict[str, Dict[str, Any]], _measurements: Dict[str
     )
 
 
-def _idle_transaction_timeout(settings: Dict[str, Dict[str, Any]], _measurements: Dict[str, Any]) -> Optional[ConfigFinding]:
+def _idle_transaction_timeout(settings: dict[str, dict[str, Any]], _measurements: dict[str, Any]) -> ConfigFinding | None:
     setting = settings.get("idle_in_transaction_session_timeout")
     if not setting or str(setting.get("setting")) != "0":
         return None
@@ -442,7 +439,7 @@ def _idle_transaction_timeout(settings: Dict[str, Dict[str, Any]], _measurements
     )
 
 
-_RULES: List[Rule] = [
+_RULES: list[Rule] = [
     _durability,
     _autovacuum_off,
     _work_mem,

@@ -28,13 +28,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from typing import Any
-from typing import Dict
-from typing import List
 from typing import LiteralString
-from typing import Optional
-from typing import Sequence
-from typing import Set
 from typing import cast
 
 from pglast import ast
@@ -91,7 +87,7 @@ WHERE (n.nspname || '.' || c.relname) = ANY({}::text[])
 #: What :func:`parse_plan` accepts: the JSON text EXPLAIN printed, or that
 #: text already decoded — the list EXPLAIN wraps its one plan in, or the plan
 #: object itself, which is also the shape ``auto_explain`` logs.
-PlanInput = str | bytes | Dict[str, Any] | List[Any]
+PlanInput = str | bytes | dict[str, Any] | list[Any]
 
 
 def parse_plan(plan: PlanInput) -> PlanNode:
@@ -148,9 +144,9 @@ def offline_context(root: PlanNode, min_ratio: float = DEFAULT_MIN_RATIO) -> Rul
     )
 
 
-def run_rules(root: PlanNode, context: RuleContext) -> List[PlanFinding]:
+def run_rules(root: PlanNode, context: RuleContext) -> list[PlanFinding]:
     """Every rule over the tree, most severe finding first."""
-    findings: List[PlanFinding] = []
+    findings: list[PlanFinding] = []
     for rule in RULES:
         findings.extend(rule(root, context))
     return sorted(findings, key=lambda finding: finding.sort_key)
@@ -161,7 +157,7 @@ def _check_min_ratio(min_ratio: float) -> None:
         raise InvalidArgumentError(f"min_ratio must be at least 1, since an estimate cannot be less than 1x out. Got {min_ratio}.")
 
 
-def diagnose_plan(plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
+def diagnose_plan(plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> list[PlanFinding]:
     """Diagnose a plan with no database behind it.
 
     Everything the plan itself can answer is answered: the lowest misestimate
@@ -195,7 +191,7 @@ class PlanDiagnoser:
     def __init__(self, sql_driver: SqlDriver | SafeSqlDriver | None = None):
         self.sql_driver = sql_driver
 
-    async def diagnose(self, sql: str, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
+    async def diagnose(self, sql: str, min_ratio: float = DEFAULT_MIN_RATIO) -> list[PlanFinding]:
         """Diagnose one statement's execution plan.
 
         Args:
@@ -225,7 +221,7 @@ class PlanDiagnoser:
         plan = await self._explain(prepared, read_only=read_only)
         return await self._diagnose_tree(plan.plan_tree, min_ratio)
 
-    async def diagnose_plan(self, plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
+    async def diagnose_plan(self, plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> list[PlanFinding]:
         """Diagnose a plan that already exists, consulting the catalog where there is one.
 
         With a driver, the tables the plan reads are checked for stale
@@ -245,7 +241,7 @@ class PlanDiagnoser:
         _check_min_ratio(min_ratio)
         return await self._diagnose_tree(parse_plan(plan), min_ratio)
 
-    async def _diagnose_tree(self, root: PlanNode, min_ratio: float) -> List[PlanFinding]:
+    async def _diagnose_tree(self, root: PlanNode, min_ratio: float) -> list[PlanFinding]:
         context = offline_context(root, min_ratio) if self.sql_driver is None else await self._context(root, min_ratio=min_ratio)
         return run_rules(root, context)
 
@@ -329,7 +325,7 @@ class PlanDiagnoser:
             work_mem=await self._work_mem(),
         )
 
-    async def _stale_relations(self, relations: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    async def _stale_relations(self, relations: Sequence[str]) -> dict[str, dict[str, Any]]:
         """Which of these relations the analyze bookkeeping calls out of date."""
         if not relations:
             return {}
@@ -337,32 +333,32 @@ class PlanDiagnoser:
         stale = {f"{row['schema']}.{row['table']}": row for row in rows}
         return {name: stale[name] for name in relations if name in stale}
 
-    async def _covered_column_sets(self, relations: Sequence[str]) -> Dict[str, List[Set[str]]]:
+    async def _covered_column_sets(self, relations: Sequence[str]) -> dict[str, list[set[str]]]:
         """The column sets already covered by an extended statistics object."""
-        covered: Dict[str, List[Set[str]]] = {}
+        covered: dict[str, list[set[str]]] = {}
         for row in await self._rows(EXTENDED_STATISTICS_SQL, relations):
             columns = row.get("columns") or []
             covered.setdefault(f"{row['schema']}.{row['table']}", []).append({str(c) for c in columns})
         return covered
 
-    async def _relation_columns(self, relations: Sequence[str]) -> Dict[str, Set[str]]:
+    async def _relation_columns(self, relations: Sequence[str]) -> dict[str, set[str]]:
         """Every relation's real column names.
 
         This is what tells a column apart from a type name in a condition
         PostgreSQL rendered for display rather than for a parser.
         """
-        columns: Dict[str, Set[str]] = {}
+        columns: dict[str, set[str]] = {}
         for row in await self._rows(COLUMNS_SQL, relations):
             columns.setdefault(f"{row['schema']}.{row['table']}", set()).add(str(row["column"]))
         return columns
 
-    async def _rows(self, query: LiteralString, relations: Sequence[str]) -> List[Dict[str, Any]]:
+    async def _rows(self, query: LiteralString, relations: Sequence[str]) -> list[dict[str, Any]]:
         if not relations:
             return []
         rows = await SafeSqlDriver.execute_param_query(self._driver, query, [list(relations)])
         return [row.cells for row in rows] if rows else []
 
-    async def _work_mem(self) -> Optional[str]:
+    async def _work_mem(self) -> str | None:
         """The session's ``work_mem``, quoted back in any spill finding."""
         try:
             rows = await self._driver.execute_query("SELECT current_setting('work_mem') AS work_mem")

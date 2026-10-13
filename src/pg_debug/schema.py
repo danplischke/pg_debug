@@ -5,8 +5,6 @@ from __future__ import annotations
 import logging
 from enum import Enum
 from typing import Any
-from typing import Dict
-from typing import List
 
 from .db import SafeSqlDriver
 from .db import SqlDriver
@@ -41,7 +39,7 @@ class SchemaInspector:
     def __init__(self, sql_driver: SqlDriver | SafeSqlDriver):
         self.sql_driver = sql_driver
 
-    async def list_schemas(self) -> List[Dict[str, Any]]:
+    async def list_schemas(self) -> list[dict[str, Any]]:
         """List all schemas in the database.
 
         Returns:
@@ -65,7 +63,7 @@ class SchemaInspector:
         )
         return [row.cells for row in rows] if rows else []
 
-    async def list_objects(self, schema_name: str, object_type: str | ObjectType = ObjectType.TABLE) -> List[Dict[str, Any]]:
+    async def list_objects(self, schema_name: str, object_type: str | ObjectType = ObjectType.TABLE) -> list[dict[str, Any]]:
         """List objects of a given type in a schema.
 
         Args:
@@ -132,7 +130,7 @@ class SchemaInspector:
         schema_name: str,
         object_name: str,
         object_type: str | ObjectType = ObjectType.TABLE,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Describe a single database object.
 
         For tables and views the result has ``basic``, ``columns``,
@@ -179,7 +177,7 @@ class SchemaInspector:
             return {"name": row.cells["extname"], "version": row.cells["extversion"], "relocatable": row.cells["extrelocatable"]}
         return {}
 
-    async def _get_relation_details(self, schema_name: str, object_name: str, object_type: ObjectType) -> Dict[str, Any]:
+    async def _get_relation_details(self, schema_name: str, object_name: str, object_type: ObjectType) -> dict[str, Any]:
         col_rows = await SafeSqlDriver.execute_param_query(
             self.sql_driver,
             """
@@ -217,7 +215,7 @@ class SchemaInspector:
             [schema_name, object_name],
         )
 
-        constraints: Dict[str, Dict[str, Any]] = {}
+        constraints: dict[str, dict[str, Any]] = {}
         if con_rows:
             for row in con_rows:
                 cname = row.cells["constraint_name"]
