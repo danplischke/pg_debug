@@ -143,10 +143,6 @@ class SafeSqlDriver(SqlDriver):
         try:
             # Parse the SQL using pglast
             parsed = pglast.parse_sql(query)
-            # Pretty print the parsed SQL for debugging
-            # print("Parsed SQL:")
-            # import pprint
-            # pprint.pprint(parsed)
 
             # Validate each statement
             try:
