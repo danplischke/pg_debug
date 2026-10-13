@@ -62,7 +62,7 @@ above need nothing else.
   `pg_stat_checkpointer` in 17, vacuum progress counters) through the helpers
   in `db/`, not by catching errors.
 - Errors are exceptions from `errors.py`, never `"Error: ..."` strings.
-  Results are plain data (dicts, attrs/pydantic objects); the CLI renders them.
+  Results are plain data (dicts and dataclasses); the CLI renders them.
 
 ## Changing things
 

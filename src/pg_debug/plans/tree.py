@@ -2,11 +2,10 @@
 
 import difflib
 import json
+from dataclasses import dataclass
+from dataclasses import field
 from typing import Any
 from typing import ClassVar
-
-from attrs import define
-from attrs import field
 
 from ..errors import InvalidArgumentError
 
@@ -28,7 +27,7 @@ def calculate_improvement_multiple(base_cost: float, rec_cost: float) -> float:
     return base_cost / rec_cost
 
 
-@define
+@dataclass(slots=True)
 class PlanNode:
     node_type: str
     total_cost: float
@@ -37,59 +36,59 @@ class PlanNode:
     plan_width: int
 
     # Actual metrics from ANALYZE
-    actual_total_time: float | None = field(default=None)
-    actual_startup_time: float | None = field(default=None)
-    actual_rows: int | None = field(default=None)
-    actual_loops: int | None = field(default=None)
+    actual_total_time: float | None = None
+    actual_startup_time: float | None = None
+    actual_rows: int | None = None
+    actual_loops: int | None = None
 
     # Buffer info
-    shared_hit_blocks: int | None = field(default=None)
-    shared_read_blocks: int | None = field(default=None)
-    shared_written_blocks: int | None = field(default=None)
+    shared_hit_blocks: int | None = None
+    shared_read_blocks: int | None = None
+    shared_written_blocks: int | None = None
 
     # Other common fields
-    relation_name: str | None = field(default=None)
-    filter: str | None = field(default=None)
-    children: list["PlanNode"] = field(factory=list)
+    relation_name: str | None = None
+    filter: str | None = None
+    children: list["PlanNode"] = field(default_factory=list)
 
     # Where the node reads from. ``schema_name`` is only reported by EXPLAIN
     # VERBOSE, and without it a relation name cannot be resolved in the catalog
     # when the same name exists in two schemas.
-    schema_name: str | None = field(default=None)
-    alias: str | None = field(default=None)
-    index_name: str | None = field(default=None)
+    schema_name: str | None = None
+    alias: str | None = None
+    index_name: str | None = None
 
     # How this node hangs off its parent: "Outer" is the driving side of a
     # join, "Inner" the side re-executed once per outer row.
-    parent_relationship: str | None = field(default=None)
-    parallel_aware: bool = field(default=False)
+    parent_relationship: str | None = None
+    parallel_aware: bool = False
 
     # Conditions, kept apart because they are evaluated at different points:
     # an index condition restricts what is read, a filter discards what was
     # already read, and a recheck re-tests what a lossy bitmap over-fetched.
-    index_cond: str | None = field(default=None)
-    recheck_cond: str | None = field(default=None)
-    join_filter: str | None = field(default=None)
-    hash_cond: str | None = field(default=None)
-    rows_removed_by_filter: int | None = field(default=None)
-    rows_removed_by_join_filter: int | None = field(default=None)
-    rows_removed_by_index_recheck: int | None = field(default=None)
+    index_cond: str | None = None
+    recheck_cond: str | None = None
+    join_filter: str | None = None
+    hash_cond: str | None = None
+    rows_removed_by_filter: int | None = None
+    rows_removed_by_join_filter: int | None = None
+    rows_removed_by_index_recheck: int | None = None
 
     # Spill evidence. Each of these says work_mem was too small for this node,
     # and each says it in its own units.
-    sort_method: str | None = field(default=None)
-    sort_space_used: int | None = field(default=None)  # kB
-    sort_space_type: str | None = field(default=None)  # "Memory" or "Disk"
-    hash_batches: int | None = field(default=None)
-    original_hash_batches: int | None = field(default=None)
-    peak_memory_usage: int | None = field(default=None)  # kB
-    exact_heap_blocks: int | None = field(default=None)
-    lossy_heap_blocks: int | None = field(default=None)
+    sort_method: str | None = None
+    sort_space_used: int | None = None  # kB
+    sort_space_type: str | None = None  # "Memory" or "Disk"
+    hash_batches: int | None = None
+    original_hash_batches: int | None = None
+    peak_memory_usage: int | None = None  # kB
+    exact_heap_blocks: int | None = None
+    lossy_heap_blocks: int | None = None
 
     # Parallelism. Planned above launched means the workers were asked for and
     # not granted, which is a server-wide shortage rather than a query problem.
-    workers_planned: int | None = field(default=None)
-    workers_launched: int | None = field(default=None)
+    workers_planned: int | None = None
+    workers_launched: int | None = None
 
     #: JSON key -> attribute, for the fields that are copied across unchanged.
     _SIMPLE_FIELDS: ClassVar[dict[str, str]] = {
@@ -157,24 +156,12 @@ class PlanNode:
         return node
 
 
-@define
+@dataclass(slots=True)
 class ExplainPlanArtifact:
     value: str
     plan_tree: PlanNode
-    planning_time: float | None = field(default=None)
-    execution_time: float | None = field(default=None)
-
-    def __init__(
-        self,
-        value: str,
-        plan_tree: PlanNode,
-        planning_time: float | None = None,
-        execution_time: float | None = None,
-    ):
-        self.value = value
-        self.plan_tree = plan_tree
-        self.planning_time = planning_time
-        self.execution_time = execution_time
+    planning_time: float | None = None
+    execution_time: float | None = None
 
     def to_text(self) -> str:
         """Convert the explain plan to a text representation.

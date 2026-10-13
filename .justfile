@@ -47,7 +47,7 @@ test-lowest *args:
     rsync -a --delete --exclude .git --exclude .venv --exclude .cache ./ "$copy/"
     cd "$copy"
     uv sync --quiet --all-extras --resolution lowest-direct --python 3.12
-    uv pip list | grep -iE '^(attrs|humanize|instructor|pglast|psycopg|psycopg-pool|pydantic) '
+    uv pip list | grep -iE '^(humanize|instructor|pglast|psycopg|psycopg-pool|pydantic) '
     uv run --no-sync pytest tests/unit -q {{ args }}
 
 # Lint, every test, package build and smoke test, as the CI does

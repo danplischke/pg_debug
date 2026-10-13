@@ -105,6 +105,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `columns`, is an `InvalidArgumentError`, from `PgDebug.explain_query()` as
   well, where it was an `ExplainPlanError`.
 
+- pg-debug no longer depends on `attrs`. It was installed for two classes,
+  `PlanNode` and `ExplainPlanArtifact`, which are now slotted dataclasses
+  with the same fields, constructors and equality.
+
 ### Fixed
 
 - Restricted mode refused a statement with a bare `ValueError` reading
