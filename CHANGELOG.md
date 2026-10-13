@@ -67,6 +67,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a client or an event loop. The unit tests gain a corpus of real PostgreSQL
   16 plans diagnosed this way.
 
+- `pg-debug locks` and `PgDebug.lock_tree()`: who is blocking whom, as a tree.
+  `activity` already reported the pids blocking each waiter, which left the
+  reader to follow them by hand when the database was stuck. This walks the
+  blocking graph from every waiter back to the backend that waits on nothing
+  and prints that root first — usually a session idle in a transaction, with
+  the last statement it ran — and nests everything stuck behind it beneath,
+  each line saying what it waits for (the lock mode and table, or the other
+  transaction and the table of the row) and what the holder has on it. Roots
+  are ordered by how many backends they block. It works in `restricted` mode
+  and needs no extension.
+
 ### Fixed
 
 - `SyncPgDebug` could not connect on Windows. Its event loop was Windows'
@@ -97,17 +108,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `pg-debug diagnose ./slow.sql` ran the literal text `./slow.sql` as the
   query. The README had promised a file path since the command appeared;
   it now reads one, as `check-migration` does.
-
-- `pg-debug locks` and `PgDebug.lock_tree()`: who is blocking whom, as a tree.
-  `activity` already reported the pids blocking each waiter, which left the
-  reader to follow them by hand when the database was stuck. This walks the
-  blocking graph from every waiter back to the backend that waits on nothing
-  and prints that root first — usually a session idle in a transaction, with
-  the last statement it ran — and nests everything stuck behind it beneath,
-  each line saying what it waits for (the lock mode and table, or the other
-  transaction and the table of the row) and what the holder has on it. Roots
-  are ordered by how many backends they block. It works in `restricted` mode
-  and needs no extension.
 
 ## [0.2.0] - 2026-10-06
 
