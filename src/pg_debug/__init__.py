@@ -20,6 +20,9 @@ The individual tools (:class:`SchemaInspector`, :class:`ExplainPlanTool`,
 :class:`SqlDriver` if you already manage your own connection.
 """
 
+from typing import TYPE_CHECKING
+from typing import Any
+
 from .activity import ActivityInspector
 from .client import DATABASE_URL_ENV_VARS
 from .client import AccessMode
@@ -45,7 +48,6 @@ from .health import HealthType
 from .index import MAX_NUM_INDEX_TUNING_QUERIES
 from .index import DatabaseTuningAdvisor
 from .index import IndexRecommendation
-from .index import LLMOptimizerTool
 from .index_use import IndexUse
 from .index_use import IndexUseAnalyzer
 from .index_use import IndexUseFinding
@@ -75,7 +77,20 @@ from .statistics import StatisticsInspector
 from .sync import SyncPgDebug
 from .top_queries import TopQueriesCalc
 
+if TYPE_CHECKING:
+    from .index.llm import LLMOptimizerTool
+
 __version__ = "0.2.0"
+
+
+def __getattr__(name: str) -> Any:
+    # LLMOptimizerTool needs the ``llm`` extra; see pg_debug.index.__getattr__.
+    if name == "LLMOptimizerTool":
+        from .index.llm import LLMOptimizerTool
+
+        return LLMOptimizerTool
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "DATABASE_URL_ENV_VARS",

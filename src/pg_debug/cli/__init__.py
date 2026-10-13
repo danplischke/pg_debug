@@ -31,7 +31,7 @@ from ..errors import InvalidArgumentError
 from ..errors import PgDebugError
 from ..health import HealthType
 from ..index.base import MAX_NUM_INDEX_TUNING_QUERIES
-from ..index.llm import DEFAULT_LLM_MODEL
+from ..index.llm_settings import DEFAULT_LLM_MODEL
 from ..migration import MigrationLinter
 from ..model import DEFAULT_MIN_ROWS
 from ..model import RuleId

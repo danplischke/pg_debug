@@ -109,6 +109,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `PlanNode` and `ExplainPlanArtifact`, which are now slotted dataclasses
   with the same fields, constructors and equality.
 
+- pydantic is no longer installed with pg-debug. Only the `llm` tuning
+  method uses it, so it moves to the `llm` extra, and `import pg_debug` no
+  longer loads it. `LLMOptimizerTool` is still exported from `pg_debug` and
+  `pg_debug.index`, and is imported when first asked for; without the extra,
+  asking for it raises `MissingDependencyError` with the command that installs
+  it. `DEFAULT_LLM_MODEL` and `llm_model()` are defined in
+  `pg_debug.index.llm_settings`, and `pg_debug.index.llm` still has them.
+
 ### Fixed
 
 - Restricted mode refused a statement with a bare `ValueError` reading

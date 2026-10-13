@@ -9,7 +9,6 @@ dependencies = [
     "humanize>=4.15.0",
     "pglast==7.11",
     "psycopg-pool>=3.3.0",
-    "pydantic>=2.0",
 ]
 license = "MIT"
 license-files = ["LICENSE", "NOTICE"]
@@ -37,7 +36,7 @@ Changelog = "https://github.com/danplischke/pg_debug/blob/main/CHANGELOG.md"
 Issues = "https://github.com/danplischke/pg_debug/issues"
 
 [project.optional-dependencies]
-llm = ["instructor>=1.14.4"]
+llm = ["instructor>=1.14.4", "pydantic>=2.0"]
 
 [project.scripts]
 pg-debug = "pg_debug.cli:main"
