@@ -86,6 +86,24 @@ def test_schemas_renders_a_table(pg_client):
     assert "(1 row)" in out
 
 
+def test_windows_runs_on_a_loop_psycopg_can_connect_on(pg_client, monkeypatch):
+    """psycopg's async connections refuse the proactor loop Windows makes by default."""
+    import asyncio
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    loops = []
+
+    async def list_schemas():
+        loops.append(asyncio.get_running_loop())
+        return []
+
+    pg_client.list_schemas = list_schemas
+
+    assert run(["schemas"])[0] == 0
+    assert isinstance(loops[0], asyncio.SelectorEventLoop)
+
+
 def test_json_output(pg_client):
     pg_client.list_schemas = AsyncMock(return_value=[{"schema_name": "public"}])
 

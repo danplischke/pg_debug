@@ -8,6 +8,7 @@ manage an event loop themselves.
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 from concurrent.futures import Future
 from typing import Any
@@ -53,7 +54,9 @@ class _LoopThread:
     """
 
     def __init__(self) -> None:
-        self._loop = asyncio.new_event_loop()
+        # psycopg's async connections need a selector loop. Windows' default is
+        # the proactor loop, which psycopg refuses to connect on.
+        self._loop = asyncio.SelectorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run, name="pg-debug-loop", daemon=True)
         self._thread.start()
 

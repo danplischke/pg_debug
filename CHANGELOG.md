@@ -69,6 +69,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `SyncPgDebug` could not connect on Windows. Its event loop was Windows'
+  default, the proactor loop, on which psycopg refuses to open an async
+  connection, so the first call that reached the database failed with
+  `InterfaceError`. The CLI has always worked around this; the sync client
+  never did. It now runs on a selector loop. The CLI chooses its loop for each
+  run instead of changing the process-wide event loop policy, an API Python
+  deprecated in 3.14 and removes in 3.16.
+
 - `pg-debug diagnose ./slow.sql` ran the literal text `./slow.sql` as the
   query. The README had promised a file path since the command appeared;
   it now reads one, as `check-migration` does.

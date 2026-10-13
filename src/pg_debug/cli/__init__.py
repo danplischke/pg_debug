@@ -783,13 +783,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     configure_logging(args.verbose)
 
-    if sys.platform == "win32":
-        # Psycopg on Windows is not compatible with the default ProactorEventLoop.
-        # See: https://www.psycopg.org/psycopg3/docs/advanced/async.html#async
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())  # type: ignore[attr-defined]
+    # Psycopg on Windows is not compatible with the default ProactorEventLoop.
+    # See: https://www.psycopg.org/psycopg3/docs/advanced/async.html#async
+    # A loop factory picks the loop for this run alone; setting the event loop
+    # policy changed it for the whole process and is deprecated since 3.14.
+    loop_factory = asyncio.SelectorEventLoop if sys.platform == "win32" else None
 
     try:
-        return asyncio.run(run(args))
+        return asyncio.run(run(args), loop_factory=loop_factory)
     except PgDebugError as e:
         print(f"{PROG}: {obfuscate_password(str(e))}", file=sys.stderr)
         return 1
