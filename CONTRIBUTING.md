@@ -128,6 +128,10 @@ each other once:
   upload token as the Actions secret `CODECOV_TOKEN`. Until then the coverage
   upload is attempted without a token and may be refused; that never fails
   CI.
+- **Vulnerability reports:** in *Settings → Code security*, enable *Private
+  vulnerability reporting*. `SECURITY.md` and the security link on the
+  new-issue page send reporters to that form, and without the setting there is
+  no form there.
 - **Code scanning:** the CodeQL workflow uploads its results to GitHub code
   scanning, which private repositories on a personal account do not have. It
   fails until the repository is public and needs nothing after that.
