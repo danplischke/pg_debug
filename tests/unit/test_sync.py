@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import sys
 import threading
 from unittest.mock import AsyncMock
@@ -8,6 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from pg_debug import AccessMode
+from pg_debug import PgDebug
 from pg_debug import SyncPgDebug
 from pg_debug.db import DbConnPool
 from pg_debug.errors import ExtensionRequiredError
@@ -185,3 +187,51 @@ def test_suggest_partitions_delegates_to_the_async_client(pg):
             min_pruning_share=0.8,
             limit=200,
         )
+
+
+# -- Parity with PgDebug -------------------------------------------------------
+#
+# SyncPgDebug is correct only while every method PgDebug gains is mirrored here
+# with the same parameters. These check that, instead of relying on whoever
+# adds the method to remember.
+
+#: PgDebug's coroutines with no blocking twin, and why.
+NOT_MIRRORED = {
+    # The driver belongs to the event loop SyncPgDebug runs on its own thread;
+    # handed out, it would be used from the caller's thread instead.
+    "sql_driver",
+}
+
+#: Twins whose return types differ on purpose.
+OWN_RETURN_TYPE = {
+    # Each returns itself, for chaining.
+    "connect",
+}
+
+
+def _public_coroutines() -> list[str]:
+    return sorted(name for name, member in inspect.getmembers(PgDebug, inspect.iscoroutinefunction) if not name.startswith("_"))
+
+
+def _parameters(function) -> list[tuple[str, object, object, object]]:
+    parameters = list(inspect.signature(function).parameters.values())[1:]  # without self
+    return [(p.name, p.kind, p.default, p.annotation) for p in parameters]
+
+
+def test_every_coroutine_of_pgdebug_has_a_blocking_twin():
+    assert [name for name in _public_coroutines() if name not in NOT_MIRRORED and not hasattr(SyncPgDebug, name)] == []
+
+
+@pytest.mark.parametrize("name", [name for name in _public_coroutines() if name not in NOT_MIRRORED] + ["__init__"])
+def test_a_twin_takes_the_same_arguments(name):
+    assert _parameters(getattr(SyncPgDebug, name)) == _parameters(getattr(PgDebug, name))
+
+
+@pytest.mark.parametrize("name", [name for name in _public_coroutines() if name not in NOT_MIRRORED | OWN_RETURN_TYPE])
+def test_a_twin_returns_the_same_type(name):
+    assert inspect.signature(getattr(SyncPgDebug, name)).return_annotation == inspect.signature(getattr(PgDebug, name)).return_annotation
+
+
+def test_the_exceptions_are_still_coroutines_of_pgdebug():
+    """An entry here that no longer names a method would excuse nothing."""
+    assert NOT_MIRRORED | OWN_RETURN_TYPE <= set(_public_coroutines())
