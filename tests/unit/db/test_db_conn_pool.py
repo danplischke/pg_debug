@@ -6,6 +6,9 @@ from unittest.mock import patch
 import pytest
 
 from pg_debug.db.driver import DbConnPool
+from pg_debug.db.driver import SqlDriver
+from pg_debug.errors import ConnectionFailedError
+from pg_debug.errors import InvalidArgumentError
 
 
 class AsyncContextManagerMock(AsyncMock):
@@ -109,7 +112,7 @@ async def test_pool_connect_all_retries_fail(mock_pool):
             db_pool = DbConnPool("postgresql://user:pass@localhost/db")
 
             # This should fail since pool.open raises an exception
-            with pytest.raises(Exception):
+            with pytest.raises(ConnectionFailedError, match="Could not connect to database: Persistent connection error"):
                 await db_pool.pool_connect()
 
             # Verify the pool is marked as invalid
@@ -210,3 +213,14 @@ async def test_connection_url_property():
     # Change the URL
     db_pool.connection_url = "postgresql://newuser:newpass@otherhost/otherdb"
     assert db_pool.connection_url == "postgresql://newuser:newpass@otherhost/otherdb"
+
+
+@pytest.mark.asyncio
+async def test_pool_connect_without_a_url_is_an_argument_error():
+    with pytest.raises(InvalidArgumentError, match="Database connection URL not provided"):
+        await DbConnPool().pool_connect()
+
+
+def test_a_driver_needs_a_connection_or_a_url():
+    with pytest.raises(InvalidArgumentError, match="Either conn or engine_url must be provided"):
+        SqlDriver()

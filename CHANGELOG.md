@@ -89,6 +89,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   query that overruns the restricted-mode timeout is a `QueryError` too. A
   query the validator itself fails on is still refused, and says so.
 
+- Connection failures could escape as a bare `ValueError`. `PgDebug.connect()`
+  wrapped them in `ConnectionFailedError`, but the pool reconnects on its own
+  when a connection drops mid-operation, and that path raised
+  `ValueError("Connection attempt failed: ...")` straight past the client. The
+  pool now raises `ConnectionFailedError` itself, a missing URL is an
+  `InvalidArgumentError`, and a driver used before it has a connection raises
+  `NotConnectedError`, which the README listed but nothing raised.
+
 - `SyncPgDebug` could not connect on Windows. Its event loop was Windows'
   default, the proactor loop, on which psycopg refuses to open an async
   connection, so the first call that reached the database failed with

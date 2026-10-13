@@ -21,6 +21,7 @@ from .errors import ConnectionFailedError
 from .errors import ExplainPlanError
 from .errors import ExtensionRequiredError
 from .errors import InvalidArgumentError
+from .errors import PgDebugError
 from .health import DatabaseHealthTool
 from .health import HealthCheckResult
 from .health import HealthType
@@ -197,7 +198,7 @@ class PgDebug:
         """
         try:
             await self._pool.pool_connect(self.database_url)
-        except InvalidArgumentError:
+        except PgDebugError:
             raise
         except Exception as e:
             raise ConnectionFailedError(f"Could not connect to database: {obfuscate_password(str(e))}") from e
