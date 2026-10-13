@@ -393,6 +393,55 @@ def test_check_migration_reads_a_file(pg_client, tmp_path):
     pg_client.check_migration.assert_awaited_once_with("ALTER TABLE orders ADD COLUMN n integer;")
 
 
+def test_a_file_is_read_as_utf8_whatever_the_code_page(pg_client, tmp_path):
+    """On Windows the code page is cp1252 or similar, which garbles UTF-8."""
+    sql = "COMMENT ON TABLE orders IS 'Größe → 表';"
+    pg_client.check_migration = AsyncMock(return_value=[])
+    migration = tmp_path / "002_comment.sql"
+    # with the byte order mark Notepad starts a UTF-8 file with
+    migration.write_bytes(b"\xef\xbb\xbf" + sql.encode())
+
+    assert run(["check-migration", str(migration)])[0] == 0
+    pg_client.check_migration.assert_awaited_once_with(sql)
+
+
+def test_a_file_that_is_not_utf8_is_refused(pg_client, tmp_path):
+    pg_client.check_migration = AsyncMock(return_value=[])
+    migration = tmp_path / "003_comment.sql"
+    migration.write_bytes("COMMENT ON TABLE orders IS 'Größe';".encode("cp1252"))
+
+    code, _, err = run(["check-migration", str(migration)])
+
+    assert code == 1
+    assert f"{migration} is not UTF-8 text" in err
+    pg_client.check_migration.assert_not_awaited()
+
+
+def test_stdin_is_read_as_utf8_whatever_the_code_page(pg_client, monkeypatch):
+    """A pipe on Windows decodes as cp1252 or similar, which garbles UTF-8."""
+    import io
+
+    sql = "SELECT 'Größe → 表'"
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(sql.encode()), encoding="cp1252"))
+    pg_client.execute_sql = AsyncMock(return_value=[])
+
+    assert run(["execute", "-"])[0] == 0
+    pg_client.execute_sql.assert_awaited_once_with(sql)
+
+
+def test_stdin_that_is_not_utf8_is_refused(pg_client, monkeypatch):
+    import io
+
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO("SELECT 'Größe'".encode("cp1252")), encoding="cp1252"))
+    pg_client.execute_sql = AsyncMock(return_value=[])
+
+    code, _, err = run(["execute", "-"])
+
+    assert code == 1
+    assert "Standard input is not UTF-8 text" in err
+    pg_client.execute_sql.assert_not_awaited()
+
+
 def test_check_migration_accepts_sql_inline(pg_client):
     pg_client.check_migration = AsyncMock(return_value=[])
 

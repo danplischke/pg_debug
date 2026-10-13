@@ -105,7 +105,7 @@ _IMPORT_LINE = re.compile(r"^from (pg_debug[\w.]*) import (.+)$")
 
 def _documented_imports():
     for document in DOCUMENTS:
-        for line in document.read_text().splitlines():
+        for line in document.read_text(encoding="utf-8").splitlines():
             match = _IMPORT_LINE.match(line.strip())
             if match:
                 yield document.name, match.group(1), [name.strip() for name in match.group(2).split(",")]

@@ -413,7 +413,7 @@ async def test_join_order_benchmark(db_connection, setup_test_tables, create_dta
 
         # Write workload to temp file with a unique name based on pid to avoid collisions
         sql_file_path = f"job_workload_queries_{os.getpid()}.sql"
-        with open(sql_file_path, "w") as f:
+        with open(sql_file_path, "w", encoding="utf-8") as f:
             f.write(";\n\n".join(q["query"] for q in job_queries) + ";")
 
         try:

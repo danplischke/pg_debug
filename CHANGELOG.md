@@ -77,6 +77,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   run instead of changing the process-wide event loop policy, an API Python
   deprecated in 3.14 and removes in 3.16.
 
+- SQL and plans given as a file or on standard input were decoded in the
+  platform's code page. That is UTF-8 on Linux and macOS, but cp1252 or similar
+  on Windows, where a migration or query with anything outside ASCII in it
+  arrived garbled, or stopped with a codec error. A UTF-8 file that starts
+  with a byte order mark, as Notepad writes them, failed everywhere: the mark
+  reached the parser as `syntax error at or near "ALTER"`. Input is now read
+  as UTF-8 on every platform, with or without the mark, and input that is not
+  UTF-8 is refused with the name of the file it came from rather than read
+  wrongly.
+
 - `pg-debug diagnose ./slow.sql` ran the literal text `./slow.sql` as the
   query. The README had promised a file path since the command appeared;
   it now reads one, as `check-migration` does.
