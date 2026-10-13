@@ -1,6 +1,4 @@
-"""The SQL pg_debug runs, kept apart from the code that acts on its results.
+"""SQL that more than one module runs, kept in one place so they run the same statement.
 
-Queries are moving here from the modules that run them. Until they have all
-arrived, ``tests/unit/test_sql_location.py`` lists the files that still write
-their own.
+A module's own SQL lives beside the code that reads its rows.
 """

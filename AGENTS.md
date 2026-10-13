@@ -28,7 +28,7 @@ above need nothing else.
 | `src/pg_debug/cli/` | The command; `render.py` formats output. |
 | `src/pg_debug/db/` | Driver and pool, restricted mode and its allowlist, extension and version checks. |
 | `src/pg_debug/parsing/` | pglast visitors and bind-parameter substitution for SQL we are *given*. |
-| `src/pg_debug/queries/` | SQL we *run*. New SQL goes here. |
+| `src/pg_debug/queries/` | SQL that more than one module runs. A module's own SQL stays beside the code that reads its rows. |
 | `src/pg_debug/plans/`, `health/`, `index/`, `model/`, `migration/`, `partition/` | One package per feature that needed more than one file. |
 | `src/pg_debug/activity.py`, `configuration.py`, `schema.py`, `statistics.py`, `top_queries.py` | Features that fit in one file. |
 | `tests/unit/` | Mirrors `src/pg_debug/`. Test module names must be unique across the tree. |
@@ -40,9 +40,6 @@ above need nothing else.
   and every import the README and skill show. If you change one, change the
   list there in the same commit and treat it as an API change in the
   changelog.
-- `tests/unit/test_sql_location.py` lists the modules still writing SQL
-  outside `queries/`. Never add a module to that list; remove one when you
-  move its queries.
 - `tests/unit/test_public_api.py` also checks `__version__` against the
   installed distribution. The version lives only in `src/pg_debug/__init__.py`.
 
