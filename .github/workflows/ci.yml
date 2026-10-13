@@ -67,7 +67,18 @@ jobs:
         run: docker info
 
       - name: Test
-        run: uv run pytest -v --log-cli-level=INFO
+        run: uv run pytest -v --log-cli-level=INFO --cov=pg_debug --cov-report=xml --cov-report=term-missing
+
+      # From the newest Python on Linux, where the container-backed tests run
+      # too. Without a CODECOV_TOKEN secret the upload is attempted tokenless,
+      # and a failed upload never fails the job.
+      - name: Upload coverage to Codecov
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1 — https://github.com/codecov/codecov-action/releases/tag/v7.1.1
+        with:
+          files: coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
 
   # Every direct dependency at the lowest version pyproject.toml allows, so a
   # floor that has stopped being true fails here rather than in someone's
