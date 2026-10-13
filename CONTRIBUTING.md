@@ -114,3 +114,6 @@ each other once:
   click before it uploads.
 - **Rulesets:** in *Settings → Rules → Rulesets*, import
   `.github/rulesets/main.json` and `.github/rulesets/release-tags.json`.
+  `main.json` requires one status check, `CI result`, which passes only when
+  every CI job did, so it needs re-importing only when the rules themselves
+  change.

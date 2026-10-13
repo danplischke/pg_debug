@@ -78,3 +78,19 @@ jobs:
           /tmp/smoke/bin/pg-debug --version
           /tmp/smoke/bin/python -m pg_debug --version
           /tmp/smoke/bin/python -c "import pg_debug; print(pg_debug.__version__)"
+
+  # The one check the main ruleset requires. It passes only when every job
+  # above succeeded, so a new job or matrix entry is gated without editing the
+  # ruleset, which has to be re-imported by hand.
+  result:
+    name: CI result
+    needs: [lint, test, package]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check every job succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$RESULTS" | jq -e 'all(.[]; .result == "success")' > /dev/null
