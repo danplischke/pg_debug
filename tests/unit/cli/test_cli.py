@@ -450,6 +450,19 @@ def test_stdin_is_read_as_utf8_whatever_the_code_page(pg_client, monkeypatch):
     pg_client.execute_sql.assert_awaited_once_with(sql)
 
 
+def test_tune_queries_reads_stdin_as_utf8_too(pg_client, monkeypatch):
+    import io
+
+    queries = "SELECT * FROM orders WHERE note = 'Größe'\nSELECT * FROM orders WHERE note = '表'\n"
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(queries.encode()), encoding="cp1252"))
+    pg_client.analyze_query_indexes = AsyncMock(return_value={"recommendations": []})
+
+    assert run(["tune-queries", "-"])[0] == 0
+    pg_client.analyze_query_indexes.assert_awaited_once_with(
+        ["SELECT * FROM orders WHERE note = 'Größe'", "SELECT * FROM orders WHERE note = '表'"], max_index_size_mb=10000, method="dta"
+    )
+
+
 def test_stdin_that_is_not_utf8_is_refused(pg_client, monkeypatch):
     import io
 
