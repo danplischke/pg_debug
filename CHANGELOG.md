@@ -8,6 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Python 3.14 is supported, and the package metadata says so; CI runs the
+  suite on 3.12, 3.13 and 3.14, and on macOS, where the container-backed
+  tests skip and the rest run.
+
 - `--baseline FILE` and `--save-baseline FILE` on `health`, `model` and
   `config`. Their `--exit-code` makes them build gates, and the trouble with
   a gate on an existing database is the first run: it fails on everything,

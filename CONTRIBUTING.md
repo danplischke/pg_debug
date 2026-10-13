@@ -10,7 +10,8 @@ uv run pre-commit install     # runs the checks below on every commit
 
 ## Checks
 
-CI runs exactly these, on Python 3.12 and 3.13. A pull request has to pass them.
+CI runs exactly these, the tests on Python 3.12, 3.13 and 3.14 and on macOS.
+A pull request has to pass them.
 
 ```bash
 uv run ruff format --check .  # formatting (uv run ruff format . to fix)
