@@ -226,7 +226,7 @@ class PartitionAdvisor:
         try:
             rows = await SafeSqlDriver.execute_param_query(self.sql_driver, cast(LiteralString, WORKLOAD_SQL), [limit])
         except Exception as e:
-            logger.debug(f"Could not read the workload: {e}")
+            logger.debug("Could not read the workload: %s", e)
             return []
 
         workload = []
@@ -327,7 +327,7 @@ def _weigh_workload(workload: list[dict[str, Any]], table: str, qualified: str) 
         except ParseError as e:
             # One malformed entry among hundreds is not a reason to say nothing
             # about the table.
-            logger.debug(f"Skipping unparseable query ({e}): {entry['query'][:50]}...")
+            logger.debug("Skipping unparseable query (%s): %s...", e, entry["query"][:50])
             continue
 
         for raw in parsed:

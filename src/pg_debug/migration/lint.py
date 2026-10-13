@@ -200,7 +200,7 @@ class MigrationLinter:
                 [names],
             )
         except Exception as e:
-            logger.debug(f"Could not resolve default volatility: {e}")
+            logger.debug("Could not resolve default volatility: %s", e)
             return
 
         volatility = {row.cells["name"]: bool(row.cells["volatile"]) for row in rows or []}
@@ -251,7 +251,7 @@ class MigrationLinter:
         except Exception as e:
             # A migration is worth reviewing even against a database that will
             # not answer questions about it.
-            logger.debug(f"Could not size the tables in the migration: {e}")
+            logger.debug("Could not size the tables in the migration: %s", e)
             return
 
         for review in reviews:

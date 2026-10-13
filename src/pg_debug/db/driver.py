@@ -205,7 +205,7 @@ class DbConnPool:
                 # Close the pool
                 await self.pool.close()
             except Exception as e:
-                logger.warning(f"Error closing connection pool: {e}")
+                logger.warning("Error closing connection pool: %s", e)
             finally:
                 self.pool = None
                 self._is_valid = False
@@ -387,7 +387,7 @@ class SqlDriver:
             await self._pinned_connection.rollback()
         except Exception as rollback_error:
             # Never let this replace the error that caused it.
-            logger.error(f"Error clearing the session's aborted transaction: {rollback_error}")
+            logger.error("Error clearing the session's aborted transaction: %s", rollback_error)
 
     async def _execute_with_connection(self, connection, query, params, force_readonly) -> list[RowResult] | None:
         """Execute query with the given connection."""
@@ -434,9 +434,9 @@ class SqlDriver:
                 try:
                     await connection.rollback()
                 except Exception as rollback_error:
-                    logger.error(f"Error rolling back transaction: {rollback_error}")
+                    logger.error("Error rolling back transaction: %s", rollback_error)
 
-            logger.error(f"Error executing query ({query}): {e}")
+            logger.error("Error executing query (%s): %s", query, e)
             raise e
 
     async def execute_query_and_rollback(self, query: LiteralString, params: list[Any] | None = None) -> list[RowResult] | None:
@@ -495,4 +495,4 @@ class SqlDriver:
                 await connection.rollback()
             except Exception as rollback_error:
                 # Never let this replace whatever the statement itself raised.
-                logger.error(f"Error rolling back the diagnosed statement: {rollback_error}")
+                logger.error("Error rolling back the diagnosed statement: %s", rollback_error)

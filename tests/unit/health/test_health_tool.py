@@ -11,8 +11,8 @@ logger = logging.getLogger(__name__)
 @pytest.fixture
 def local_sql_driver(test_postgres_connection_string):
     connection_string, version = test_postgres_connection_string
-    logger.info(f"Using connection string: {connection_string}")
-    logger.info(f"Using version: {version}")
+    logger.info("Using connection string: %s", connection_string)
+    logger.info("Using version: %s", version)
     return SqlDriver(engine_url=connection_string)
 
 

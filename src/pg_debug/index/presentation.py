@@ -169,7 +169,7 @@ class TextPresentation:
                 **langfuse_trace,
             }
         except Exception as e:
-            logger.error(f"Error analyzing queries: {e}", exc_info=True)
+            logger.error("Error analyzing queries: %s", e, exc_info=True)
             return {"error": f"Error analyzing queries: {e}"}
 
     def _build_recommendations_list(self, session: IndexTuningResult) -> list[dict[str, Any]]:

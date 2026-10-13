@@ -93,7 +93,7 @@ class DatabaseTuningAdvisor(IndexTuningBase):
         # Get existing indexes
         existing_index_defs: set[str] = {idx["definition"] for idx in await self._get_existing_indexes()}
 
-        logger.debug(f"Existing indexes ({len(existing_index_defs)}): {pp_list(list(existing_index_defs))}")
+        logger.debug("Existing indexes (%s): %s", len(existing_index_defs), pp_list(list(existing_index_defs)))
 
         # generate initial candidates
         all_candidates = await self.generate_candidates(query_weights, existing_index_defs)
@@ -518,7 +518,7 @@ class DatabaseTuningAdvisor(IndexTuningBase):
         # The query text is assembled from literals; only bound parameters vary.
         result = await SafeSqlDriver.execute_param_query(self.sql_driver, cast(LiteralString, type_query), params)
 
-        logger.debug(f"Column types and length limits: {result}")
+        logger.debug("Column types and length limits: %s", result)
 
         if not result:
             logger.debug("No column types and length limits found")
@@ -544,7 +544,7 @@ class DatabaseTuningAdvisor(IndexTuningBase):
                 # the values actually are long.
                 if avg_width is None or avg_width > max_text_length * 0.4:
                     problematic_columns.add((table, column))
-                    logger.debug(f"Identified potentially long text column: {table}.{column} (avg_width: {avg_width})")
+                    logger.debug("Identified potentially long text column: %s.%s (avg_width: %s)", table, column, avg_width)
                 elif avg_width > MIN_TEXT_WIDTH_TO_WARN:
                     potential_problematic_columns.add((table, column))
                 # Anything narrower is a short string in an unbounded column —
@@ -558,7 +558,7 @@ class DatabaseTuningAdvisor(IndexTuningBase):
             for column in candidate.columns:
                 if (candidate.table, column) in problematic_columns:
                     valid = False
-                    logger.debug(f"Skipping index candidate with long text column: {candidate.table}.{column}")
+                    logger.debug("Skipping index candidate with long text column: %s.%s", candidate.table, column)
                     break
                 elif (candidate.table, column) in potential_problematic_columns:
                     candidate.potential_problematic_reason = "long_text_column"
@@ -922,7 +922,7 @@ class ConditionColumnCollector(ColumnCollector):
                     found_match = True
 
             if not found_match:
-                logger.debug(f"Could not resolve unqualified column '{column}' to any table")
+                logger.debug("Could not resolve unqualified column '%s' to any table", column)
 
     def _column_exists(self, table: str, column: str) -> bool:
         """Check if column exists in table."""
