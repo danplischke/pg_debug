@@ -24,6 +24,7 @@ from pg_debug import SyncPgDebug
 from pg_debug import cli
 from pg_debug.db import SafeSqlDriver
 from pg_debug.errors import ExtensionRequiredError
+from pg_debug.errors import IndexTuningError
 from pg_debug.errors import InvalidArgumentError
 from pg_debug.errors import QueryError
 from pg_debug.health.checks.autovacuum import AutovacuumCalc
@@ -426,11 +427,13 @@ async def tuning_table(pg):
 async def test_analyze_query_indexes(pg, tuning_table):
     query = f"SELECT * FROM {tuning_table} WHERE customer_id = 42 AND status = 'paid'"
 
-    result = await pg.analyze_query_indexes([query])
-
     if not await has_extension(pg, "hypopg"):
-        assert "hypopg" in result["error"]
+        with pytest.raises(ExtensionRequiredError) as excinfo:
+            await pg.analyze_query_indexes([query])
+        assert excinfo.value.extension == "hypopg"
         return
+
+    result = await pg.analyze_query_indexes([query])
 
     assert result["summary"]["total_recommendations"] >= 1
     assert all(rec["index_target_table"] == tuning_table for rec in result["recommendations"])
@@ -1279,7 +1282,6 @@ async def test_a_view_in_the_workload_does_not_abort_the_analysis(pg):
 
     result = await pg.analyze_query_indexes([f"SELECT * FROM {SCHEMA}.paid_orders WHERE customer_id = 42"])
 
-    assert "error" not in result
     # The index belongs on the table underneath, which this query does not name.
     assert result["recommendations"] == "No index recommendations found."
 
@@ -1293,7 +1295,6 @@ async def test_a_view_alongside_a_table_still_yields_the_table_index(pg):
         [f"SELECT o.* FROM {SCHEMA}.paid_orders p JOIN {SCHEMA}.orders o ON o.id = p.id WHERE o.customer_id = 42"]
     )
 
-    assert "error" not in result
     assert any("orders" in rec["index_definition"] for rec in result["recommendations"])
 
 
@@ -1313,7 +1314,6 @@ async def test_an_unusable_query_is_skipped_rather_than_ending_the_analysis(pg):
 
     session = await advisor.analyze_workload(workload=workload)
 
-    assert session.error is None
     assert [rec.table for rec in session.recommendations] == [f"{SCHEMA}.orders"]
 
 
@@ -1327,10 +1327,8 @@ async def test_a_wholly_unusable_workload_explains_itself(pg):
     advisor = DatabaseTuningAdvisor(await pg.sql_driver())
     workload = [{"query": HIDDEN_QUERY_TEXT, "queryid": 1, "calls": 100, "avg_exec_time": 10.0}]
 
-    session = await advisor.analyze_workload(workload=workload)
-
-    assert session.recommendations == []
-    assert "pg_read_all_stats" in (session.error or "")
+    with pytest.raises(IndexTuningError, match="pg_read_all_stats"):
+        await advisor.analyze_workload(workload=workload)
 
 
 @pytest.mark.asyncio

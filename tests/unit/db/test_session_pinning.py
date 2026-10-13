@@ -15,6 +15,7 @@ from pg_debug.db import QUERY_MARKER
 from pg_debug.db import DbConnPool
 from pg_debug.db import SafeSqlDriver
 from pg_debug.db import SqlDriver
+from pg_debug.errors import ExtensionRequiredError
 
 
 class RotatingPool:
@@ -156,7 +157,8 @@ async def test_index_tuning_runs_inside_a_session():
     advisor = DatabaseTuningAdvisor(sql_driver)
     # Prechecks fail on the empty response, which is enough: the session has to
     # be entered before them.
-    await advisor.analyze_workload(query_list=["SELECT 1"])
+    with pytest.raises(ExtensionRequiredError):
+        await advisor.analyze_workload(query_list=["SELECT 1"])
 
     assert entered == [True]
 

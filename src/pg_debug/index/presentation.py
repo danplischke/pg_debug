@@ -7,6 +7,7 @@ from typing import Any
 import humanize
 
 from ..db import SqlDriver
+from ..errors import InvalidArgumentError
 from ..plans.tree import ExplainPlanArtifact
 from ..plans.tree import calculate_improvement_multiple
 from .base import IndexDefinition
@@ -44,7 +45,7 @@ class TextPresentation:
             max_index_size_mb: Maximum total size for recommended indexes in MB
 
         Returns:
-            Dict with recommendations or error
+            Dict with recommendations
         """
         return await self._execute_analysis(
             min_calls=50,
@@ -65,10 +66,13 @@ class TextPresentation:
             max_index_size_mb: Maximum total size for recommended indexes in MB
 
         Returns:
-            Dict with recommendations or error
+            Dict with recommendations
+
+        Raises:
+            InvalidArgumentError: If no queries are given.
         """
         if not queries:
-            return {"error": "No queries provided for analysis"}
+            raise InvalidArgumentError("No queries provided for analysis")
 
         return await self._execute_analysis(
             query_list=queries,
@@ -90,7 +94,7 @@ class TextPresentation:
             max_index_size_mb: Maximum total size for recommended indexes in MB
 
         Returns:
-            Dict with recommendations or error
+            Dict with recommendations
         """
         return await self._execute_analysis(
             query_list=[query],
@@ -112,65 +116,59 @@ class TextPresentation:
         Execute indexing analysis
 
         Returns:
-            Dict with recommendations or dict with error
+            Dict with recommendations
+
+        Raises:
+            PgDebugError: Whatever the analysis raised; see
+                IndexTuningBase.analyze_workload.
         """
-        try:
-            # Run the index tuning analysis
-            session = await self.index_tuning.analyze_workload(
-                query_list=query_list,
-                min_calls=min_calls,
-                min_avg_time_ms=min_avg_time_ms,
-                limit=limit,
-                max_index_size_mb=max_index_size_mb,
-            )
+        # Run the index tuning analysis
+        session = await self.index_tuning.analyze_workload(
+            query_list=query_list,
+            min_calls=min_calls,
+            min_avg_time_ms=min_avg_time_ms,
+            limit=limit,
+            max_index_size_mb=max_index_size_mb,
+        )
 
-            # Tuning traces are verbose and only useful when debugging the
-            # advisor itself, so they are opt-in via PG_DEBUG_INCLUDE_TRACE=true.
-            include_trace = os.environ.get("PG_DEBUG_INCLUDE_TRACE", "false").lower() == "true"
-            langfuse_trace = {"_trace": session.dta_traces} if include_trace else {}
+        # Tuning traces are verbose and only useful when debugging the
+        # advisor itself, so they are opt-in via PG_DEBUG_INCLUDE_TRACE=true.
+        include_trace = os.environ.get("PG_DEBUG_INCLUDE_TRACE", "false").lower() == "true"
+        langfuse_trace = {"_trace": session.dta_traces} if include_trace else {}
 
-            if session.error:
-                return {
-                    "error": session.error,
-                    **langfuse_trace,
-                }
-
-            if not session.recommendations:
-                return {
-                    "recommendations": "No index recommendations found.",
-                    **langfuse_trace,
-                }
-
-            # Calculate overall statistics
-            total_size_bytes = sum(rec.estimated_size_bytes for rec in session.recommendations)
-
-            # Calculate overall performance improvement
-            initial_cost = session.recommendations[0].progressive_base_cost if session.recommendations else 0
-            new_cost = session.recommendations[-1].progressive_recommendation_cost if session.recommendations else 1.0
-            improvement_multiple = calculate_improvement_multiple(initial_cost, new_cost)
-
-            # Build recommendations list
-            recommendations = self._build_recommendations_list(session)
-
-            # Generate query impact section using helper function
-            query_impact = await self._generate_query_impact(session)
-
-            # Create the result JSON object with summary, recommendations, and query impact
+        if not session.recommendations:
             return {
-                "summary": {
-                    "total_recommendations": len(session.recommendations),
-                    "base_cost": f"{initial_cost:.1f}",
-                    "new_cost": f"{new_cost:.1f}",
-                    "total_size_bytes": humanize.naturalsize(total_size_bytes),
-                    "improvement_multiple": f"{improvement_multiple:.1f}",
-                },
-                "recommendations": recommendations,
-                "query_impact": query_impact,
+                "recommendations": "No index recommendations found.",
                 **langfuse_trace,
             }
-        except Exception as e:
-            logger.error("Error analyzing queries: %s", e, exc_info=True)
-            return {"error": f"Error analyzing queries: {e}"}
+
+        # Calculate overall statistics
+        total_size_bytes = sum(rec.estimated_size_bytes for rec in session.recommendations)
+
+        # Calculate overall performance improvement
+        initial_cost = session.recommendations[0].progressive_base_cost if session.recommendations else 0
+        new_cost = session.recommendations[-1].progressive_recommendation_cost if session.recommendations else 1.0
+        improvement_multiple = calculate_improvement_multiple(initial_cost, new_cost)
+
+        # Build recommendations list
+        recommendations = self._build_recommendations_list(session)
+
+        # Generate query impact section using helper function
+        query_impact = await self._generate_query_impact(session)
+
+        # Create the result JSON object with summary, recommendations, and query impact
+        return {
+            "summary": {
+                "total_recommendations": len(session.recommendations),
+                "base_cost": f"{initial_cost:.1f}",
+                "new_cost": f"{new_cost:.1f}",
+                "total_size_bytes": humanize.naturalsize(total_size_bytes),
+                "improvement_multiple": f"{improvement_multiple:.1f}",
+            },
+            "recommendations": recommendations,
+            "query_impact": query_impact,
+            **langfuse_trace,
+        }
 
     def _build_recommendations_list(self, session: IndexTuningResult) -> list[dict[str, Any]]:
         recommendations = []

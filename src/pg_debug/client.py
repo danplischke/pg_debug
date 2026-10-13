@@ -690,8 +690,14 @@ class PgDebug:
                 client's own setting for this call.
 
         Returns:
-            A dict with ``summary``, ``recommendations`` and ``query_impact``,
-            or an ``error`` key when the analysis could not be completed.
+            A dict with ``summary``, ``recommendations`` and ``query_impact``.
+            When nothing is worth recommending, ``recommendations`` says so.
+
+        Raises:
+            InvalidArgumentError: If ``method`` is not ``dta`` or ``llm``.
+            ExtensionRequiredError: If HypoPG is not installed.
+            IndexTuningError: If the tables have never been analyzed, none of
+                the workload could be analyzed, or the analysis failed.
         """
         presentation = await self._index_tuning_presentation(method, llm_model)
         return await presentation.analyze_workload(max_index_size_mb=max_index_size_mb)
@@ -714,11 +720,14 @@ class PgDebug:
                 client's own setting for this call.
 
         Returns:
-            A dict with ``summary``, ``recommendations`` and ``query_impact``,
-            or an ``error`` key when the analysis could not be completed.
+            A dict with ``summary``, ``recommendations`` and ``query_impact``.
+            When nothing is worth recommending, ``recommendations`` says so.
 
         Raises:
             InvalidArgumentError: If no queries are given, or too many.
+            ExtensionRequiredError: If HypoPG is not installed.
+            IndexTuningError: If the tables have never been analyzed, none of
+                the queries could be analyzed, or the analysis failed.
         """
         if not queries:
             raise InvalidArgumentError("Please provide a non-empty list of queries to analyze.")

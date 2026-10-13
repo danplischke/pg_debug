@@ -78,6 +78,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are ordered by how many backends they block. It works in `restricted` mode
   and needs no extension.
 
+### Changed
+
+- Index tuning raises instead of returning an `error` key. A failed
+  `analyze_workload_indexes()` or `analyze_query_indexes()` returned
+  `{"error": "..."}`, the one place the library did not raise, so
+  `except PgDebugError` never saw it and a caller reading only
+  `recommendations` found nothing to recommend. A missing HypoPG now raises
+  `ExtensionRequiredError`; tables that were never analyzed, a workload none
+  of which could be analyzed, and an analysis that fails part way raise the
+  new `IndexTuningError`; any other library error, such as a `QueryError`,
+  comes through unchanged. `DatabaseTuningAdvisor.analyze_workload()` raises
+  the same way, and `IndexTuningResult` has no `error` field. A workload with
+  nothing worth recommending still returns normally. The CLI reports these
+  failures as it reports every other one, on standard error with exit status
+  1, where it printed `Index tuning failed: ...`, or an `error` object under
+  `--json`, on standard output.
+
 ### Fixed
 
 - Restricted mode refused a statement with a bare `ValueError` reading

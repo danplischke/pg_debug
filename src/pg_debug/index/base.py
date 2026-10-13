@@ -18,6 +18,9 @@ from ..db import SqlDriver
 from ..db import check_hypopg_installation_status
 from ..db import split_table_reference
 from ..db import table_identifier
+from ..errors import ExtensionRequiredError
+from ..errors import IndexTuningError
+from ..errors import PgDebugError
 from ..parsing import SqlBindParams
 from ..parsing import TableAliasVisitor
 from ..plans import ExplainPlanTool
@@ -181,7 +184,6 @@ class IndexTuningResult:
 
     # Output results
     recommendations: list[IndexRecommendationAnalysis] = field(default_factory=list)
-    error: str | None = None
     dta_traces: list[str] = field(default_factory=list)
 
 
@@ -247,7 +249,16 @@ class IndexTuningBase(ABC):
             max_index_size_mb: Maximum total size of recommended indexes in MB
 
         Returns:
-            IndexTuningResult with analysis results
+            IndexTuningResult with analysis results. A workload with nothing to
+            recommend returns one with no recommendations.
+
+        Raises:
+            ExtensionRequiredError: If HypoPG is not installed.
+            IndexTuningError: If the tables have never been analyzed, none of
+                the workload's queries could be analyzed, or the analysis
+                failed part way.
+            PgDebugError: Any other error from the library, such as a
+                QueryError from the database, unchanged.
         """
         session_id = str(int(time.time()))
         self._analysis_start_time = time.time()
@@ -270,10 +281,7 @@ class IndexTuningBase(ABC):
             # connection: HypoPG state is session-scoped, and without a pin
             # the pool is free to hand the next statement a different one.
             async with self.sql_driver.session():
-                # Run pre-checks
-                precheck_result = await self._run_prechecks(session)
-                if precheck_result:
-                    return precheck_result
+                await self._run_prechecks()
 
                 # First try to use explicit workload if provided
                 if workload:
@@ -316,12 +324,12 @@ class IndexTuningBase(ABC):
 
                 if query_weights is None or len(query_weights) == 0:
                     self.dta_trace("No query provided")
-                    session.recommendations = []
                     # "No index recommendations" reads as "your indexes are
                     # fine". If the workload was dropped rather than analyzed,
                     # say which it was.
                     if self._workload_warning:
-                        session.error = self._workload_warning
+                        raise IndexTuningError(self._workload_warning)
+                    session.recommendations = []
                 else:
                     # Gather queries as strings
                     workload_queries = [q for q, _, _ in query_weights]
@@ -335,46 +343,35 @@ class IndexTuningBase(ABC):
                     # Reset HypoPG only once at the end
                     await self.sql_driver.execute_query("SELECT hypopg_reset();")
 
+        except PgDebugError:
+            raise
         except Exception as e:
             logger.error("Error in workload analysis: %s", e, exc_info=True)
-            session.error = f"Error in workload analysis: {e}"
+            raise IndexTuningError(f"Index tuning failed: {e}") from e
 
         session.dta_traces = self._dta_traces
         return session
 
-    async def _run_prechecks(self, session: IndexTuningResult) -> IndexTuningResult | None:
-        """
-        Run pre-checks before analysis and return a session with error if any check fails.
+    async def _run_prechecks(self) -> None:
+        """Refuse to analyze what the advisor cannot plan against.
 
-        Args:
-            session: The current DTASession object
-
-        Returns:
-            The DTASession with error information if any check fails, None if all checks pass
+        Raises:
+            ExtensionRequiredError: If HypoPG is not installed.
+            IndexTuningError: If no table has ever been analyzed.
         """
         # Pre-check 1: Check HypoPG with more granular feedback
-        # Use our new utility function to check HypoPG status
         is_hypopg_installed, hypopg_message = await check_hypopg_installation_status(self.sql_driver)
-
-        # If hypopg is not installed or not available, add error to session
         if not is_hypopg_installed:
-            session.error = hypopg_message
-            return session
+            raise ExtensionRequiredError("hypopg", hypopg_message)
 
         # Pre-check 2: Check if ANALYZE has been run at least once
         result = await self.sql_driver.execute_query("SELECT s.last_analyze FROM pg_stat_user_tables s ORDER BY s.last_analyze LIMIT 1;")
         if not result or not any(row.cells.get("last_analyze") is not None for row in result):
-            error_message = (
+            raise IndexTuningError(
                 "Statistics are not up-to-date. The database needs to be analyzed first. "
                 "Please run 'ANALYZE;' on your database before using the tuning advisor. "
                 "Without up-to-date statistics, the index recommendations may be inaccurate."
             )
-            session.error = error_message
-            logger.error(error_message)
-            return session
-
-        # All checks passed
-        return None
 
     async def _validate_and_parse_workload(self, workload: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Keep the queries that can be analyzed, and say what was dropped.

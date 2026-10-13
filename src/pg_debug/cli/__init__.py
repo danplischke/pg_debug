@@ -810,9 +810,7 @@ async def run(args: argparse.Namespace) -> int:
         # fires on advice gets turned off.
         return UNHEALTHY_EXIT_CODE if any(finding.severity is Severity.HIGH for finding in result) else 0
 
-    # Index tuning reports a failure in its payload rather than raising, so the
-    # exit status has to be derived from the result.
-    return 1 if isinstance(result, dict) and result.get("error") else 0
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:

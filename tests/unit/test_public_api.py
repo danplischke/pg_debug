@@ -40,6 +40,7 @@ PUBLIC_NAMES = [
     "HealthType",
     "IndexDefinition",
     "IndexRecommendation",
+    "IndexTuningError",
     "IndexUse",
     "IndexUseAnalyzer",
     "IndexUseFinding",

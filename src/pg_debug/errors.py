@@ -44,6 +44,14 @@ class QueryError(PgDebugError):
     """Raised when a query is rejected or fails to execute."""
 
 
+class IndexTuningError(PgDebugError):
+    """Raised when index tuning could not finish.
+
+    For example: the tables have never been analyzed, so there are no
+    statistics to plan with, or none of the workload's queries could be read.
+    """
+
+
 class MissingDependencyError(PgDebugError, ImportError):
     """Raised when an optional dependency is needed but not installed."""
 
@@ -52,6 +60,7 @@ __all__ = [
     "ConnectionFailedError",
     "ExplainPlanError",
     "ExtensionRequiredError",
+    "IndexTuningError",
     "InvalidArgumentError",
     "MissingDependencyError",
     "NotConnectedError",

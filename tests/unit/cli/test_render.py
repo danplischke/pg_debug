@@ -117,10 +117,6 @@ def test_render_object_details_when_missing():
     assert render_object_details({}) == "(object not found)"
 
 
-def test_render_index_recommendations_reports_errors():
-    assert render_index_recommendations({"error": "no queries found"}) == "Index tuning failed: no queries found"
-
-
 def test_render_index_recommendations_when_none_found():
     assert render_index_recommendations({"recommendations": "No index recommendations found."}) == "No index recommendations found."
 
