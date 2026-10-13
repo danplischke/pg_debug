@@ -10,6 +10,8 @@ import argparse
 import importlib
 import importlib.metadata
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pg_debug
@@ -117,6 +119,39 @@ def test_top_level_exports_are_unchanged():
 
 def test_every_export_resolves():
     assert [name for name in pg_debug.__all__ if not hasattr(pg_debug, name)] == []
+
+
+def test_the_llm_method_is_exported_where_it_was():
+    from pg_debug.index import LLMOptimizerTool
+    from pg_debug.index import llm
+
+    assert LLMOptimizerTool is llm.LLMOptimizerTool is pg_debug.LLMOptimizerTool
+
+
+def test_importing_the_package_does_not_load_the_llm_method():
+    """It needs the llm extra. Loaded on import, it made pydantic a dependency
+    of every install, and every run pay for importing it."""
+    code = "import sys, pg_debug, pg_debug.cli, pg_debug.index; print(sorted(m for m in ('pydantic', 'pg_debug.index.llm') if m in sys.modules))"
+
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+
+    assert result.stdout.strip() == "[]"
+
+
+def test_the_llm_method_without_its_extra_says_how_to_install_it():
+    code = (
+        "import sys\n"
+        "sys.modules['pydantic'] = None  # as though the llm extra were not installed\n"
+        "import pg_debug\n"
+        "try:\n"
+        "    pg_debug.LLMOptimizerTool\n"
+        "except pg_debug.MissingDependencyError as e:\n"
+        "    print(e)\n"
+    )
+
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
+
+    assert "pip install 'pg-debug[llm]'" in result.stdout
 
 
 def test_cli_commands_are_unchanged():

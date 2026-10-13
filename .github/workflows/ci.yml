@@ -129,6 +129,21 @@ jobs:
           /tmp/smoke/bin/python -m pg_debug --version
           /tmp/smoke/bin/python -c "import pg_debug; print(pg_debug.__version__)"
 
+      # pydantic belongs to the llm extra, so the install above has none, and
+      # everything but the llm method has to work without it.
+      - name: Check the wheel needs no extra outside the llm method
+        run: |
+          /tmp/smoke/bin/python -c "import importlib.util; assert importlib.util.find_spec('pydantic') is None, 'pydantic was installed without the llm extra'"
+          /tmp/smoke/bin/python - <<'PY'
+          import pg_debug
+          try:
+              pg_debug.LLMOptimizerTool
+          except pg_debug.MissingDependencyError as e:
+              print(e)
+          else:
+              raise SystemExit("the llm method imported without its extra")
+          PY
+
   # The one check the main ruleset requires. It passes only when every job
   # above succeeded, so a new job or matrix entry is gated without editing the
   # ruleset, which has to be re-imported by hand.

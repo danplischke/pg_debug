@@ -26,7 +26,6 @@ from .health import HealthCheckResult
 from .health import HealthType
 from .index.base import MAX_NUM_INDEX_TUNING_QUERIES
 from .index.dta import DatabaseTuningAdvisor
-from .index.llm import LLMOptimizerTool
 from .index.presentation import TextPresentation
 from .index_use import IndexUse
 from .index_use import IndexUseAnalyzer
@@ -142,7 +141,7 @@ class PgDebug:
                 through it.
             llm_model: Model for the ``llm`` index tuning method. Defaults to
                 the ``PG_DEBUG_LLM_MODEL`` environment variable, then to
-                :data:`~pg_debug.index.llm.DEFAULT_LLM_MODEL`.
+                :data:`~pg_debug.index.llm_settings.DEFAULT_LLM_MODEL`.
             pool: An existing connection pool to use. When given, the client
                 does not close it on exit and does not reconfigure it, so
                 ``search_path`` and the server-side timeout are its owner's
@@ -737,8 +736,14 @@ class PgDebug:
             raise InvalidArgumentError(f"Unknown index tuning method: {method}. Valid values are: dta, llm.")
 
         driver = await self.sql_driver()
-        index_tuning = DatabaseTuningAdvisor(driver) if method == "dta" else LLMOptimizerTool(driver, model=llm_model or self.llm_model)
-        return TextPresentation(driver, index_tuning)
+        if method == "dta":
+            return TextPresentation(driver, DatabaseTuningAdvisor(driver))
+
+        # Here rather than at the top: the method needs the llm extra, and
+        # importing it without the extra raises MissingDependencyError.
+        from .index.llm import LLMOptimizerTool
+
+        return TextPresentation(driver, LLMOptimizerTool(driver, model=llm_model or self.llm_model))
 
 
 __all__ = [

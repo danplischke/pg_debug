@@ -344,7 +344,7 @@ async def test_analyze_query_indexes_uses_dta_by_default(pg):
 async def test_analyze_workload_indexes_with_llm_method(pg):
     with (
         patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
-        patch("pg_debug.client.LLMOptimizerTool") as llm_cls,
+        patch("pg_debug.index.llm.LLMOptimizerTool") as llm_cls,
         patch("pg_debug.client.TextPresentation") as presentation_cls,
     ):
         presentation_cls.return_value.analyze_workload = AsyncMock(return_value={"recommendations": []})
@@ -372,7 +372,7 @@ async def test_llm_method_rejects_multiple_queries_up_front(pg):
 async def test_llm_method_accepts_a_single_query(pg):
     with (
         patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
-        patch("pg_debug.client.LLMOptimizerTool"),
+        patch("pg_debug.index.llm.LLMOptimizerTool"),
         patch("pg_debug.client.TextPresentation") as presentation_cls,
     ):
         presentation_cls.return_value.analyze_queries = AsyncMock(return_value={"recommendations": []})
@@ -405,7 +405,7 @@ def test_llm_model_defaults_to_the_environment(monkeypatch, pool):
 async def test_llm_model_from_the_client_reaches_the_optimizer(pg):
     with (
         patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
-        patch("pg_debug.client.LLMOptimizerTool") as llm_cls,
+        patch("pg_debug.index.llm.LLMOptimizerTool") as llm_cls,
         patch("pg_debug.client.TextPresentation") as presentation_cls,
     ):
         presentation_cls.return_value.analyze_queries = AsyncMock(return_value={})
@@ -419,7 +419,7 @@ async def test_llm_model_from_the_client_reaches_the_optimizer(pg):
 async def test_a_per_call_llm_model_wins(pg):
     with (
         patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
-        patch("pg_debug.client.LLMOptimizerTool") as llm_cls,
+        patch("pg_debug.index.llm.LLMOptimizerTool") as llm_cls,
         patch("pg_debug.client.TextPresentation") as presentation_cls,
     ):
         presentation_cls.return_value.analyze_workload = AsyncMock(return_value={})

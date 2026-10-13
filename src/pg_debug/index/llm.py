@@ -1,12 +1,10 @@
 import logging
 import math
-import os
 from dataclasses import dataclass
 from typing import Any
 from typing import override
 
 from pglast.ast import SelectStmt
-from pydantic import BaseModel
 
 from ..db import SqlDriver
 from ..errors import IndexTuningError
@@ -16,10 +14,18 @@ from ..plans.explain import ExplainPlanTool
 from ..plans.hypothetical import IndexDefinition
 from .base import IndexRecommendation
 from .base import IndexTuningBase
+from .llm_settings import DEFAULT_LLM_MODEL
+from .llm_settings import LLM_EXTRA_REQUIRED
+from .llm_settings import llm_model
+
+try:
+    from pydantic import BaseModel
+except ImportError as e:  # pragma: no cover - depends on install extras
+    raise MissingDependencyError(LLM_EXTRA_REQUIRED) from e
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_LLM_MODEL = "gpt-4o"
+__all__ = ["DEFAULT_LLM_MODEL", "Index", "IndexingAlternative", "LLMOptimizerTool", "llm_model"]
 
 
 def _make_llm_client():
@@ -34,20 +40,9 @@ def _make_llm_client():
         import instructor
         from openai import OpenAI
     except ImportError as e:  # pragma: no cover - depends on install extras
-        raise MissingDependencyError(
-            "The 'llm' index tuning method requires extra dependencies. Install them with: pip install 'pg-debug[llm]'"
-        ) from e
+        raise MissingDependencyError(LLM_EXTRA_REQUIRED) from e
 
     return instructor.from_openai(OpenAI())
-
-
-def llm_model() -> str:
-    """The model the LLM optimizer asks for candidate indexes.
-
-    Override it with PG_DEBUG_LLM_MODEL — the default is a capable general
-    model, but the prompt is not tied to it.
-    """
-    return os.environ.get("PG_DEBUG_LLM_MODEL", DEFAULT_LLM_MODEL)
 
 
 # We introduce a Pydantic index class to facilitate communication with the LLM
