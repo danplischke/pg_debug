@@ -20,7 +20,7 @@ from pg_debug import cli
 REPOSITORY = Path(__file__).resolve().parents[2]
 
 #: Documents whose code samples import from pg_debug.
-DOCUMENTS = (REPOSITORY / "README.md", REPOSITORY / ".claude" / "skills" / "pg-debug" / "SKILL.md")
+DOCUMENTS = (REPOSITORY / "README.md", *sorted((REPOSITORY / ".claude" / "skills" / "pg-debug").rglob("*.md")))
 
 PUBLIC_NAMES = [
     "AccessMode",
