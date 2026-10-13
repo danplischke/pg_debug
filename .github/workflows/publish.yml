@@ -1,7 +1,8 @@
 name: Publish
 
 # A release is a tag `vX.Y.Z` on a commit that is on main and whose
-# `__version__` is X.Y.Z. Anything else is refused before it is built.
+# `__version__` is X.Y.Z. Anything else is refused before it is built, and
+# nothing is uploaded until CI has passed again on the tagged commit.
 # `workflow_dispatch` runs the build and its checks only, as a dry run.
 
 on:
@@ -14,6 +15,13 @@ permissions:
   contents: read
 
 jobs:
+  # Commits reach main through pull requests that passed CI, but the ruleset
+  # lets an admin push past it, and being on main is all the build job checks.
+  ci:
+    name: CI
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/ci.yml
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -62,7 +70,7 @@ jobs:
           path: dist/
 
   publish:
-    needs: build
+    needs: [ci, build]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     environment:
