@@ -45,9 +45,12 @@ jobs:
         os: [ubuntu-latest]
         python-version: ["3.12", "3.13", "3.14"]
         include:
-          # macOS runners have no Docker, so the container-backed tests skip
-          # there and everything else runs.
+          # macOS runners have no Docker and Windows runners run only Windows
+          # containers, so the container-backed tests skip on both and
+          # everything else runs.
           - os: macos-latest
+            python-version: "3.14"
+          - os: windows-latest
             python-version: "3.14"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 — https://github.com/actions/checkout/releases/tag/v7.0.1
