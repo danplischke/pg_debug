@@ -80,6 +80,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Restricted mode refused a statement with a bare `ValueError` reading
+  `Error validating query: <the query>`. It was not a `PgDebugError`, though
+  the README promises every failure is one, and it left out why: the reason
+  sat only in the exception's cause, so the CLI printed none. A refusal is now
+  a `QueryError` that names it (`DeleteStmt is not a read-only statement`,
+  `function pg_sleep is not allowed`, `it could not be parsed (...)`), and a
+  query that overruns the restricted-mode timeout is a `QueryError` too. A
+  query the validator itself fails on is still refused, and says so.
+
 - `SyncPgDebug` could not connect on Windows. Its event loop was Windows'
   default, the proactor loop, on which psycopg refuses to open an async
   connection, so the first call that reached the database failed with

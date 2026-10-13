@@ -14,6 +14,8 @@ from pg_debug.errors import ConnectionFailedError
 from pg_debug.errors import ExplainPlanError
 from pg_debug.errors import ExtensionRequiredError
 from pg_debug.errors import InvalidArgumentError
+from pg_debug.errors import PgDebugError
+from pg_debug.errors import QueryError
 from pg_debug.model import RuleId
 from pg_debug.plans.tree import ErrorResult
 from pg_debug.plans.tree import ExplainPlanArtifact
@@ -107,6 +109,18 @@ async def test_restricted_driver_uses_configured_timeout(pool):
     driver = await PgDebug(access_mode="restricted", timeout=5, pool=pool).sql_driver()
     assert isinstance(driver, SafeSqlDriver)
     assert driver.timeout == 5
+
+
+@pytest.mark.asyncio
+async def test_restricted_mode_refuses_a_write_with_the_reason(pool):
+    """A caller catching PgDebugError catches the refusal, and is told why."""
+    pg = PgDebug(access_mode="restricted", pool=pool)
+
+    with pytest.raises(QueryError, match="DeleteStmt is not a read-only statement") as refused:
+        await pg.execute_sql("DELETE FROM orders")
+
+    assert isinstance(refused.value, PgDebugError)
+    pool.pool_connect.assert_not_called()
 
 
 @pytest.mark.asyncio

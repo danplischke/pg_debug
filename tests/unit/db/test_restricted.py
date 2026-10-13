@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock
 from unittest.mock import Mock
 from unittest.mock import call
@@ -9,6 +10,12 @@ from psycopg.sql import Literal
 
 from pg_debug.db import SafeSqlDriver
 from pg_debug.db import SqlDriver
+from pg_debug.errors import QueryError
+
+
+def refused(reason):
+    """Restricted mode refuses with a QueryError that says why, not a bare ValueError."""
+    return pytest.raises(QueryError, match=rf"^Restricted mode refused the query: .*{reason}")
 
 
 @pytest_asyncio.fixture
@@ -35,10 +42,7 @@ async def test_select_statement(safe_driver, mock_sql_driver):
 async def test_update_statement(safe_driver):
     """Test that UPDATE statements are blocked"""
     query = "UPDATE users SET status = 'active' WHERE id = 1"
-    with pytest.raises(
-        ValueError,
-        match="Error validating query",
-    ):
+    with refused(r"UpdateStmt is not a read-only statement"):
         await safe_driver.execute_query(query)
 
 
@@ -67,10 +71,7 @@ async def test_show_variable(safe_driver, mock_sql_driver):
 async def test_set_variable(safe_driver):
     """Test that SET statements are blocked"""
     query = "SET search_path TO public"
-    with pytest.raises(
-        ValueError,
-        match="Error validating query",
-    ):
+    with refused(r"VariableSetStmt is not a read-only statement"):
         await safe_driver.execute_query(query)
 
 
@@ -94,10 +95,7 @@ async def test_select_current_user(safe_driver, mock_sql_driver):
 async def test_drop_table(safe_driver):
     """Test that DROP TABLE statements are blocked"""
     query = "DROP TABLE users"
-    with pytest.raises(
-        ValueError,
-        match="Error validating query",
-    ):
+    with refused(r"DropStmt is not a read-only statement"):
         await safe_driver.execute_query(query)
 
 
@@ -105,10 +103,7 @@ async def test_drop_table(safe_driver):
 async def test_delete_from_table(safe_driver):
     """Test that DELETE FROM statements are blocked"""
     query = "DELETE FROM users WHERE status = 'inactive'"
-    with pytest.raises(
-        ValueError,
-        match="Error validating query",
-    ):
+    with refused(r"DeleteStmt is not a read-only statement"):
         await safe_driver.execute_query(query)
 
 
@@ -129,10 +124,7 @@ async def test_select_with_malicious_comment(safe_driver):
     query = """
     SELECT * FROM users; DROP TABLE users;
     """
-    with pytest.raises(
-        ValueError,
-        match="Error validating query",
-    ):
+    with refused(r"DropStmt is not a read-only statement"):
         await safe_driver.execute_query(query)
 
 
@@ -156,7 +148,7 @@ async def test_select_into(safe_driver):
     INTO new_table
     FROM users
     """
-    with pytest.raises(ValueError, match="Error validating query"):
+    with refused(r"IntoClause is not allowed"):
         await safe_driver.execute_query(query)
 
 
@@ -168,7 +160,7 @@ async def test_select_for_update(safe_driver):
     FROM users
     FOR UPDATE
     """
-    with pytest.raises(ValueError, match="Error validating query"):
+    with refused(r"take row locks"):
         await safe_driver.execute_query(query)
 
 
@@ -180,7 +172,7 @@ async def test_select_with_locking_clause(safe_driver):
     FROM users
     FOR SHARE NOWAIT
     """
-    with pytest.raises(ValueError, match="Error validating query"):
+    with refused(r"take row locks"):
         await safe_driver.execute_query(query)
 
 
@@ -192,10 +184,7 @@ async def test_select_with_commit(safe_driver):
     COMMIT;
     SELECT name FROM users;
     """
-    with pytest.raises(
-        ValueError,
-        match="Error validating query",
-    ):
+    with refused(r"TransactionStmt is not a read-only statement"):
         await safe_driver.execute_query(query)
 
 
@@ -219,7 +208,7 @@ async def test_explain_analyze_blocked(safe_driver):
     EXPLAIN ANALYZE
     SELECT id, name FROM users
     """
-    with pytest.raises(ValueError, match="Error validating query"):
+    with refused(r"EXPLAIN ANALYZE runs the statement"):
         await safe_driver.execute_query(query)
 
 
@@ -230,10 +219,7 @@ async def test_begin_transaction_blocked(safe_driver):
     BEGIN;
     SELECT id, name FROM users;
     """
-    with pytest.raises(
-        ValueError,
-        match="Error validating query",
-    ):
+    with refused(r"TransactionStmt is not a read-only statement"):
         await safe_driver.execute_query(query)
 
 
@@ -241,15 +227,15 @@ async def test_begin_transaction_blocked(safe_driver):
 async def test_invalid_sql_syntax(safe_driver):
     """Test that queries with invalid SQL syntax are blocked"""
     query1 = "SELECT * FRMO users;"
-    with pytest.raises(ValueError, match="Failed to parse SQL statement"):
+    with refused(r"could not be parsed"):
         await safe_driver.execute_query(query1)
 
     query2 = "SELECT * FROM users INNER JOON posts ON users.id = posts.user_id;"
-    with pytest.raises(ValueError, match="Failed to parse SQL statement"):
+    with refused(r"could not be parsed"):
         await safe_driver.execute_query(query2)
 
     query3 = "SELECT * FROM users WHERE (age > 21 AND active = true;"
-    with pytest.raises(ValueError, match="Failed to parse SQL statement"):
+    with refused(r"could not be parsed"):
         await safe_driver.execute_query(query3)
 
 
@@ -259,10 +245,7 @@ async def test_create_index_blocked(safe_driver):
     query = """
     CREATE INDEX idx_user_email ON users(email);
     """
-    with pytest.raises(
-        ValueError,
-        match="Error validating query",
-    ):
+    with refused(r"IndexStmt is not a read-only statement"):
         await safe_driver.execute_query(query)
 
 
@@ -272,10 +255,7 @@ async def test_drop_index_blocked(safe_driver):
     query = """
     DROP INDEX idx_user_email;
     """
-    with pytest.raises(
-        ValueError,
-        match="Error validating query",
-    ):
+    with refused(r"DropStmt is not a read-only statement"):
         await safe_driver.execute_query(query)
 
 
@@ -289,10 +269,7 @@ async def test_create_table_blocked(safe_driver):
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """
-    with pytest.raises(
-        ValueError,
-        match="Error validating query",
-    ):
+    with refused(r"CreateStmt is not a read-only statement"):
         await safe_driver.execute_query(query)
 
 
@@ -303,10 +280,7 @@ async def test_create_table_as_blocked(safe_driver):
     CREATE TABLE user_backup AS
     SELECT * FROM users;
     """
-    with pytest.raises(
-        ValueError,
-        match="Error validating query",
-    ):
+    with refused(r"CreateTableAsStmt is not a read-only statement"):
         await safe_driver.execute_query(query)
 
 
@@ -316,7 +290,7 @@ async def test_create_extension_blocked(safe_driver):
     query = """
     CREATE EXTENSION pg_hack;
     """
-    with pytest.raises(ValueError, match="Error validating query"):
+    with refused(r"CREATE EXTENSION pg_hack is not an extension it may create"):
         await safe_driver.execute_query(query)
 
 
@@ -326,10 +300,7 @@ async def test_drop_extension_blocked(safe_driver):
     query = """
     DROP EXTENSION pg_stat_statements;
     """
-    with pytest.raises(
-        ValueError,
-        match="Error validating query",
-    ):
+    with refused(r"DropStmt is not a read-only statement"):
         await safe_driver.execute_query(query)
 
 
@@ -367,7 +338,7 @@ async def test_disallowed_functions(safe_driver):
     ]
 
     for query in queries:
-        with pytest.raises(ValueError, match="Error validating query"):
+        with refused(r"function \w+ is not allowed"):
             await safe_driver.execute_query(query)
 
 
@@ -758,3 +729,37 @@ async def test_query_with_whitespace(safe_driver, mock_sql_driver):
     """
     await safe_driver.execute_query(query)
     mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True)
+
+
+@pytest.mark.asyncio
+async def test_a_query_over_the_timeout_is_a_query_error(mock_sql_driver):
+    async def slow(*args, **kwargs):
+        await asyncio.sleep(1)
+
+    mock_sql_driver.execute_query = AsyncMock(side_effect=slow)
+    driver = SafeSqlDriver(mock_sql_driver, timeout=0.01)
+
+    with pytest.raises(QueryError, match=r"timed out after 0\.01 seconds in restricted mode"):
+        await driver.execute_query("SELECT 1")
+
+
+@pytest.mark.asyncio
+async def test_a_query_the_validator_cannot_check_is_refused(safe_driver, mock_sql_driver, monkeypatch):
+    """Restricted mode fails closed: what it could not check, it does not run."""
+
+    def broken(node):
+        raise RuntimeError("validator bug")
+
+    monkeypatch.setattr(safe_driver, "_validate_node", broken)
+
+    with refused("it could not be validated"):
+        await safe_driver.execute_query("SELECT 1")
+    mock_sql_driver.execute_query.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_running_a_statement_to_observe_it_is_refused(safe_driver, mock_sql_driver):
+    """EXPLAIN ANALYZE rolled back afterwards has still run the statement."""
+    with refused("it would have to run the statement to observe it"):
+        await safe_driver.execute_query_and_rollback("SELECT 1")
+    mock_sql_driver.execute_query.assert_not_awaited()
