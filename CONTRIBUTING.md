@@ -124,3 +124,7 @@ each other once:
   `main.json` requires one status check, `CI result`, which passes only when
   every CI job did, so it needs re-importing only when the rules themselves
   change.
+- **Codecov:** add the repository at <https://app.codecov.io> and store its
+  upload token as the Actions secret `CODECOV_TOKEN`. Until then the coverage
+  upload is attempted without a token and may be refused; that never fails
+  CI.
