@@ -17,6 +17,10 @@ from psycopg.sql import Identifier
 from psycopg.sql import Literal
 from psycopg_pool import AsyncConnectionPool
 
+from ..errors import ConnectionFailedError
+from ..errors import InvalidArgumentError
+from ..errors import NotConnectedError
+
 logger = logging.getLogger(__name__)
 
 #: Prefixed to every statement this library issues, so its own bookkeeping can
@@ -163,7 +167,7 @@ class DbConnPool:
         if not url:
             self._is_valid = False
             self._last_error = "Database connection URL not provided"
-            raise ValueError(self._last_error)
+            raise InvalidArgumentError(self._last_error)
 
         # Close any existing pool before creating a new one
         await self.close()
@@ -196,7 +200,7 @@ class DbConnPool:
             # Clean up failed pool
             await self.close()
 
-            raise ValueError(f"Connection attempt failed: {obfuscate_password(str(e))}") from e
+            raise ConnectionFailedError(f"Could not connect to database: {obfuscate_password(str(e))}") from e
 
     async def close(self) -> None:
         """Close the connection pool."""
@@ -256,7 +260,7 @@ class SqlDriver:
             self.conn = None
             self.is_pool = False
         else:
-            raise ValueError("Either conn or engine_url must be provided")
+            raise InvalidArgumentError("Either conn or engine_url must be provided")
 
     def connect(self):
         if self.conn is not None:
@@ -266,7 +270,7 @@ class SqlDriver:
             self.is_pool = True
             return self.conn
         else:
-            raise ValueError("Connection not established. Either conn or engine_url must be provided")
+            raise NotConnectedError("Connection not established. Either conn or engine_url must be provided")
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator["SqlDriver"]:
@@ -290,7 +294,7 @@ class SqlDriver:
         if self.conn is None:
             self.connect()
             if self.conn is None:
-                raise ValueError("Connection not established")
+                raise NotConnectedError("Connection not established")
 
         if not self.is_pool:
             # A direct connection is already a single session.
@@ -326,7 +330,7 @@ class SqlDriver:
             if self.conn is None:
                 self.connect()
                 if self.conn is None:
-                    raise ValueError("Connection not established")
+                    raise NotConnectedError("Connection not established")
 
             query = self.tagged(query)
 
@@ -456,7 +460,7 @@ class SqlDriver:
         if self.conn is None:
             self.connect()
             if self.conn is None:
-                raise ValueError("Connection not established")
+                raise NotConnectedError("Connection not established")
 
         query = self.tagged(query)
 

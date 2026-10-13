@@ -76,6 +76,19 @@ async def test_connect_wraps_failures_and_hides_password():
 
 
 @pytest.mark.asyncio
+async def test_connect_passes_the_pools_own_error_through():
+    """The pool already says it could not connect; saying it twice helps nobody."""
+    pool = MagicMock(spec=DbConnPool)
+    pool.is_valid = False
+    pool.pool_connect = AsyncMock(side_effect=ConnectionFailedError("Could not connect to database: refused"))
+
+    with pytest.raises(ConnectionFailedError) as excinfo:
+        await PgDebug("postgresql://localhost/db", pool=pool).connect()
+
+    assert str(excinfo.value) == "Could not connect to database: refused"
+
+
+@pytest.mark.asyncio
 async def test_close_leaves_caller_supplied_pool_alone(pool):
     async with PgDebug(pool=pool) as pg:
         assert pg.pool is pool

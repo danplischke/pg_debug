@@ -464,9 +464,9 @@ run), an optional `verify` query for candidates, and `impact_bytes` where the
 cost is a size. It has `to_dict()` for serialization.
 
 Failures raise instead of returning error strings. All exceptions derive from
-`PgDebugError`: `ConnectionFailedError`, `InvalidArgumentError`,
-`ExtensionRequiredError` (carries the missing `extension` name),
-`ExplainPlanError`, `QueryError`, `MissingDependencyError`.
+`PgDebugError`: `ConnectionFailedError`, `NotConnectedError`,
+`InvalidArgumentError`, `ExtensionRequiredError` (carries the missing
+`extension` name), `ExplainPlanError`, `QueryError`, `MissingDependencyError`.
 
 ### Without async
 
