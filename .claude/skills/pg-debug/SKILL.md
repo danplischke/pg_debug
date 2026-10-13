@@ -540,7 +540,8 @@ released.
 
 Failures raise rather than returning error strings. Catch `PgDebugError`, or
 the specific subclass — `ConnectionFailedError`, `InvalidArgumentError`,
-`ExtensionRequiredError` (has `.extension`), `ExplainPlanError`,
+`ExtensionRequiredError` (has `.extension`), `ExplainPlanError`, `QueryError`
+(a statement PostgreSQL rejected or restricted mode refused),
 `MissingDependencyError`. The one exception is index tuning, which reports
 problems as an `error` key in its result dict.
 

@@ -228,6 +228,23 @@ async def test_restricted_mode_rejects_writes():
 
 
 @pytest.mark.asyncio
+async def test_a_statement_postgresql_rejects_is_a_query_error(pg):
+    with pytest.raises(QueryError, match='relation "pgdebug_no_such_table" does not exist') as excinfo:
+        await pg.execute_sql("SELECT * FROM pgdebug_no_such_table")
+    assert isinstance(excinfo.value.__cause__, psycopg.errors.UndefinedTable)
+
+
+def test_cli_reports_a_statement_postgresql_rejects(capsys, monkeypatch):
+    monkeypatch.setenv("DATABASE_URI", DATABASE_URI or "")
+
+    assert cli.main(["execute", "SELECT * FROM pgdebug_no_such_table"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith('pg-debug: relation "pgdebug_no_such_table" does not exist')
+
+
+@pytest.mark.asyncio
 async def test_analyze_db_health(pg):
     results = await pg.analyze_db_health("index,connection,buffer,constraint")
 
@@ -1323,8 +1340,9 @@ async def test_a_failed_statement_leaves_the_session_usable(pg):
     driver = await pg.sql_driver()
 
     async with driver.session():
-        with pytest.raises(psycopg.errors.InvalidTextRepresentation):
+        with pytest.raises(QueryError) as excinfo:
             await driver.execute_query("SELECT 1 = 'not an integer'")
+        assert isinstance(excinfo.value.__cause__, psycopg.errors.InvalidTextRepresentation)
 
         rows = await driver.execute_query("SELECT 1 AS ok")
 
@@ -1343,8 +1361,9 @@ async def test_hypothetical_indexes_survive_a_failed_statement(pg):
 
     async with driver.session():
         await driver.execute_query(f"SELECT hypopg_create_index('CREATE INDEX ON {SCHEMA}.orders (customer_id)')")
-        with pytest.raises(psycopg.errors.InvalidTextRepresentation):
+        with pytest.raises(QueryError) as excinfo:
             await driver.execute_query("SELECT 1 = 'not an integer'")
+        assert isinstance(excinfo.value.__cause__, psycopg.errors.InvalidTextRepresentation)
 
         remaining = await driver.execute_query("SELECT count(*) AS n FROM hypopg()")
         assert remaining is not None

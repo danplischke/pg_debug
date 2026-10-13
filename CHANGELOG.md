@@ -97,6 +97,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `InvalidArgumentError`, and a driver used before it has a connection raises
   `NotConnectedError`, which the README listed but nothing raised.
 
+- A statement PostgreSQL rejected raised psycopg's own exception, such as
+  `psycopg.errors.UndefinedTable`, straight through `PgDebug.execute_sql()`
+  and every tool built on the driver. `except PgDebugError` did not catch the
+  most common failure there is, though the README promises every failure is a
+  `PgDebugError` and `QueryError` is documented for a query that "fails to
+  execute". The driver now raises `QueryError` with PostgreSQL's message, and
+  keeps psycopg's exception as its `__cause__` for the SQLSTATE. The CLI prints
+  the same message as before.
+
 - `SyncPgDebug` could not connect on Windows. Its event loop was Windows'
   default, the proactor loop, on which psycopg refuses to open an async
   connection, so the first call that reached the database failed with
