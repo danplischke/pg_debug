@@ -38,9 +38,12 @@ when the extension is absent.
 
 ## Test layout
 
-- `tests/unit/db/` — the driver, restricted mode's parsing and rejection, connection pool, password obfuscation
+- `tests/unit/db/` — the driver and the errors it raises, restricted mode's parsing and rejection, connection pool, password obfuscation, the server version check
 - `tests/unit/plans/` — explain plan generation and formatting, and plan diagnosis
-- `tests/unit/index/` — the Database Tuning Advisor's candidate search
+- `tests/unit/index/` — the Database Tuning Advisor's candidate search, and what stops a tuning run
+- `tests/unit/index_use/` — why a query does or does not use an index
+- `tests/unit/model/`, `migration/`, `partition/` — the data model review, the migration review and the partition advisor
+- `tests/unit/parsing/` — reading the SQL pg_debug is given, such as bind-parameter substitution
 - `tests/unit/health/` — health check selection, and the individual checks under `checks/`
 - `tests/unit/cli/` — the CLI and its rendering
 - `tests/unit/queries/` — SQL shared between modules, such as the tuple layout

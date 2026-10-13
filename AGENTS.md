@@ -24,13 +24,14 @@ above need nothing else.
 
 | Path | Holds |
 | --- | --- |
-| `src/pg_debug/client.py`, `sync.py`, `errors.py` | The public surface: `PgDebug`, `SyncPgDebug`, the exceptions. |
+| `src/pg_debug/client.py`, `sync.py`, `errors.py`, `severity.py` | The public surface: `PgDebug`, `SyncPgDebug`, the exceptions, and how findings are graded (`Severity`, `Confidence`). |
 | `src/pg_debug/cli/` | The command. `parser.py` names each subcommand's handler (in `commands.py`) and renderer (in `render.py`) in one place; `streams.py` reads and writes UTF-8. |
 | `src/pg_debug/db/` | Driver and pool, restricted mode and its allowlist, extension and version checks. |
 | `src/pg_debug/parsing/` | pglast visitors and bind-parameter substitution for SQL we are *given*. |
 | `src/pg_debug/queries/` | SQL that more than one module runs. A module's own SQL stays beside the code that reads its rows. |
-| `src/pg_debug/plans/`, `health/`, `index/`, `model/`, `migration/`, `partition/` | One package per feature that needed more than one file. |
+| `src/pg_debug/plans/`, `health/`, `index/`, `index_use/`, `model/`, `migration/`, `partition/` | One package per feature that needed more than one file. |
 | `src/pg_debug/activity.py`, `configuration.py`, `schema.py`, `statistics.py`, `top_queries.py` | Features that fit in one file. |
+| `src/pg_debug/baseline.py` | `--baseline`: the identity each finding is known by, and the file that records them. |
 | `tests/unit/` | Mirrors `src/pg_debug/`. Test module names must be unique across the tree. |
 | `tests/integration/` | Container-backed; see `tests/README.md`. |
 

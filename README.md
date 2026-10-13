@@ -620,7 +620,7 @@ is the same for coding agents.
 
 | Under `src/pg_debug/` | What it holds |
 | --- | --- |
-| `client.py`, `sync.py`, `errors.py`, `severity.py` | The public surface: `PgDebug`, `SyncPgDebug`, the exceptions and severities. |
+| `client.py`, `sync.py`, `errors.py`, `severity.py` | The public surface: `PgDebug`, `SyncPgDebug`, the exceptions, and how findings are graded (`Severity`, `Confidence`). |
 | `cli/` | The `pg-debug` command: `parser.py` defines its arguments and which handler and renderer each subcommand uses, `commands.py` holds the handlers, `render.py` formats the results, and `streams.py` reads input and writes output as UTF-8. |
 | `db/` | Talking to PostgreSQL: the driver and pool, restricted mode and its allowlist, extension and version checks, identifiers. |
 | `parsing/` | Reading SQL pg_debug is given to analyse: the pglast visitors and bind-parameter substitution. |
@@ -628,8 +628,10 @@ is the same for coding agents.
 | `plans/` | `explain` and `diagnose`: running EXPLAIN, the plan tree, the diagnosis rules, hypothetical indexes. |
 | `health/` | `health`: `tool.py` runs the checks in `checks/`, one module per check. |
 | `index/` | `tune-workload` and `tune-queries`: the search in `base.py`, the `dta` and `llm` methods, and the report. |
+| `index_use/` | `index-use`: the query's predicates, the catalog it compares them with, and the verdict for each index. |
 | `model/`, `migration/`, `partition/` | `model`, `check-migration` and `partitions`. |
 | `activity.py`, `configuration.py`, `schema.py`, `statistics.py`, `top_queries.py` | Features that fit in one file. |
+| `baseline.py` | `--baseline` and `--save-baseline`: the identity each finding is known by, and the file that records them. |
 
 A feature is one module until it needs a second file. `tests/unit/` mirrors
 `src/pg_debug/`, and since the test directories have no package files, every
