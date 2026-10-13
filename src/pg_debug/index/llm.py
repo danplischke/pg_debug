@@ -8,13 +8,12 @@ from typing import override
 from pglast.ast import SelectStmt
 from pydantic import BaseModel
 
-from pg_debug.errors import MissingDependencyError
-from pg_debug.parsing import TableAliasVisitor
-from pg_debug.plans.explain import ExplainPlanTool
-from pg_debug.plans.tree import ErrorResult
-
 from ..db import SqlDriver
+from ..errors import MissingDependencyError
+from ..parsing import TableAliasVisitor
+from ..plans.explain import ExplainPlanTool
 from ..plans.hypothetical import IndexDefinition
+from ..plans.tree import ErrorResult
 from .base import IndexRecommendation
 from .base import IndexTuningBase
 
