@@ -621,7 +621,7 @@ is the same for coding agents.
 | Under `src/pg_debug/` | What it holds |
 | --- | --- |
 | `client.py`, `sync.py`, `errors.py`, `severity.py` | The public surface: `PgDebug`, `SyncPgDebug`, the exceptions and severities. |
-| `cli/` | The `pg-debug` command, and `render.py`, which formats its output. |
+| `cli/` | The `pg-debug` command: `parser.py` defines its arguments and which handler and renderer each subcommand uses, `commands.py` holds the handlers, `render.py` formats the results, and `streams.py` reads input and writes output as UTF-8. |
 | `db/` | Talking to PostgreSQL: the driver and pool, restricted mode and its allowlist, extension and version checks, identifiers. |
 | `parsing/` | Reading SQL pg_debug is given to analyse: the pglast visitors and bind-parameter substitution. |
 | `queries/` | SQL that more than one module runs. A feature's own queries live beside the code that reads their rows. |
