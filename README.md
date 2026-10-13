@@ -620,7 +620,7 @@ is the same for coding agents.
 | `cli/` | The `pg-debug` command, and `render.py`, which formats its output. |
 | `db/` | Talking to PostgreSQL: the driver and pool, restricted mode and its allowlist, extension and version checks, identifiers. |
 | `parsing/` | Reading SQL pg_debug is given to analyse: the pglast visitors and bind-parameter substitution. |
-| `queries/` | The SQL pg_debug runs. Queries are moving here from the modules that run them; `tests/unit/test_sql_location.py` lists the files that still write their own. |
+| `queries/` | SQL that more than one module runs. A feature's own queries live beside the code that reads their rows. |
 | `plans/` | `explain` and `diagnose`: running EXPLAIN, the plan tree, the diagnosis rules, hypothetical indexes. |
 | `health/` | `health`: `tool.py` runs the checks in `checks/`, one module per check. |
 | `index/` | `tune-workload` and `tune-queries`: the search in `base.py`, the `dta` and `llm` methods, and the report. |

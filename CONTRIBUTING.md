@@ -56,8 +56,10 @@ names `pg_debug` exports, the CLI commands, and checks that every import in the
 README and the skill still works. Changing any of them is an API change: make
 it on purpose, by editing those lists in the same commit.
 
-**New SQL goes in `src/pg_debug/queries/`.** `tests/unit/test_sql_location.py`
-lists the modules that still write their own; that list only shrinks.
+**SQL lives beside the code that reads its rows.** A query and the
+interpretation of what it returns are one argument, and are easier to check
+together. `src/pg_debug/queries/` is for a statement more than one module runs,
+such as the tuple layout the data model review and the bloat check share.
 
 **Argue from what the server records.** A finding is backed by a counter,
 catalog row or plan node, says which, and says whether it is proven or
