@@ -1,0 +1,29 @@
+name: Feature request
+description: Something pg_debug should be able to tell you about a database, and cannot yet.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: What you want to find out
+      description: The question about the database you could not answer with pg_debug, and the situation that raised it.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: What the server records that would answer it
+      description: >
+        pg_debug reports only what it can argue from something PostgreSQL recorded: a counter, a catalog
+        row, a plan node. Name the view, column or plan field that shows it if you know one. If you do not,
+        say what you look at by hand today.
+  - type: input
+    id: postgres
+    attributes:
+      label: PostgreSQL versions
+      description: The versions you need this on, and any managed service (RDS, Cloud SQL, Supabase).
+  - type: textarea
+    id: today
+    attributes:
+      label: How you do it today
+      description: The query, tool or manual steps you use now, if any.
