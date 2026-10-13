@@ -95,10 +95,11 @@ The version is written in one place, `__version__` in
    ```
 
 The publish workflow (`.github/workflows/publish.yml`) then refuses unless the
-tag matches `__version__` and the tagged commit is on `main`; builds the sdist
-and wheel; checks their metadata; uploads them to PyPI through trusted
-publishing from the `pypi` environment; and creates a GitHub release whose
-notes are that version's changelog section.
+tag matches `__version__` and the tagged commit is on `main`; runs the whole of
+CI again on the tagged commit; builds the sdist and wheel; checks their
+metadata; uploads them to PyPI through trusted publishing from the `pypi`
+environment, only once CI has passed; and creates a GitHub release whose notes
+are that version's changelog section.
 
 ### One-time setup for publishing
 
