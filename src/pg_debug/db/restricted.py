@@ -191,13 +191,13 @@ class SafeSqlDriver(SqlDriver):
                         force_readonly=True,
                     )
             except TimeoutError as e:
-                logger.warning(f"Query execution timed out after {self.timeout} seconds: {query[:100]}...")
+                logger.warning("Query execution timed out after %s seconds: %s...", self.timeout, query[:100])
                 raise ValueError(
                     f"Query execution timed out after {self.timeout} seconds in restricted mode. "
                     "Consider simplifying your query or increasing the timeout."
                 ) from e
             except Exception as e:
-                logger.error(f"Error executing query: {e}")
+                logger.error("Error executing query: %s", e)
                 raise
         else:
             return await self.sql_driver.execute_query(

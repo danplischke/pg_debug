@@ -47,8 +47,8 @@ class ExplainPlanTool:
                     logger.debug("LIKE expressions detected, using parameter replacement instead of GENERIC_PLAN")
                 bind_params = SqlBindParams(self.sql_driver)
                 modified_query = await bind_params.replace_parameters(sql_query)
-                logger.debug(f"Original query: {sql_query}")
-                logger.debug(f"Modified query: {modified_query}")
+                logger.debug("Original query: %s", sql_query)
+                logger.debug("Modified query: %s", modified_query)
                 sql_query = modified_query
             else:
                 use_generic_plan = True
@@ -139,7 +139,7 @@ class ExplainPlanTool:
                 return ErrorResult(f"Error converting explain plan: {e}")
 
         except Exception as e:
-            logger.error(f"Error in explain_with_hypothetical_indexes: {e}", exc_info=True)
+            logger.error("Error in explain_with_hypothetical_indexes: %s", e, exc_info=True)
             return ErrorResult(f"Error generating explain plan with hypothetical indexes: {e}")
 
     def _has_bind_variables(self, query: str) -> bool:
@@ -159,7 +159,7 @@ class ExplainPlanTool:
                 explain_options.append("GENERIC_PLAN")
 
             explain_q = f"EXPLAIN ({', '.join(explain_options)}) {query}"
-            logger.debug(f"RUNNING EXPLAIN QUERY: {explain_q}")
+            logger.debug("RUNNING EXPLAIN QUERY: %s", explain_q)
             rows = await self.sql_driver.execute_query(explain_q)  # type: ignore
             if rows is None:
                 return ErrorResult("No results returned from EXPLAIN")
@@ -235,7 +235,9 @@ class ExplainPlanTool:
 
         except Exception as e:
             logger.error(
-                f"Error getting explain plan for query: {query_text} with error: {e}",
+                "Error getting explain plan for query: %s with error: %s",
+                query_text,
+                e,
                 exc_info=True,
             )
             raise e

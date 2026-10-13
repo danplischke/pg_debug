@@ -33,20 +33,20 @@ def create_postgres_container(version: str) -> Generator[tuple[str, str], None, 
     container_name = f"postgres-crystal-test-{version.replace(':', '_')}-{os.urandom(4).hex()}"
     current_dir = Path(__file__).parent.absolute()
 
-    logger.info(f"Setting up PostgreSQL {pg_version} with HypoPG")
+    logger.info("Setting up PostgreSQL %s with HypoPG", pg_version)
 
     # Build custom Docker image with HypoPG if it doesn't exist
     try:
         # Check if custom image already exists
         client.images.get(custom_image_name)
-        logger.info(f"Using existing Docker image: {custom_image_name}")
+        logger.info("Using existing Docker image: %s", custom_image_name)
     except docker_errors.ImageNotFound:
         # Build the custom image
-        logger.info(f"Building custom Docker image: {custom_image_name}")
+        logger.info("Building custom Docker image: %s", custom_image_name)
         try:
             dockerfile_path = current_dir / "Dockerfile.postgres-hypopg"
             if not dockerfile_path.exists():
-                logger.error(f"Dockerfile not found at {dockerfile_path}")
+                logger.error("Dockerfile not found at %s", dockerfile_path)
                 pytest.skip(f"Required Dockerfile not found: {dockerfile_path}")
 
             # Build the image
@@ -57,9 +57,9 @@ def create_postgres_container(version: str) -> Generator[tuple[str, str], None, 
                 tag=custom_image_name,
                 rm=True,
             )
-            logger.info(f"Successfully built image {custom_image_name}")
+            logger.info("Successfully built image %s", custom_image_name)
         except Exception as e:
-            logger.error(f"Failed to build Docker image: {e}")
+            logger.error("Failed to build Docker image: %s", e)
             pytest.skip(f"Failed to build Docker image: {e}")
 
     postgres_password = "test_password"
@@ -88,7 +88,7 @@ def create_postgres_container(version: str) -> Generator[tuple[str, str], None, 
         detach=True,
     )
 
-    logger.info(f"Container {container_name} started, waiting for PostgreSQL to be ready")
+    logger.info("Container %s started, waiting for PostgreSQL to be ready", container_name)
 
     try:
         # Wait for container to start and get logs
@@ -98,7 +98,7 @@ def create_postgres_container(version: str) -> Generator[tuple[str, str], None, 
         # Check if container is running
         if container.status != "running":
             logs = container.logs().decode("utf-8")
-            logger.error(f"Container {container_name} failed to start. Logs:\n{logs}")
+            logger.error("Container %s failed to start. Logs:\n%s", container_name, logs)
             pytest.skip(f"PostgreSQL container failed to start: {logs[:500]}...")
 
         # Get assigned port
@@ -113,47 +113,47 @@ def create_postgres_container(version: str) -> Generator[tuple[str, str], None, 
             try:
                 exit_code, output = container.exec_run("pg_isready")
                 if exit_code == 0:
-                    logger.info(f"PostgreSQL in container {container_name} is ready")
+                    logger.info("PostgreSQL in container %s is ready", container_name)
                     is_ready = True
                     break
                 else:
                     last_error = output.decode("utf-8")
-                    logger.warning(f"PostgreSQL not ready yet: {last_error}")
+                    logger.warning("PostgreSQL not ready yet: %s", last_error)
             except Exception as e:
                 last_error = str(e)
-                logger.warning(f"Error checking if PostgreSQL is ready: {e}")
+                logger.warning("Error checking if PostgreSQL is ready: %s", e)
 
             # Get container logs for debugging
             if time.time() - deadline + 60 > 50:  # Log when we're close to timeout
                 logs = container.logs().decode("utf-8")
-                logger.warning(f"Still waiting for PostgreSQL. Container logs:\n{logs[-2000:]}")
+                logger.warning("Still waiting for PostgreSQL. Container logs:\n%s", logs[-2000:])
 
             time.sleep(2)
 
         if not is_ready:
             logs = container.logs().decode("utf-8")
-            logger.error(f"Timeout waiting for PostgreSQL. Container logs:\n{logs[-2000:]}")
+            logger.error("Timeout waiting for PostgreSQL. Container logs:\n%s", logs[-2000:])
             pytest.skip(f"Timeout waiting for PostgreSQL to start: {last_error}")
 
         connection_string = f"postgresql://postgres:{postgres_password}@localhost:{port}/{postgres_db}"
-        logger.info(f"PostgreSQL connection string: {connection_string}")
+        logger.info("PostgreSQL connection string: %s", connection_string)
 
         yield connection_string, version
 
     except Exception as e:
-        logger.error(f"Error setting up PostgreSQL container: {e}")
+        logger.error("Error setting up PostgreSQL container: %s", e)
         # Get container logs for debugging
         try:
             logs = container.logs().decode("utf-8")
-            logger.error(f"Container logs:\n{logs}")
+            logger.error("Container logs:\n%s", logs)
         except Exception:
             pass
         raise
 
     finally:
-        logger.info(f"Stopping and removing container {container_name}")
+        logger.info("Stopping and removing container %s", container_name)
         try:
             container.stop(timeout=1)
             container.remove(v=True)
         except Exception as e:
-            logger.warning(f"Error cleaning up container {container_name}: {e}")
+            logger.warning("Error cleaning up container %s: %s", container_name, e)

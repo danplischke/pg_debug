@@ -120,7 +120,7 @@ async def test_generate_candidates(async_sql_driver, create_dta):
     """Test index candidate generation."""
 
     async def mock_execute_query(query):
-        logger.info(f"Query: {query}")
+        logger.info("Query: %s", query)
         if "to_regclass" in query:
             return [MockCell({"name": "users"})]
         if "FROM information_schema.columns c" in query:
@@ -156,7 +156,7 @@ async def test_generate_candidates(async_sql_driver, create_dta):
 @pytest.mark.asyncio
 async def test_analyze_workload(async_sql_driver, create_dta):
     async def mock_execute_query(query):
-        logger.info(f"Query: {query}")
+        logger.info("Query: %s", query)
         if "pg_stat_statements" in query:
             return [
                 MockCell(
@@ -214,7 +214,7 @@ async def test_analyze_workload(async_sql_driver, create_dta):
 
     session = await dta.analyze_workload(min_calls=50, min_avg_time_ms=5.0)
 
-    logger.debug(f"Recommendations: {session.recommendations}")
+    logger.debug("Recommendations: %s", session.recommendations)
     assert any(r.table in {"users", "orders"} for r in session.recommendations)
 
 
@@ -453,12 +453,12 @@ async def test_filter_long_text_columns(async_sql_driver, create_dta):
     # Execute the filter with max_text_length = 100
     filtered = await dta._filter_long_text_columns(candidates, max_text_length=100)
 
-    logger.info(f"Filtered: {filtered}")
+    logger.info("Filtered: %s", filtered)
 
     # Check results
     filtered_indexes = [(c.table, c.columns) for c in filtered]
 
-    logger.info(f"Filtered indexes: {filtered_indexes}")
+    logger.info("Filtered indexes: %s", filtered_indexes)
 
     # These should be kept
     assert ("users", ("name",)) in filtered_indexes
@@ -627,9 +627,9 @@ async def test_basic_workload_analysis(async_sql_driver):
 
         responses_index += 1
         logger.info(
-            f"Query: {query}\n    Response: {
-                list(json.dumps(x.cells) for x in responses[responses_index - 1]) if responses_index <= len(responses) else None
-            }\n--------------------------------------------------------"
+            "Query: %s\n    Response: %s\n--------------------------------------------------------",
+            query,
+            list(json.dumps(x.cells) for x in responses[responses_index - 1]) if responses_index <= len(responses) else None,
         )
         return responses[responses_index - 1] if responses_index <= len(responses) else None
 
@@ -1205,7 +1205,7 @@ async def test_enumerate_greedy_pareto_cost_benefit(async_sql_driver):
 
     # Mock SQL driver execute_query method to simulate getting table size
     async def mock_execute_query(query):
-        logger.info(f"mock_execute_query: {query}")
+        logger.info("mock_execute_query: %s", query)
         if "pg_total_relation_size" in query:
             return [MockCell({"rel_size": base_relation_size})]
         return []
@@ -1347,7 +1347,7 @@ async def cleanup_pools():
     # Find and close any active connection pools
     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
     if tasks:
-        logger.debug(f"Waiting for {len(tasks)} tasks to complete...")
+        logger.debug("Waiting for %s tasks to complete...", len(tasks))
         await asyncio.gather(*tasks, return_exceptions=True)
 
 

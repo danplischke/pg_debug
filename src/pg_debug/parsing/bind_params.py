@@ -35,7 +35,7 @@ class SqlBindParams:
             # Find all parameter placeholders
             param_matches = list(re.finditer(r"\$\d+", query))
             if not param_matches:
-                logger.debug(f"No parameters found for query: {query[:50]}...")
+                logger.debug("No parameters found for query: %s...", query[:50])
                 return query
 
             # Handle common special cases in a specific order to prevent incorrect replacements
@@ -194,7 +194,7 @@ class SqlBindParams:
                         # For non-numeric, just use most common
                         return most_common
                 except (TypeError, ValueError):
-                    logger.warning(f"Error adapting most common value: {most_common}")
+                    logger.warning("Error adapting most common value: %s", most_common)
                     # If adaptation fails, just use the value
                     return most_common
 
@@ -263,7 +263,7 @@ class SqlBindParams:
 
             return aliases
         except Exception as e:
-            logger.error(f"Error extracting table aliases: {e}", exc_info=True)
+            logger.error("Error extracting table aliases: %s", e, exc_info=True)
             return [table_name]  # Fallback to just the table name
 
     def _identify_parameter_column(self, context: str, table_columns: dict[str, set[str]]) -> tuple[str, str] | None:
@@ -343,7 +343,7 @@ class SqlBindParams:
             self._column_stats_cache[cache_key] = stats
             return stats
         except Exception as e:
-            logger.warning(f"Error getting column statistics for {table_name}.{column_name}: {e}")
+            logger.warning("Error getting column statistics for %s.%s: %s", table_name, column_name, e)
             self._column_stats_cache[cache_key] = None
             return None
 
@@ -500,7 +500,7 @@ class SqlBindParams:
 
             return modified_query
         except Exception as e:
-            logger.error(f"Error in generic parameter replacement: {e}", exc_info=True)
+            logger.error("Error in generic parameter replacement: %s", e, exc_info=True)
             return query
 
     def _context_replace(self, match, op: str):
@@ -539,7 +539,7 @@ class SqlBindParams:
             return self.extract_stmt_columns(stmt)
 
         except Exception:
-            logger.warning(f"Error extracting columns from query: {query}")
+            logger.warning("Error extracting columns from query: %s", query)
             return {}
 
     def extract_stmt_columns(self, stmt: SelectStmt) -> dict[str, set[str]]:
@@ -552,5 +552,5 @@ class SqlBindParams:
             return collector.columns
 
         except Exception:
-            logger.warning(f"Error extracting columns from query: {stmt}")
+            logger.warning("Error extracting columns from query: %s", stmt)
             return {}

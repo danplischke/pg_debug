@@ -322,12 +322,12 @@ class LLMOptimizerTool(IndexTuningBase):
                     # Extract the size from the result
                     size = result[0].cells.get("size", 0)
                     total_size += max(float(size), min_size_penalty)
-                    logger.debug(f"Estimated size for index {index_config.name}: {size} bytes")
+                    logger.debug("Estimated size for index %s: %s bytes", index_config.name, size)
                 else:
-                    logger.warning(f"Failed to estimate size for index {index_config.name}")
+                    logger.warning("Failed to estimate size for index %s", index_config.name)
 
             except Exception as e:
-                logger.error(f"Error estimating size for index {index_config.name}: {e!s}")
+                logger.error("Error estimating size for index %s: %s", index_config.name, e)
 
         return total_size
 
@@ -417,9 +417,9 @@ class LLMOptimizerTool(IndexTuningBase):
                 columns = [row.cells.get("attname", "") for row in result if row.cells.get("attname")]
                 return tuple(columns)
             else:
-                logger.warning(f"No columns found for index {index_name}")
+                logger.warning("No columns found for index %s", index_name)
                 return tuple()
 
         except Exception as e:
-            logger.error(f"Error getting columns for index {index_name}: {e!s}")
+            logger.error("Error getting columns for index %s: %s", index_name, e)
             return tuple()

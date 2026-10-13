@@ -194,14 +194,14 @@ class IndexUseAnalyzer:
                 finally:
                     await pinned.execute_query(cast(LiteralString, RESET_SEQSCAN_SQL))
         except Exception as e:
-            logger.debug(f"Could not plan with sequential scans disabled: {e}")
+            logger.debug("Could not plan with sequential scans disabled: %s", e)
             return None, f"The plan with sequential scans disabled could not be taken: {e}"
 
     async def _stale_tables(self) -> dict[str, dict[str, Any]]:
         try:
             rows = await StatisticsInspector(self.sql_driver).stale_tables()
         except Exception as e:
-            logger.debug(f"Could not read statistics freshness: {e}")
+            logger.debug("Could not read statistics freshness: %s", e)
             return {}
         return {f"{row['schema']}.{row['table']}": row for row in rows}
 
@@ -209,7 +209,7 @@ class IndexUseAnalyzer:
         try:
             rows = await self.sql_driver.execute_query(cast(LiteralString, DATABASE_COLLATION_SQL))
         except Exception as e:
-            logger.debug(f"Could not read the database collation: {e}")
+            logger.debug("Could not read the database collation: %s", e)
             return None
         return str(rows[0].cells["collation"]) if rows else None
 

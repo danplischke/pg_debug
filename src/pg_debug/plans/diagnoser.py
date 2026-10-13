@@ -255,7 +255,7 @@ class PlanDiagnoser:
         try:
             statements = parse_sql(sql)
         except ParseError as e:
-            logger.debug(f"Could not parse the statement, so it will be rolled back after: {e}")
+            logger.debug("Could not parse the statement, so it will be rolled back after: %s", e)
             return False
 
         parsed = [s.stmt for s in statements if s.stmt is not None]
@@ -363,7 +363,7 @@ class PlanDiagnoser:
         try:
             rows = await self._driver.execute_query("SELECT current_setting('work_mem') AS work_mem")
         except Exception as e:
-            logger.debug(f"Could not read work_mem: {e}")
+            logger.debug("Could not read work_mem: %s", e)
             return None
         return str(rows[0].cells["work_mem"]) if rows else None
 

@@ -33,8 +33,8 @@ CROSS_JOIN_QUERY = """
 @pytest.fixture
 def connection_string(test_postgres_connection_string) -> str:
     connection_string, version = test_postgres_connection_string
-    logger.info(f"Using connection string: {connection_string}")
-    logger.info(f"Using version: {version}")
+    logger.info("Using connection string: %s", connection_string)
+    logger.info("Using version: %s", version)
     return connection_string
 
 
@@ -61,7 +61,7 @@ async def setup_test_data(sql_driver):
         await sql_driver.execute_query("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
         logger.info("pg_stat_statements extension created or already exists")
     except Exception as e:
-        logger.warning(f"Unable to create pg_stat_statements extension: {e}")
+        logger.warning("Unable to create pg_stat_statements extension: %s", e)
         pytest.skip("pg_stat_statements extension not available or cannot be created")
 
     await sql_driver.execute_query("""
@@ -107,7 +107,7 @@ async def cleanup_test_data(sql_driver):
         await sql_driver.execute_query("DROP TABLE IF EXISTS test_items")
         await sql_driver.execute_query("SELECT pg_stat_statements_reset()")
     except Exception as e:
-        logger.warning(f"Error cleaning up test data: {e}")
+        logger.warning("Error cleaning up test data: %s", e)
 
 
 def _sort_column(row: dict[str, Any], prefix: str) -> str:
@@ -134,8 +134,8 @@ async def test_get_top_queries_integration(local_sql_driver, connection_string):
         total_result = await calc.get_top_queries_by_time(limit=10, sort_by="total")
         mean_result = await calc.get_top_queries_by_time(limit=10, sort_by="mean")
 
-        logger.info(f"Top queries by total time: {total_result}")
-        logger.info(f"Top queries by mean time: {mean_result}")
+        logger.info("Top queries by total time: %s", total_result)
+        logger.info("Top queries by mean time: %s", mean_result)
 
         assert total_result, "no queries reported"
         for row in total_result:

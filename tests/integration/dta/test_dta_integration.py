@@ -26,12 +26,12 @@ def retry(max_attempts=3, delay=1):
                     return await func(*args, **kwargs)
                 except AssertionError as e:
                     last_exception = e
-                    logger.warning(f"Assertion failed on attempt {attempt + 1}/{max_attempts}: {e}")
+                    logger.warning("Assertion failed on attempt %s/%s: %s", attempt + 1, max_attempts, e)
                     if attempt < max_attempts - 1:
-                        logger.info(f"Retrying in {delay} seconds...")
+                        logger.info("Retrying in %s seconds...", delay)
                         time.sleep(delay)
             # If we get here, all attempts failed
-            logger.error(f"All {max_attempts} attempts failed")
+            logger.error("All %s attempts failed", max_attempts)
             if last_exception:
                 raise last_exception
 
@@ -44,8 +44,8 @@ def retry(max_attempts=3, delay=1):
 async def db_connection(test_postgres_connection_string):
     """Create a connection to the test database."""
     connection_string, version = test_postgres_connection_string
-    logger.info(f"Using connection string: {connection_string}")
-    logger.info(f"Using version: {version}")
+    logger.info("Using connection string: %s", connection_string)
+    logger.info("Using version: %s", version)
     driver = SqlDriver(engine_url=connection_string)
 
     # Verify connection
@@ -56,14 +56,14 @@ async def db_connection(test_postgres_connection_string):
     try:
         await driver.execute_query("CREATE EXTENSION IF NOT EXISTS pg_stat_statements", force_readonly=False)
     except Exception as e:
-        logger.warning(f"Could not create pg_stat_statements extension: {e}")
+        logger.warning("Could not create pg_stat_statements extension: %s", e)
         pytest.skip("pg_stat_statements extension is not available")
 
     # Try to create hypopg extension, but skip the test if not available
     try:
         await driver.execute_query("CREATE EXTENSION IF NOT EXISTS hypopg", force_readonly=False)
     except Exception as e:
-        logger.warning(f"Could not create hypopg extension: {e}")
+        logger.warning("Could not create hypopg extension: %s", e)
         pytest.skip("hypopg extension is not available - required for DTA tests")
 
     yield driver
@@ -447,20 +447,20 @@ async def test_join_order_benchmark(db_connection, setup_test_tables, create_dta
                 for rec in session.recommendations:
                     if rec.table == table and column in rec.columns:
                         found_patterns += 1
-                        logger.info(f"Found expected index pattern: {table}.{column}")
+                        logger.info("Found expected index pattern: %s.%s", table, column)
                         break
 
             # We should find at least 1 of the expected patterns
             # Relaxed assertion - just need one useful recommendation
             if found_patterns == 0:
-                logger.warning(f"No expected patterns found. Recommendations: {[f'{r.table}.{r.columns}' for r in session.recommendations]}")
+                logger.warning("No expected patterns found. Recommendations: %s", [f"{r.table}.{r.columns}" for r in session.recommendations])
             assert found_patterns >= 1, f"Found only {found_patterns} out of {len(expected_patterns)} expected index patterns"
 
             # Log recommendations for debugging
             logger.info("\nRecommended indexes for JOB workload:")
             for rec in session.recommendations:
                 logger.info(
-                    f"{rec.definition} (benefit: {rec.progressive_improvement_multiple:.2f}x, size: {rec.estimated_size_bytes / 1024:.2f} KB)"
+                    "%s (benefit: %.2fx, size: %.2f KB)", rec.definition, rec.progressive_improvement_multiple, rec.estimated_size_bytes / 1024
                 )
 
             # Test performance improvement with recommended indexes
@@ -513,11 +513,11 @@ async def test_join_order_benchmark(db_connection, setup_test_tables, create_dta
             # Check that we have some improvement
             if improvements:
                 avg_improvement = sum(improvements) / len(improvements)
-                logger.info(f"\nAverage performance improvement for JOB workload: {avg_improvement:.2f}%")
+                logger.info("\nAverage performance improvement for JOB workload: %.2f%%", avg_improvement)
 
                 # Find the best improvement - only need one query to show meaningful improvement
                 best_improvement = max(improvements)
-                logger.info(f"Best improvement: {best_improvement:.2f}%")
+                logger.info("Best improvement: %.2f%%", best_improvement)
 
                 # Relaxed assertion - at least one query should show some improvement
                 # Allow for small negative values due to measurement noise
@@ -544,7 +544,7 @@ async def test_join_order_benchmark(db_connection, setup_test_tables, create_dta
         try:
             await db_connection.execute_query(cleanup_query, force_readonly=False)
         except Exception as e:
-            logger.warning(f"Error during cleanup: {e}")
+            logger.warning("Error during cleanup: %s", e)
 
 
 @pytest.mark.asyncio
@@ -729,7 +729,7 @@ async def test_multi_column_indexes(db_connection, setup_test_tables, create_dta
             try:
                 await db_connection.execute_query(query_info["query"])
             except Exception as e:
-                logger.warning(f"Query execution error (expected during testing): {e}")
+                logger.warning("Query execution error (expected during testing): %s", e)
 
     # Manually populate query stats in session class to ensure proper weighting
     workload = []
@@ -784,7 +784,7 @@ async def test_multi_column_indexes(db_connection, setup_test_tables, create_dta
                 # Check if recommendation matches at least as a superset of the pattern
                 # (additional columns are ok)
                 if rec.table == expected_table and all(col in rec.columns for col in expected_columns):
-                    logger.debug(f"Found expected multi-column index: {rec.table}.{rec.columns}")
+                    logger.debug("Found expected multi-column index: %s.%s", rec.table, rec.columns)
 
     # Lower threshold requirement - if test environment consistently finds at least 1, that's enough for validation
     assert multi_column_indexes_found >= 1, f"Found no multi-column indexes. Details: {multi_column_indexes_details}"
@@ -792,13 +792,13 @@ async def test_multi_column_indexes(db_connection, setup_test_tables, create_dta
     # Print all recommendations for debugging - both single and multi-column
     logger.debug("\nAll index recommendations:")
     for rec in session.recommendations:
-        logger.debug(f"{rec.definition} (benefit: {rec.progressive_improvement_multiple:.2f}x, size: {rec.estimated_size_bytes / 1024:.2f} KB)")
+        logger.debug("%s (benefit: %.2fx, size: %.2f KB)", rec.definition, rec.progressive_improvement_multiple, rec.estimated_size_bytes / 1024)
 
     # Print multi-column recommendations separately
     logger.debug("\nMulti-column index recommendations:")
     multi_column_recs = [rec for rec in session.recommendations if len(rec.columns) >= 2]
     for rec in multi_column_recs:
-        logger.debug(f"{rec.definition} (benefit: {rec.progressive_improvement_multiple:.2f}x, size: {rec.estimated_size_bytes / 1024:.2f} KB)")
+        logger.debug("%s (benefit: %.2fx, size: %.2f KB)", rec.definition, rec.progressive_improvement_multiple, rec.estimated_size_bytes / 1024)
 
     # Test performance improvement with recommended indexes
     if not multi_column_recs:
@@ -816,7 +816,7 @@ async def test_multi_column_indexes(db_connection, setup_test_tables, create_dta
             await db_connection.execute_query("EXPLAIN ANALYZE " + query, force_readonly=False)
             baseline_times[query] = time.time() - start
         except Exception as e:
-            logger.warning(f"Error measuring baseline for query: {e}")
+            logger.warning("Error measuring baseline for query: %s", e)
 
     # Create the recommended indexes
     created_indexes = []
@@ -826,7 +826,7 @@ async def test_multi_column_indexes(db_connection, setup_test_tables, create_dta
             await db_connection.execute_query(index_def, force_readonly=False)
             created_indexes.append(rec.definition.split()[2])  # Get index name for cleanup
         except Exception as e:
-            logger.warning(f"Error creating index {rec.definition}: {e}")
+            logger.warning("Error creating index %s: %s", rec.definition, e)
 
     # Measure performance with indexes
     indexed_times = {}
@@ -838,7 +838,7 @@ async def test_multi_column_indexes(db_connection, setup_test_tables, create_dta
                 await db_connection.execute_query("EXPLAIN ANALYZE " + query, force_readonly=False)
                 indexed_times[query] = time.time() - start
             except Exception as e:
-                logger.warning(f"Error measuring indexed performance: {e}")
+                logger.warning("Error measuring indexed performance: %s", e)
 
     # Clean up created indexes
     if created_indexes:
@@ -848,7 +848,7 @@ async def test_multi_column_indexes(db_connection, setup_test_tables, create_dta
                 force_readonly=False,
             )
         except Exception as e:
-            logger.warning(f"Error dropping indexes: {e}")
+            logger.warning("Error dropping indexes: %s", e)
 
     # Clean up tables
     await db_connection.execute_query(
@@ -866,16 +866,16 @@ async def test_multi_column_indexes(db_connection, setup_test_tables, create_dta
         if query in indexed_times and baseline > 0:
             improvement = (baseline - indexed_times[query]) / baseline * 100
             improvements.append(improvement)
-            logger.debug(f"Query improvement: {improvement:.2f}%")
+            logger.debug("Query improvement: %.2f%%", improvement)
 
     # Success if we found at least one multi-column index
     if multi_column_indexes_found >= 1:
-        logger.info(f"\nFound {multi_column_indexes_found} multi-column indexes")
+        logger.info("\nFound %s multi-column indexes", multi_column_indexes_found)
 
     # Check if we measured performance improvements
     if improvements:
         avg_improvement = sum(improvements) / len(improvements)
-        logger.info(f"\nAverage performance improvement for multi-column indexes: {avg_improvement:.2f}%")
+        logger.info("\nAverage performance improvement for multi-column indexes: %.2f%%", avg_improvement)
     else:
         logger.warning("Could not measure performance improvements for multi-column indexes")
 
@@ -1036,14 +1036,14 @@ async def test_diminishing_returns(db_connection, create_dta):
         for rec in session_with_threshold.recommendations:
             if any(col in rec.columns for col in high_improvement_columns):
                 high_improvement_recommendations += 1
-                logger.info(f"Found high improvement recommendation: {rec.table}.{rec.columns}")
+                logger.info("Found high improvement recommendation: %s.%s", rec.table, rec.columns)
 
         # Check that low improvement columns are not recommended
         low_improvement_recommendations = 0
         for rec in session_with_threshold.recommendations:
             if any(col in rec.columns for col in low_improvement_columns):
                 low_improvement_recommendations += 1
-                logger.info(f"Found unexpected low improvement recommendation: {rec.table}.{rec.columns}")
+                logger.info("Found unexpected low improvement recommendation: %s.%s", rec.table, rec.columns)
 
         # We should have found at least one recommendation for the high-improvement columns
         assert high_improvement_recommendations > 0, "No recommendations for high-improvement columns"
@@ -1072,7 +1072,7 @@ async def test_diminishing_returns(db_connection, create_dta):
         try:
             await db_connection.execute_query("DROP TABLE IF EXISTS large_table", force_readonly=False)
         except Exception as e:
-            logger.warning(f"Error during cleanup: {e}")
+            logger.warning("Error during cleanup: %s", e)
 
 
 @pytest.mark.asyncio
@@ -1149,12 +1149,12 @@ async def test_pareto_optimization_basic(db_connection, create_dta):
             pytest.skip("No recommendations produced - skipping validation")
             return
 
-        logger.info(f"Number of recommendations: {len(session.recommendations)}")
+        logger.info("Number of recommendations: %s", len(session.recommendations))
 
         # Verify the recommendations include the columns we expect
         expected_columns = ["col1", "col2", "col3", "col4"]
         for rec in session.recommendations:
-            logger.info(f"Recommended index: {rec.definition}")
+            logger.info("Recommended index: %s", rec.definition)
             # At least one recommendation should be for a column we expect
             has_expected_column = any(col in rec.columns for col in expected_columns)
             assert has_expected_column, f"Recommendation {rec.definition} doesn't include any expected columns"
@@ -1164,7 +1164,7 @@ async def test_pareto_optimization_basic(db_connection, create_dta):
         try:
             await db_connection.execute_query("DROP TABLE IF EXISTS pareto_test", force_readonly=False)
         except Exception as e:
-            logger.warning(f"Error during cleanup: {e}")
+            logger.warning("Error during cleanup: %s", e)
 
 
 @pytest.mark.asyncio
@@ -1379,7 +1379,7 @@ async def test_pareto_optimal_index_selection(db_connection, create_dta):
     logger.info("Pareto optimal recommendations:")
     for i, rec in enumerate(session.recommendations):
         logger.info(
-            f"{i + 1}. {rec.definition} - Size: {rec.estimated_size_bytes / 1024:.1f}KB, Benefit: {rec.progressive_improvement_multiple:.2f}x"
+            "%s. %s - Size: %.1fKB, Benefit: %.2fx", i + 1, rec.definition, rec.estimated_size_bytes / 1024, rec.progressive_improvement_multiple
         )
 
     # Verify the recommendations follow Pareto principles
@@ -1408,8 +1408,8 @@ async def test_pareto_optimal_index_selection(db_connection, create_dta):
     performance_size = sum(rec.estimated_size_bytes for rec in session_performance_sensitive.recommendations)
 
     # Storage-sensitive should use less space
-    logger.info(f"Storage-sensitive total size: {storage_size / 1024:.1f}KB")
-    logger.info(f"Performance-sensitive total size: {performance_size / 1024:.1f}KB")
+    logger.info("Storage-sensitive total size: %.1fKB", storage_size / 1024)
+    logger.info("Performance-sensitive total size: %.1fKB", performance_size / 1024)
 
     assert storage_size <= performance_size, "Storage-sensitive recommendations should use less space"
 

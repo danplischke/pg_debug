@@ -277,12 +277,12 @@ class IndexTuningBase(ABC):
 
                 # First try to use explicit workload if provided
                 if workload:
-                    logger.debug(f"Using explicit workload with {len(workload)} queries")
+                    logger.debug("Using explicit workload with %s queries", len(workload))
                     session.workload_source = "args"
                     session.workload = workload
                 # Then try direct query list if provided
                 elif query_list:
-                    logger.debug(f"Using provided query list with {len(query_list)} queries")
+                    logger.debug("Using provided query list with %s queries", len(query_list))
                     session.workload_source = "query_list"
                     session.workload = []
                     for i, query in enumerate(query_list):
@@ -296,7 +296,7 @@ class IndexTuningBase(ABC):
 
                 # Then try SQL file if provided
                 elif sql_file:
-                    logger.debug(f"Reading queries from file: {sql_file}")
+                    logger.debug("Reading queries from file: %s", sql_file)
                     session.workload_source = "sql_file"
                     session.workload = self._get_workload_from_file(sql_file)
 
@@ -336,7 +336,7 @@ class IndexTuningBase(ABC):
                     await self.sql_driver.execute_query("SELECT hypopg_reset();")
 
         except Exception as e:
-            logger.error(f"Error in workload analysis: {e}", exc_info=True)
+            logger.error("Error in workload analysis: %s", e, exc_info=True)
             session.error = f"Error in workload analysis: {e}"
 
         session.dta_traces = self._dta_traces
@@ -413,14 +413,14 @@ class IndexTuningBase(ABC):
                 # One malformed entry among hundreds is not a reason to report
                 # nothing at all.
                 dropped["unparseable"] = dropped.get("unparseable", 0) + 1
-                logger.debug(f"Skipping unparseable query ({e}): {query_text[:50]}...")
+                logger.debug("Skipping unparseable query (%s): %s...", e, query_text[:50])
                 continue
             if not parsed:
-                logger.debug(f"Skipping non-parseable query: {query_text[:50]}...")
+                logger.debug("Skipping non-parseable query: %s...", query_text[:50])
                 continue
             stmt = parsed[0].stmt
             if not self._is_analyzable_stmt(stmt):
-                logger.debug(f"Skipping non-analyzable query: {query_text[:50]}...")
+                logger.debug("Skipping non-analyzable query: %s...", query_text[:50])
                 continue
 
             if not await self._is_plannable(query_text):
@@ -450,7 +450,7 @@ class IndexTuningBase(ABC):
             await self.get_explain_plan_with_indexes(query_text, frozenset())
             return True
         except Exception as e:
-            logger.debug(f"Skipping query the server will not plan ({e}): {query_text[:80]}...")
+            logger.debug("Skipping query the server will not plan (%s): %s...", e, query_text[:80])
             return False
 
     @staticmethod
@@ -619,7 +619,7 @@ class IndexTuningBase(ABC):
         except Exception as e:
             # A workload is still worth tuning against a server that will not
             # say how much it is written to; the search just loses that term.
-            logger.debug(f"Could not read the write load of {table}: {e}")
+            logger.debug("Could not read the write load of %s: %s", table, e)
 
         self._write_load_cache[table] = load
         return load
@@ -911,7 +911,7 @@ class IndexTuningBase(ABC):
                 self._table_size_cache[table] = size
                 return size
         except Exception as e:
-            logger.warning(f"Error getting table size for {table}: {e}")
+            logger.warning("Error getting table size for %s: %s", table, e)
             # Use estimation method
             size = await self._estimate_table_size(table)
             self._table_size_cache[table] = size
@@ -929,7 +929,7 @@ class IndexTuningBase(ABC):
                 # Rough estimate: assume 1KB per row
                 return row_count * 1024
         except Exception as e:
-            logger.warning(f"Error estimating table size for {table}: {e}")
+            logger.warning("Error estimating table size for %s: %s", table, e)
 
         # Default size if we can't estimate
         return 10 * 1024 * 1024  # 10MB default

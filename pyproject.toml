@@ -83,6 +83,7 @@ lint.select = [
     "W",   # pycodestyle warnings
     "N",   # pep8-naming
     "UP",  # pyupgrade
+    "G004",  # logging-f-string: pass arguments, so a message is formatted only if it is emitted
     "RUF"  # ruff-specific rules
 ]
 

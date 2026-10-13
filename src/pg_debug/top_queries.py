@@ -100,7 +100,7 @@ class TopQueriesCalc:
             include_messages=False,
         )
         if not extension_status.is_installed:
-            logger.warning(f"Extension {PG_STAT_STATEMENTS} is not installed")
+            logger.warning("Extension %s is not installed", PG_STAT_STATEMENTS)
             raise ExtensionRequiredError(PG_STAT_STATEMENTS, install_pg_stat_statements_message)
 
     async def sample(
@@ -257,12 +257,12 @@ class TopQueriesCalc:
         Raises:
             ExtensionRequiredError: If pg_stat_statements is not installed.
         """
-        logger.debug(f"Getting top queries by time. limit={limit}, sort_by={sort_by}")
+        logger.debug("Getting top queries by time. limit=%s, sort_by=%s", limit, sort_by)
         await self._require_pg_stat_statements()
 
         # Get version-appropriate column names
         pg_version = await get_postgres_version(self.sql_driver)
-        logger.debug(f"PostgreSQL version: {pg_version}")
+        logger.debug("PostgreSQL version: %s", pg_version)
         cols = _get_pg_stat_statements_columns(pg_version)
 
         # Determine which column to sort by based on sort_by parameter
@@ -283,14 +283,14 @@ class TopQueriesCalc:
                 LIMIT {{}};
             """,
         )
-        logger.debug(f"Executing query: {query}")
+        logger.debug("Executing query: %s", query)
         slow_query_rows = await SafeSqlDriver.execute_param_query(
             self.sql_driver,
             query,
             [limit],
         )
         slow_queries = [row.cells for row in slow_query_rows] if slow_query_rows else []
-        logger.info(f"Found {len(slow_queries)} slow queries")
+        logger.info("Found %s slow queries", len(slow_queries))
         return slow_queries
 
     async def get_top_resource_queries(self, frac_threshold: float = 0.05) -> list[dict[str, Any]]:
@@ -309,12 +309,12 @@ class TopQueriesCalc:
         Raises:
             ExtensionRequiredError: If pg_stat_statements is not installed.
         """
-        logger.debug(f"Getting top resource queries with threshold {frac_threshold}")
+        logger.debug("Getting top resource queries with threshold %s", frac_threshold)
         await self._require_pg_stat_statements()
 
         # Get version-appropriate column names
         pg_version = await get_postgres_version(self.sql_driver)
-        logger.debug(f"PostgreSQL version: {pg_version}")
+        logger.debug("PostgreSQL version: %s", pg_version)
         cols = _get_pg_stat_statements_columns(pg_version)
 
         query = cast(
@@ -374,11 +374,11 @@ class TopQueriesCalc:
             """,
         )
 
-        logger.debug(f"Executing query: {query}")
+        logger.debug("Executing query: %s", query)
         slow_query_rows = await SafeSqlDriver.execute_param_query(
             self.sql_driver,
             query,
         )
         resource_queries = [row.cells for row in slow_query_rows] if slow_query_rows else []
-        logger.info(f"Found {len(resource_queries)} resource-intensive queries")
+        logger.info("Found %s resource-intensive queries", len(resource_queries))
         return resource_queries
