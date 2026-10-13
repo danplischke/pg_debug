@@ -2,7 +2,8 @@
 
 pg_debug is an async Python library and `pg-debug` CLI that inspects, diagnoses
 and tunes a live PostgreSQL database. This file is about working on the
-repository. `.claude/skills/pg-debug/SKILL.md` is about using the tool.
+repository. The skill in `plugins/pg-debug/skills/pg-debug/` is about using
+the tool.
 
 ## Commands
 
@@ -32,6 +33,7 @@ above need nothing else.
 | `src/pg_debug/plans/`, `health/`, `index/`, `index_use/`, `model/`, `migration/`, `partition/` | One package per feature that needed more than one file. |
 | `src/pg_debug/activity.py`, `configuration.py`, `schema.py`, `statistics.py`, `top_queries.py` | Features that fit in one file. |
 | `src/pg_debug/baseline.py` | `--baseline`: the identity each finding is known by, and the file that records them. |
+| `plugins/pg-debug/`, `.claude-plugin/marketplace.json` | The Claude Code plugin and the marketplace that publishes it. `.claude/skills/pg-debug` links to the plugin's skill. |
 | `tests/unit/` | Mirrors `src/pg_debug/`. Test module names must be unique across the tree. |
 | `tests/integration/` | Container-backed; see `tests/README.md`. |
 
@@ -42,7 +44,9 @@ above need nothing else.
   list there in the same commit and treat it as an API change in the
   changelog.
 - `tests/unit/test_public_api.py` also checks `__version__` against the
-  installed distribution. The version lives only in `src/pg_debug/__init__.py`.
+  installed distribution. The version lives in `src/pg_debug/__init__.py`;
+  the plugin manifest repeats it, and `tests/unit/test_plugin.py` fails until
+  the two agree.
 
 ## Rules the code follows
 
@@ -75,7 +79,9 @@ above need nothing else.
 - A user-visible change gets a `CHANGELOG.md` entry under **Unreleased**, in
   the existing style: what the user saw before, what they see now, why.
 - A new command or option is documented in the README command reference and
-  in `.claude/skills/pg-debug/SKILL.md`.
+  in the skill: a row in the table in
+  `plugins/pg-debug/skills/pg-debug/SKILL.md`, and the detail in the reference
+  file for its area.
 - Commit subjects say what the change does, in the imperative; bodies say why.
 - Do not bump the version, edit release headings in the changelog, or create
   tags unless asked to cut a release. `CONTRIBUTING.md` has the procedure.

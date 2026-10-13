@@ -1,0 +1,15 @@
+{
+  "name": "pg-debug",
+  "description": "The pg-debug plugin for Claude Code, published from the pg-debug repository itself.",
+  "owner": {
+    "name": "Dan Plischke",
+    "url": "https://github.com/danplischke"
+  },
+  "plugins": [
+    {
+      "name": "pg-debug",
+      "source": "./plugins/pg-debug",
+      "description": "Diagnose and tune PostgreSQL from Claude Code with the pg-debug CLI: slow queries and their plans, index advice tested with HypoPG before anything is created, locks and stuck sessions, health, configuration, the data model, migrations and partitioning."
+    }
+  ]
+}

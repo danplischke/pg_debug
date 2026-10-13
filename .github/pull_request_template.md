@@ -11,4 +11,4 @@
 - [ ] `uv run ruff format --check . && uv run ruff check . && uv run pyright` pass
 - [ ] Tests added or updated under `tests/unit/`, mirroring the source module
 - [ ] A `CHANGELOG.md` entry under **Unreleased** for any user-visible change
-- [ ] README and `.claude/skills/pg-debug/SKILL.md` updated if a command or option changed
+- [ ] README and the skill in `plugins/pg-debug/skills/pg-debug/` updated if a command or option changed

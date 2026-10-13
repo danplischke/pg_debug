@@ -50,9 +50,15 @@ test-lowest *args:
     uv pip list | grep -iE '^(humanize|instructor|pglast|psycopg|psycopg-pool|pydantic) '
     uv run --no-sync pytest tests/unit -q {{ args }}
 
-# Lint, every test, package build and smoke test, as the CI does
+# Lint, every test, package build and smoke test, and the plugin validation, as the CI does
 [group('test')]
-check: lint test-all smoke
+check: lint test-all smoke plugin
+
+# Validate the Claude Code marketplace and plugin with Claude Code's own validator, as the plugin job does; needs Node
+[group('test')]
+plugin:
+    npx --yes @anthropic-ai/claude-code@2.1.287 plugin validate --strict .
+    npx --yes @anthropic-ai/claude-code@2.1.287 plugin validate --strict plugins/pg-debug
 
 # Build the sdist and wheel into dist/ and check their metadata
 [group('package')]

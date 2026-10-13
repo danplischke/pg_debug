@@ -26,6 +26,14 @@ uv run pyright                # types, standard mode
 uv run pytest                 # tests
 ```
 
+The Claude Code plugin is checked by Claude Code's own validator, which needs
+Node; `just plugin` runs the same two commands:
+
+```bash
+npx @anthropic-ai/claude-code@2.1.287 plugin validate --strict .                 # the marketplace
+npx @anthropic-ai/claude-code@2.1.287 plugin validate --strict plugins/pg-debug  # the plugin
+```
+
 Most tests are unit tests with mocked drivers and run in a few seconds:
 
 ```bash
@@ -83,8 +91,13 @@ imperative (`Diagnose autovacuum, not just wraparound`); the body says why and
 what was ruled out. One change per commit.
 
 **Documentation.** A new command or option is added to the README's command
-reference and to `.claude/skills/pg-debug/SKILL.md`, which is how Claude Code
-learns to drive the tool.
+reference and to the skill in `plugins/pg-debug/skills/pg-debug/`, which is
+how Claude Code learns to drive the tool: a row in the table in `SKILL.md`,
+and the detail in the reference file for its area. `SKILL.md` stays under 500
+lines, so Claude reads the rest only when it needs it. The skill ships as a
+Claude Code plugin from this repository, and `.claude/skills/pg-debug` links to
+it so a session here has it too; on Windows, that link needs git's
+`core.symlinks` enabled.
 
 ## Pull requests
 
@@ -95,13 +108,17 @@ when merging.
 
 ## Releasing
 
-The version is written in one place, `__version__` in
-`src/pg_debug/__init__.py`; `pyproject.toml` reads it from there.
+The version is written in `__version__` in `src/pg_debug/__init__.py`, which
+`pyproject.toml` reads, and repeated in the Claude Code plugin's manifest,
+`plugins/pg-debug/.claude-plugin/plugin.json`, because installed copies of the
+plugin update only when its version changes.
 
 1. In `CHANGELOG.md`, turn **Unreleased** into `## [X.Y.Z] - YYYY-MM-DD`, start
    a new empty **Unreleased** section, and update the compare links at the
    bottom.
-2. Set `__version__` to `X.Y.Z` and run `uv lock` so the lockfile agrees.
+2. Set `__version__` and the plugin manifest's `version` to `X.Y.Z`, and run
+   `uv lock` so the lockfile agrees. `tests/unit/test_plugin.py` fails until
+   the two versions match.
 3. Commit as `Release X.Y.Z`, get it onto `main`, and wait for CI to pass.
 4. Tag that commit and push the tag:
 

@@ -78,6 +78,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are ordered by how many backends they block. It works in `restricted` mode
   and needs no extension.
 
+- A Claude Code plugin, published from this repository as its own
+  marketplace: `/plugin install pg-debug --marketplace danplischke/pg_debug`.
+  The skill that teaches Claude to drive pg-debug was a project skill, so it
+  existed only in sessions started inside a clone of this repository; the
+  plugin takes it to any project. It uses the `pg-debug` on the PATH, or runs
+  it with `uvx` from this repository without installing anything. The skill
+  also costs less: its description, which every session carries, is half its
+  old length, and the old one ran past the 1,536 characters Claude Code shows,
+  so its end was cut off; and the detail moved from `SKILL.md` into reference
+  files Claude reads when a question needs them, so a use of the skill loads
+  about 1,900 tokens instead of 10,000. The plugin's version is the package's.
+  In this repository the skill now lives in
+  `plugins/pg-debug/skills/pg-debug/`, and `.claude/skills/pg-debug` links to
+  it.
+
 ### Changed
 
 - Index tuning raises instead of returning an `error` key. A failed
