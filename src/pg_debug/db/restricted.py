@@ -24,6 +24,7 @@ from psycopg.sql import SQL
 from psycopg.sql import Composable
 from psycopg.sql import Literal
 
+from ..errors import QueryError
 from . import allowlist
 from .driver import QUERY_MARKER
 from .driver import SqlDriver
@@ -31,6 +32,11 @@ from .driver import SqlDriver
 logger = logging.getLogger(__name__)
 
 __all__ = ["QUERY_MARKER", "SafeSqlDriver"]
+
+
+def _refused(reason: str) -> QueryError:
+    """The error for a query restricted mode will not run, with the reason it will not."""
+    return QueryError(f"Restricted mode refused the query: {reason}.")
 
 
 class SafeSqlDriver(SqlDriver):
@@ -72,7 +78,7 @@ class SafeSqlDriver(SqlDriver):
         """Recursively validate a node and all its children"""
         # Check if node type is allowed
         if not isinstance(node, tuple(self.ALLOWED_NODE_TYPES)):
-            raise ValueError(f"Node type {type(node)} is not allowed")
+            raise _refused(f"{type(node).__name__} is not allowed")
 
         # Validate LIKE patterns
         if isinstance(node, A_Expr) and node.kind in (
@@ -84,7 +90,7 @@ class SafeSqlDriver(SqlDriver):
                 # Nothing to do for now
                 pass
             else:
-                raise ValueError("LIKE pattern must be a constant string")
+                raise _refused("a LIKE pattern must be a constant string")
 
         # Validate function calls
         if isinstance(node, FuncCall):
@@ -93,22 +99,22 @@ class SafeSqlDriver(SqlDriver):
             match = self.PG_CATALOG_PATTERN.match(func_name)
             unqualified_name = match.group(1) if match else func_name
             if unqualified_name not in self.ALLOWED_FUNCTIONS:
-                raise ValueError(f"Function {func_name} is not allowed")
+                raise _refused(f"function {func_name} is not allowed")
 
         # Reject SELECT statements with locking clauses
         if isinstance(node, SelectStmt) and getattr(node, "lockingClause", None):
-            raise ValueError("Locking clause on select is prohibited")
+            raise _refused("FOR UPDATE and FOR SHARE take row locks")
 
         # Reject EXPLAIN ANALYZE statements
         if isinstance(node, ExplainStmt):
             for option in node.options or []:
                 if isinstance(option, DefElem) and option.defname == "analyze":
-                    raise ValueError("EXPLAIN ANALYZE is not supported")
+                    raise _refused("EXPLAIN ANALYZE runs the statement it explains")
 
         # Reject CREATE EXTENSION statements
         if isinstance(node, CreateExtensionStmt):
             if node.extname not in self.ALLOWED_EXTENSIONS:
-                raise ValueError(f"CREATE EXTENSION {node.extname} is not supported")
+                raise _refused(f"CREATE EXTENSION {node.extname} is not an extension it may create")
 
         # Recursively validate all attributes that might be nodes
         for attr_name in node.__slots__:
@@ -139,32 +145,27 @@ class SafeSqlDriver(SqlDriver):
                 self._validate_node(attr)
 
     def _validate(self, query: str) -> None:
-        """Validate query is safe to execute"""
+        """Refuse the query unless every statement in it is read-only.
+
+        Raises:
+            QueryError: Naming the first thing restricted mode refuses. A query
+                it cannot parse, or that the validator itself fails on, is
+                refused too: restricted mode does not run what it could not check.
+        """
         try:
-            # Parse the SQL using pglast
             parsed = pglast.parse_sql(query)
-
-            # Validate each statement
-            try:
-                for stmt in parsed:
-                    if isinstance(stmt, RawStmt):
-                        # Check if the inner statement type is allowed
-                        if not isinstance(stmt.stmt, tuple(self.ALLOWED_STMT_TYPES)):
-                            raise ValueError(
-                                "Only SELECT, ANALYZE, VACUUM, EXPLAIN, SHOW and other read-only statements are allowed. Received raw statement: "
-                                + str(stmt.stmt)
-                            )
-                    else:
-                        if not isinstance(stmt, tuple(self.ALLOWED_STMT_TYPES)):
-                            raise ValueError(
-                                "Only SELECT, ANALYZE, VACUUM, EXPLAIN, SHOW and other read-only statements are allowed. Received: " + str(stmt)
-                            )
-                    self._validate_node(stmt)
-            except Exception as e:
-                raise ValueError(f"Error validating query: {query}") from e
-
         except pglast.parser.ParseError as e:
-            raise ValueError("Failed to parse SQL statement") from e
+            raise _refused(f"it could not be parsed ({e})") from e
+        try:
+            for stmt in parsed:
+                statement = stmt.stmt if isinstance(stmt, RawStmt) else stmt
+                if not isinstance(statement, tuple(self.ALLOWED_STMT_TYPES)):
+                    raise _refused(f"{type(statement).__name__} is not a read-only statement; it runs SELECT, EXPLAIN, SHOW, VACUUM and ANALYZE")
+                self._validate_node(stmt)
+        except QueryError:
+            raise
+        except Exception as e:
+            raise _refused(f"it could not be validated ({e})") from e
 
     async def execute_query(
         self,
@@ -188,7 +189,7 @@ class SafeSqlDriver(SqlDriver):
                     )
             except TimeoutError as e:
                 logger.warning("Query execution timed out after %s seconds: %s...", self.timeout, query[:100])
-                raise ValueError(
+                raise QueryError(
                     f"Query execution timed out after {self.timeout} seconds in restricted mode. "
                     "Consider simplifying your query or increasing the timeout."
                 ) from e
@@ -211,9 +212,9 @@ class SafeSqlDriver(SqlDriver):
         promise as never having run it, and restricted mode makes the second
         one.
         """
-        raise ValueError(
-            "Restricted mode cannot run a statement in order to observe it. "
-            "Use --access-mode unrestricted, on a database where executing the statement is acceptable."
+        raise _refused(
+            "it would have to run the statement to observe it, and a rollback afterwards is not the same as never running it. "
+            "Use --access-mode unrestricted, on a database where executing the statement is acceptable"
         )
 
     @staticmethod

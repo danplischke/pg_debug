@@ -25,6 +25,7 @@ from pg_debug import cli
 from pg_debug.db import SafeSqlDriver
 from pg_debug.errors import ExtensionRequiredError
 from pg_debug.errors import InvalidArgumentError
+from pg_debug.errors import QueryError
 from pg_debug.health.checks.autovacuum import AutovacuumCalc
 from pg_debug.health.checks.table_bloat import TableBloatCalc
 from pg_debug.index.base import HIDDEN_QUERY_TEXT
@@ -222,7 +223,7 @@ async def test_restricted_mode_rejects_writes():
     async with PgDebug(DATABASE_URI, access_mode=AccessMode.RESTRICTED) as pg:
         assert await pg.execute_sql("SELECT 1 AS ok") == [{"ok": 1}]
 
-        with pytest.raises(Exception, match=r"[Ee]rror validating query"):
+        with pytest.raises(QueryError, match=r"^Restricted mode refused the query: CreateStmt is not a read-only statement"):
             await pg.execute_sql("CREATE TABLE should_not_exist (id int)")
 
 
