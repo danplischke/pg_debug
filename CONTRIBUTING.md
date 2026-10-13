@@ -32,6 +32,11 @@ containers and skips when Docker is not available. `tests/README.md` describes
 the layout and how to run the end-to-end tests against a server you already
 have instead.
 
+One more job runs the unit tests with every direct dependency at the lowest
+version `pyproject.toml` allows (`uv sync --all-extras --resolution
+lowest-direct` on Python 3.12). When it fails, the code has started using
+something newer than the floor says: raise the floor in the same change.
+
 ## Conventions
 
 **Where code goes.** The package layout section of the README is the map. A
