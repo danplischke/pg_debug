@@ -1,4 +1,3 @@
-import asyncio
 from collections.abc import Generator
 
 import pytest
@@ -8,13 +7,6 @@ from utils import create_postgres_container
 from pg_debug.db import reset_postgres_version_cache
 
 load_dotenv()
-
-
-# Define a custom event loop policy that handles cleanup better
-@pytest.fixture(scope="session")
-def event_loop_policy():
-    """Create and return a custom event loop policy for tests."""
-    return asyncio.DefaultEventLoopPolicy()
 
 
 @pytest.fixture(scope="class", params=["postgres:12", "postgres:15", "postgres:16"])
