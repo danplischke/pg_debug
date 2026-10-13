@@ -8,6 +8,12 @@ uv sync --all-extras          # Python 3.12+, installs into .venv with the llm e
 uv run pre-commit install     # runs the checks below on every commit
 ```
 
+With [just](https://just.systems/) installed, `just dev` does both, and `just`
+lists the recipes in `.justfile` that wrap the commands in this guide:
+`just lint`, `just test`, `just test-lowest`, `just check` for everything CI
+runs, and `just release X.Y.Z`. None of them is required; the uv commands are
+the same checks.
+
 ## Checks
 
 CI runs exactly these, the tests on Python 3.12, 3.13 and 3.14 and on macOS.
@@ -99,6 +105,10 @@ The version is written in one place, `__version__` in
    git tag vX.Y.Z
    git push origin vX.Y.Z
    ```
+
+   `just release X.Y.Z` does the same from a checkout of `main`, after checking
+   that `__version__` and the changelog both say `X.Y.Z`, the working tree is
+   clean, and `main` is at `origin/main`.
 
 The publish workflow (`.github/workflows/publish.yml`) then refuses unless the
 tag matches `__version__` and the tagged commit is on `main`; runs the whole of

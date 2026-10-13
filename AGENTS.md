@@ -16,7 +16,9 @@ uv run pytest tests/unit/plans/test_rules.py -k estimate  # one file or test
 
 Run the first three before claiming a change is done. CI runs the same checks,
 the tests on Python 3.12, 3.13 and 3.14 and on macOS, and fails on any
-formatting or type error.
+formatting or type error. `.justfile` wraps the same commands (`just lint`,
+`just test`, `just check`) for people with `just` installed; the uv commands
+above need nothing else.
 
 ## Layout
 
