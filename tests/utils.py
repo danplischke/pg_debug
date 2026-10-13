@@ -17,8 +17,13 @@ def create_postgres_container(version: str) -> Generator[Tuple[str, str], None, 
     try:
         client = docker.from_env()
         client.ping()
+        os_type = client.info().get("OSType")
     except (docker_errors.DockerException, ConnectionError):
         pytest.skip("Docker is not available")
+    # The PostgreSQL images are Linux images. A Docker running Windows
+    # containers, as on GitHub's Windows runners, would fail to build them.
+    if os_type != "linux":
+        pytest.skip(f"Docker runs {os_type} containers here, and the PostgreSQL images are Linux images")
 
     # Extract PostgreSQL version number
     pg_version = version.split(":")[1] if ":" in version else version
