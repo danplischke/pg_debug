@@ -595,11 +595,31 @@ runs on pganalyze's
 
 ## Using it from Claude Code
 
-`.claude/skills/pg-debug/SKILL.md` is a project skill that teaches Claude Code
-how to drive this tool — which command answers which question, how to read the
-output, and the traps (extensions, `search_path`, access modes). It loads
-automatically when you ask about slow queries, indexes or database health in a
-session started in this repository.
+pg-debug ships a Claude Code plugin whose skill teaches Claude how to drive
+this tool: which command answers which question, how to read the output, and
+the traps (extensions, `search_path`, access modes). Install it from this
+repository, which is its marketplace:
+
+```text
+/plugin install pg-debug --marketplace danplischke/pg_debug
+```
+
+Claude Code before 2.1.275 needs the marketplace added first:
+
+```text
+/plugin marketplace add danplischke/pg_debug
+/plugin install pg-debug@pg-debug
+```
+
+The skill then loads whenever you ask about slow queries, indexes, locks or
+database health. It uses the `pg-debug` you have installed; without one, it
+runs it with `uvx` from this repository rather than installing anything. The
+plugin's version follows pg-debug's, so each release is a new version of the
+skill: run `/plugin marketplace update pg-debug`, then update the plugin under
+**Installed** in `/plugin`, or switch on auto-update for the marketplace there.
+
+In a session started in this repository the same skill is a project skill —
+`.claude/skills/pg-debug` links to it — so there is nothing to install.
 
 ## Development
 

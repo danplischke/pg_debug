@@ -1,0 +1,21 @@
+{
+  "name": "pg-debug",
+  "version": "0.2.0",
+  "description": "Diagnose and tune PostgreSQL from Claude Code with the pg-debug CLI: slow queries and their plans, index advice tested with HypoPG before anything is created, locks and stuck sessions, health, configuration, the data model, migrations and partitioning.",
+  "author": {
+    "name": "Dan Plischke",
+    "url": "https://github.com/danplischke"
+  },
+  "homepage": "https://github.com/danplischke/pg_debug",
+  "repository": "https://github.com/danplischke/pg_debug",
+  "license": "MIT",
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "database",
+    "explain",
+    "index",
+    "performance",
+    "dba"
+  ]
+}

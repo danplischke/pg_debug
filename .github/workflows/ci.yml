@@ -144,12 +144,27 @@ jobs:
               raise SystemExit("the llm method imported without its extra")
           PY
 
+  # The Claude Code plugin and the marketplace that publishes it, checked by
+  # Claude Code's own validator with warnings as errors. It runs offline and
+  # needs no credentials; the version is pinned like the actions are, and
+  # matches the plugin recipe in .justfile.
+  plugin:
+    name: Claude Code plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 — https://github.com/actions/checkout/releases/tag/v7.0.1
+
+      - name: Validate the marketplace and the plugin
+        run: |
+          npx --yes @anthropic-ai/claude-code@2.1.287 plugin validate --strict .
+          npx --yes @anthropic-ai/claude-code@2.1.287 plugin validate --strict plugins/pg-debug
+
   # The one check the main ruleset requires. It passes only when every job
   # above succeeded, so a new job or matrix entry is gated without editing the
   # ruleset, which has to be re-imported by hand.
   result:
     name: CI result
-    needs: [lint, test, lowest, package]
+    needs: [lint, test, lowest, package, plugin]
     if: always()
     runs-on: ubuntu-latest
     steps:
