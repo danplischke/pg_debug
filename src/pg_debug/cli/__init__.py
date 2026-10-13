@@ -645,7 +645,7 @@ async def cmd_tune_queries(pg: PgDebug, args: argparse.Namespace) -> Any:
     queries: list[str] = []
     for query in args.queries:
         if query == "-":
-            queries.extend(line.strip() for line in sys.stdin.read().splitlines() if line.strip())
+            queries.extend(line.strip() for line in read_stdin().splitlines() if line.strip())
         else:
             queries.append(query)
     return await pg.analyze_query_indexes(queries, max_index_size_mb=args.max_index_size_mb, method=args.method)
