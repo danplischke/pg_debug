@@ -475,3 +475,8 @@ async def test_a_malformed_hypothetical_index_is_an_argument_error(mock_sql_driv
     with pytest.raises(InvalidArgumentError, match=reason):
         await tool.explain_with_hypothetical_indexes("SELECT * FROM users WHERE id = 1", indexes)
     mock_sql_driver.execute_query.assert_not_awaited()
+
+
+def test_a_plan_without_a_plan_key_is_an_argument_error():
+    with pytest.raises(InvalidArgumentError, match="an object with a 'Plan' key"):
+        ExplainPlanArtifact.from_json_data({"Planning Time": 0.1})

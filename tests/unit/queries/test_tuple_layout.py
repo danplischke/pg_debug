@@ -2,6 +2,7 @@
 
 import pytest
 
+from pg_debug.errors import InvalidArgumentError
 from pg_debug.queries.tuple_layout import DECLARED_ORDER
 from pg_debug.queries.tuple_layout import PACKED_ORDER
 from pg_debug.queries.tuple_layout import row_layout_ctes
@@ -72,5 +73,5 @@ def test_the_packed_order_puts_the_widest_alignment_first():
 
 
 def test_at_least_one_ordering_is_required():
-    with pytest.raises(ValueError):
+    with pytest.raises(InvalidArgumentError, match="At least one ordering"):
         row_layout_ctes("true", ())

@@ -8,6 +8,8 @@ from typing import ClassVar
 from attrs import define
 from attrs import field
 
+from ..errors import InvalidArgumentError
+
 # If the recommendation cost is 0.0, we can't calculate the improvement multiple.
 # Return 1000000.0 to indicate infinite improvement.
 INFINITE_IMPROVEMENT_MULTIPLIER = 1000000.0
@@ -242,7 +244,7 @@ class ExplainPlanArtifact:
     @classmethod
     def from_json_data(cls, plan_data: dict[str, Any]) -> "ExplainPlanArtifact":
         if "Plan" not in plan_data:
-            raise ValueError("Missing 'Plan' field in explain plan data")
+            raise InvalidArgumentError("Expected EXPLAIN (FORMAT JSON) output: an object with a 'Plan' key.")
 
         # Create plan tree from the "Plan" field
         plan_tree = PlanNode.from_json_data(plan_data["Plan"])

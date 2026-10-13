@@ -313,7 +313,7 @@ async def test_index_exists(create_dta):
     with patch("pglast.parser.parse_sql", side_effect=Exception("Parsing error")):
         # Should use fallback and return True based on substring matching
         index = IndexRecommendation("users", ("name", "email"))
-        with pytest.raises(Exception, match="Error in robust index comparison"):
+        with pytest.raises(IndexTuningError, match="Error in robust index comparison: Parsing error"):
             dta._index_exists(
                 index,
                 {"CREATE INDEX users_name_email_idx ON users USING btree (name, email)"},
@@ -321,7 +321,7 @@ async def test_index_exists(create_dta):
 
         # Should return False when no match even with fallback
         index = IndexRecommendation("users", ("address",))
-        with pytest.raises(Exception, match="Error in robust index comparison"):
+        with pytest.raises(IndexTuningError, match="Error in robust index comparison: Parsing error"):
             dta._index_exists(
                 index,
                 {"CREATE INDEX users_name_email_idx ON users USING btree (name, email)"},

@@ -133,6 +133,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keeps psycopg's exception as its `__cause__` for the SQLSTATE. The CLI prints
   the same message as before.
 
+- The last plain `ValueError`s are the library's own errors, so
+  `except PgDebugError` catches them too. A server version that could not be
+  read is a `QueryError`. A failure inside the index search is an
+  `IndexTuningError` that names its cause, where it said only `Error
+  evaluating configuration` or `Error in robust index comparison`. A SQL file
+  the advisor cannot read, a query whose bind parameters cannot be filled in,
+  and plan JSON without a `Plan` key are `InvalidArgumentError`s, which are
+  still `ValueError`s for code that catches those. The `llm` tuning method,
+  given a workload of more than one query, says how many there were and to
+  use `dta`.
+
 - `SyncPgDebug` could not connect on Windows. Its event loop was Windows'
   default, the proactor loop, on which psycopg refuses to open an async
   connection, so the first call that reached the database failed with

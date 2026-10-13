@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from ..errors import InvalidArgumentError
+
 # PostgreSQL layout constants, all documented in "Database Page Layout".
 MAXALIGN = 8
 PAGE_HEADER_BYTES = 24
@@ -88,7 +90,7 @@ def row_layout_ctes(relation_filter: str, orderings: Sequence[str] = (DECLARED_O
         back out.
     """
     if not orderings:
-        raise ValueError("At least one ordering is required")
+        raise InvalidArgumentError("At least one ordering is required")
 
     variants = "\n  UNION ALL\n".join(
         f"""    SELECT f.*, {number} AS variant, row_number() OVER (PARTITION BY f.table_oid ORDER BY {ordering}) AS ord

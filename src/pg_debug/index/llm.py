@@ -9,6 +9,7 @@ from pglast.ast import SelectStmt
 from pydantic import BaseModel
 
 from ..db import SqlDriver
+from ..errors import IndexTuningError
 from ..errors import MissingDependencyError
 from ..parsing import TableAliasVisitor
 from ..plans.explain import ExplainPlanTool
@@ -115,7 +116,9 @@ class LLMOptimizerTool(IndexTuningBase):
         # For now we support only one table at a time
         if len(query_weights) > 1:
             logger.error("LLM optimization currently supports only one query at a time")
-            raise ValueError("Optimization by LLM supports only one query at a time.")
+            raise IndexTuningError(
+                f"The 'llm' method analyzes one query at a time, and the workload has {len(query_weights)}. Use the 'dta' method for a workload."
+            )
 
         query = query_weights[0][0]
         parsed_query = query_weights[0][1]

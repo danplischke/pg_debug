@@ -20,6 +20,7 @@ from ..db import split_table_reference
 from ..db import table_identifier
 from ..errors import ExtensionRequiredError
 from ..errors import IndexTuningError
+from ..errors import InvalidArgumentError
 from ..errors import PgDebugError
 from ..parsing import SqlBindParams
 from ..parsing import TableAliasVisitor
@@ -538,7 +539,7 @@ class IndexTuningBase(ABC):
 
             return queries
         except Exception as e:
-            raise ValueError(f"Error loading queries from file {file_path}") from e
+            raise InvalidArgumentError(f"Error loading queries from file {file_path}: {e}") from e
 
     async def _get_query_stats(self, min_calls: int, min_avg_time_ms: float, limit: int) -> list[dict[str, Any]]:
         """Get query statistics from pg_stat_statements"""
@@ -703,7 +704,7 @@ class IndexTuningBase(ABC):
                     total_cost += cost * weight
                     valid_queries += 1
                 except Exception as e:
-                    raise ValueError(f"Error executing explain for query: {query_text}") from e
+                    raise IndexTuningError(f"Error executing explain for query: {query_text}: {e}") from e
 
             if valid_queries == 0:
                 self.dta_trace("    + no valid queries found for cost evaluation")
@@ -716,7 +717,7 @@ class IndexTuningBase(ABC):
 
         except Exception as e:
             self.dta_trace(f"    + error evaluating configuration: {e}")
-            raise ValueError("Error evaluating configuration") from e
+            raise IndexTuningError(f"Error evaluating configuration: {e}") from e
 
     @staticmethod
     def _size_cache_key(table: str, columns: Iterable[str]) -> tuple[str, frozenset[str]]:
@@ -773,7 +774,7 @@ class IndexTuningBase(ABC):
                 return size_estimate
             return 0
         except Exception as e:
-            raise ValueError("Error estimating index size") from e
+            raise IndexTuningError(f"Error estimating index size: {e}") from e
 
     def _estimate_index_size_internal(self, stats: dict[str, Any]) -> int:
         """Rough size for an index HypoPG never measured.
@@ -873,7 +874,7 @@ class IndexTuningBase(ABC):
 
             return float(total_cost)
         except (IndexError, KeyError, ValueError, json.JSONDecodeError) as e:
-            raise ValueError("Error extracting cost from plan") from e
+            raise IndexTuningError(f"Error extracting cost from plan: {e}") from e
 
     async def _get_table_size(self, table: str) -> int:
         """
