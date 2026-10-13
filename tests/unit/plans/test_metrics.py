@@ -169,7 +169,7 @@ def test_walking_with_parents_pairs_the_root_with_nothing():
     leaf = node("Seq Scan")
     root = node("Sort", children=[leaf])
 
-    # Keyed by id: PlanNode carries attrs-generated equality and so is
+    # Keyed by id: PlanNode carries dataclass-generated equality and so is
     # unhashable, which is why the diagnoser keys its parent map the same way.
     parents = {id(child): parent for child, parent in walk_with_parent(root)}
     assert parents[id(root)] is None
