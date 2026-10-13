@@ -154,6 +154,26 @@ def test_explain_renders_plan_text(pg_client):
     assert "Seq Scan" in out
 
 
+def test_windows_writes_utf8_to_a_file_or_pipe(pg_client, monkeypatch):
+    """Windows encodes redirected output in cp1252 or similar, which has no arrow."""
+    import io
+    import sys
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    out = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    err = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="backslashreplace")
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    node = PlanNode(node_type="Seq Scan", total_cost=10.0, startup_cost=0.0, plan_rows=1, plan_width=4)
+    pg_client.explain_query = AsyncMock(return_value=ExplainPlanArtifact(value='{"Plan": {}}', plan_tree=node))
+
+    assert cli.main(["explain", "SELECT 1"]) == 0
+
+    out.flush()
+    assert "→ Seq Scan" in out.buffer.getvalue().decode("utf-8")
+    assert (err.encoding, err.errors) == ("utf-8", "backslashreplace"), "stderr keeps its error handler"
+
+
 def test_explain_json_prints_the_plan_document(pg_client):
     node = PlanNode(node_type="Seq Scan", total_cost=10.0, startup_cost=0.0, plan_rows=1, plan_width=4)
     pg_client.explain_query = AsyncMock(return_value=ExplainPlanArtifact(value='{"Plan": {"Total Cost": 10.0}}', plan_tree=node))

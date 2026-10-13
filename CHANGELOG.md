@@ -87,6 +87,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   UTF-8 is refused with the name of the file it came from rather than read
   wrongly.
 
+- On Windows, `pg-debug explain` stopped with `'charmap' codec can't encode
+  character '\u2192'` whenever its output went to a file or a pipe, and so did
+  index tuning output with an `∞` in it. Windows encodes redirected output in
+  the ANSI code page, cp1252 or similar, which has neither character. Output
+  and errors are now written as UTF-8 on Windows, as Python itself will by
+  default from 3.15. Output to a console was never affected.
+
 - `pg-debug diagnose ./slow.sql` ran the literal text `./slow.sql` as the
   query. The README had promised a file path since the command appeared;
   it now reads one, as `check-migration` does.
