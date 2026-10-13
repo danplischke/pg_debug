@@ -38,11 +38,17 @@ jobs:
         run: uv run pyright
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        os: [ubuntu-latest]
+        python-version: ["3.12", "3.13", "3.14"]
+        include:
+          # macOS runners have no Docker, so the container-backed tests skip
+          # there and everything else runs.
+          - os: macos-latest
+            python-version: "3.14"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 — https://github.com/actions/checkout/releases/tag/v7.0.1
 
@@ -54,7 +60,10 @@ jobs:
       - name: Install
         run: uv sync --all-extras --locked
 
+      # The container-backed tests skip when Docker is missing, which on Linux
+      # would only hide them; fail instead.
       - name: Verify Docker is running
+        if: runner.os == 'Linux'
         run: docker info
 
       - name: Test

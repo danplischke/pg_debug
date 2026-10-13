@@ -14,8 +14,9 @@ uv run pytest                                          # adds the container-back
 uv run pytest tests/unit/plans/test_rules.py -k estimate  # one file or test
 ```
 
-Run the first three before claiming a change is done. CI runs the same checks
-on Python 3.12 and 3.13 and fails on any formatting or type error.
+Run the first three before claiming a change is done. CI runs the same checks,
+the tests on Python 3.12, 3.13 and 3.14 and on macOS, and fails on any
+formatting or type error.
 
 ## Layout
 
