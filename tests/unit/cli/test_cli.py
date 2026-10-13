@@ -7,6 +7,7 @@ import pytest
 
 from pg_debug import cli
 from pg_debug.errors import ExtensionRequiredError
+from pg_debug.errors import IndexTuningError
 from pg_debug.health import HealthCheckResult
 from pg_debug.model import Confidence
 from pg_debug.model import ModelFinding
@@ -656,6 +657,16 @@ def test_library_errors_are_reported_without_a_traceback(pg_client):
     assert code == 1
     assert out == ""
     assert "CREATE EXTENSION pg_stat_statements" in err
+
+
+def test_a_tuning_failure_exits_non_zero_with_the_reason(pg_client):
+    pg_client.analyze_workload_indexes = AsyncMock(side_effect=IndexTuningError("None of the 3 queries in the workload could be analyzed"))
+
+    code, out, err = run(["tune-workload"])
+
+    assert code == 1
+    assert out == ""
+    assert err == "pg-debug: None of the 3 queries in the workload could be analyzed\n"
 
 
 def test_unexpected_errors_hide_the_password(pg_client):

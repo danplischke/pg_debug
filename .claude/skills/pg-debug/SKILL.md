@@ -150,8 +150,8 @@ recommendations.
 
 Two things routinely surprise people:
 
-- **Requires HypoPG.** Without it, tuning returns an `error` explaining how to
-  install it. `top-queries` and `tune-workload` additionally need
+- **Requires HypoPG.** Without it, tuning fails with a message explaining how
+  to install it (`ExtensionRequiredError` from Python). `top-queries` and `tune-workload` additionally need
   `pg_stat_statements`. No superuser is needed — pg_debug uses HypoPG's
   functions, which any role can execute, not its views, which are private to
   the role that created the extension.
@@ -542,8 +542,8 @@ Failures raise rather than returning error strings. Catch `PgDebugError`, or
 the specific subclass — `ConnectionFailedError`, `InvalidArgumentError`,
 `ExtensionRequiredError` (has `.extension`), `ExplainPlanError`, `QueryError`
 (a statement PostgreSQL rejected or restricted mode refused),
-`MissingDependencyError`. The one exception is index tuning, which reports
-problems as an `error` key in its result dict.
+`IndexTuningError` (tables never analyzed, or nothing in the workload could
+be analyzed), `MissingDependencyError`.
 
 Returns: `list[dict]` for schemas/objects/rows/top-queries/activity/vacuum
 progress/column statistics, `dict` for `get_object_details` and the tuning

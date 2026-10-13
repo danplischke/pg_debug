@@ -11,6 +11,7 @@ import pytest
 import pytest_asyncio
 from pglast import parse_sql
 
+from pg_debug.errors import IndexTuningError
 from pg_debug.index.dta import ColumnCollector
 from pg_debug.index.dta import ConditionColumnCollector
 from pg_debug.index.dta import DatabaseTuningAdvisor
@@ -224,8 +225,8 @@ async def test_error_handling(async_sql_driver, create_dta):
     # Test HypoPG setup failure
     async_sql_driver.execute_query = AsyncMock(side_effect=RuntimeError("HypoPG not available"))
     dta = create_dta
-    session = await dta.analyze_workload(min_calls=50, min_avg_time_ms=5.0)
-    assert "HypoPG not available" in session.error
+    with pytest.raises(IndexTuningError, match="HypoPG not available"):
+        await dta.analyze_workload(min_calls=50, min_avg_time_ms=5.0)
 
     # Test invalid query handling
     async_sql_driver.execute_query = AsyncMock(return_value=None)

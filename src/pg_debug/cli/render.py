@@ -227,9 +227,6 @@ def render_object_details(details: Mapping[str, Any]) -> str:
 
 def render_index_recommendations(result: Mapping[str, Any]) -> str:
     """Render the output of the index tuning commands."""
-    if "error" in result:
-        return f"Index tuning failed: {result['error']}"
-
     recommendations = result.get("recommendations")
     if not recommendations or isinstance(recommendations, str):
         return str(recommendations or "No index recommendations found.")

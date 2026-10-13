@@ -33,6 +33,7 @@ from .db import SqlDriver
 from .errors import ConnectionFailedError
 from .errors import ExplainPlanError
 from .errors import ExtensionRequiredError
+from .errors import IndexTuningError
 from .errors import InvalidArgumentError
 from .errors import MissingDependencyError
 from .errors import NotConnectedError
@@ -98,6 +99,7 @@ __all__ = [
     "HealthType",
     "IndexDefinition",
     "IndexRecommendation",
+    "IndexTuningError",
     "IndexUse",
     "IndexUseAnalyzer",
     "IndexUseFinding",
