@@ -1,4 +1,4 @@
-"""What EXPLAIN returns: the parsed plan tree, or the error that stood in for it."""
+"""What EXPLAIN returns, read into a plan tree."""
 
 import difflib
 import json
@@ -11,16 +11,6 @@ from attrs import field
 # If the recommendation cost is 0.0, we can't calculate the improvement multiple.
 # Return 1000000.0 to indicate infinite improvement.
 INFINITE_IMPROVEMENT_MULTIPLIER = 1000000.0
-
-
-class ErrorResult:
-    """Simple error result class."""
-
-    def to_text(self) -> str:
-        return self.value
-
-    def __init__(self, message: str):
-        self.value = message
 
 
 def calculate_improvement_multiple(base_cost: float, rec_cost: float) -> float:

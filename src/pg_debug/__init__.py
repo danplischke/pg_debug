@@ -67,7 +67,6 @@ from .plans import PlanFinding
 from .plans import PlanIssue
 from .plans import diagnose_plan
 from .plans.hypothetical import IndexDefinition
-from .plans.tree import ErrorResult
 from .plans.tree import ExplainPlanArtifact
 from .plans.tree import PlanNode
 from .schema import ObjectType
@@ -90,7 +89,6 @@ __all__ = [
     "DatabaseHealthTool",
     "DatabaseTuningAdvisor",
     "DbConnPool",
-    "ErrorResult",
     "ExplainPlanArtifact",
     "ExplainPlanError",
     "ExplainPlanTool",

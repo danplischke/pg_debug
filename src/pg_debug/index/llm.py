@@ -13,7 +13,6 @@ from ..errors import MissingDependencyError
 from ..parsing import TableAliasVisitor
 from ..plans.explain import ExplainPlanTool
 from ..plans.hypothetical import IndexDefinition
-from ..plans.tree import ErrorResult
 from .base import IndexRecommendation
 from .base import IndexTuningBase
 
@@ -138,9 +137,6 @@ class LLMOptimizerTool(IndexTuningBase):
         # Generate explain plan for the query
         explain_tool = ExplainPlanTool(self.sql_driver)
         explain_result = await explain_tool.explain(query)
-        if isinstance(explain_result, ErrorResult):
-            logger.error("Failed to generate explain plan: %s", explain_result.to_text())
-            raise ValueError(f"Failed to generate explain plan: {explain_result.to_text()}")
 
         # Get the explain plan JSON
         explain_plan_json = explain_result.value

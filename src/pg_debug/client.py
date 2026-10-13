@@ -18,7 +18,6 @@ from .db import SqlDriver
 from .db import check_hypopg_installation_status
 from .db import obfuscate_password
 from .errors import ConnectionFailedError
-from .errors import ExplainPlanError
 from .errors import ExtensionRequiredError
 from .errors import InvalidArgumentError
 from .errors import PgDebugError
@@ -46,7 +45,6 @@ from .plans import ExplainPlanTool
 from .plans import PlanDiagnoser
 from .plans import PlanFinding
 from .plans import PlanInput
-from .plans.tree import ErrorResult
 from .plans.tree import ExplainPlanArtifact
 from .schema import ObjectType
 from .schema import SchemaInspector
@@ -291,7 +289,7 @@ class PgDebug:
 
         Raises:
             InvalidArgumentError: If ``analyze`` and ``hypothetical_indexes``
-                are combined.
+                are combined, or an index definition is malformed.
             ExtensionRequiredError: If hypothetical indexes are requested but
                 HypoPG is not installed.
             ExplainPlanError: If PostgreSQL could not plan the query.
@@ -307,17 +305,10 @@ class PgDebug:
             if not is_hypopg_installed:
                 raise ExtensionRequiredError("hypopg", hypopg_message)
 
-            result = await explain_tool.explain_with_hypothetical_indexes(sql, hypothetical_indexes)
-        elif analyze:
-            result = await explain_tool.explain_analyze(sql)
-        else:
-            result = await explain_tool.explain(sql)
-
-        if isinstance(result, ExplainPlanArtifact):
-            return result
-
-        message = result.to_text() if isinstance(result, ErrorResult) else "Error processing explain plan"
-        raise ExplainPlanError(message)
+            return await explain_tool.explain_with_hypothetical_indexes(sql, hypothetical_indexes)
+        if analyze:
+            return await explain_tool.explain_analyze(sql)
+        return await explain_tool.explain(sql)
 
     # -- Plan diagnosis ------------------------------------------------------
 

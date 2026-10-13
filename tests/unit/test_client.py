@@ -17,7 +17,6 @@ from pg_debug.errors import InvalidArgumentError
 from pg_debug.errors import PgDebugError
 from pg_debug.errors import QueryError
 from pg_debug.model import RuleId
-from pg_debug.plans.tree import ErrorResult
 from pg_debug.plans.tree import ExplainPlanArtifact
 from pg_debug.plans.tree import PlanNode
 
@@ -197,13 +196,14 @@ async def test_explain_query_analyze_uses_explain_analyze(pg):
 
 @pytest.mark.asyncio
 async def test_explain_query_raises_on_planner_error(pg):
-    with (
-        patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
-        patch("pg_debug.client.ExplainPlanTool") as tool_cls,
-    ):
-        tool_cls.return_value.explain = AsyncMock(return_value=ErrorResult('syntax error at or near "SELCT"'))
-        with pytest.raises(ExplainPlanError, match="syntax error"):
+    driver = MagicMock(spec=SqlDriver)
+    driver.execute_query = AsyncMock(side_effect=QueryError('syntax error at or near "SELCT"'))
+
+    with patch.object(PgDebug, "sql_driver", AsyncMock(return_value=driver)):
+        with pytest.raises(ExplainPlanError, match="syntax error") as excinfo:
             await pg.explain_query("SELCT 1")
+
+    assert isinstance(excinfo.value.__cause__, QueryError)
 
 
 @pytest.mark.asyncio
