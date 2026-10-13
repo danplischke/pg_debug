@@ -12,13 +12,13 @@ from typing import Any
 
 from ..db import SafeSqlDriver
 from ..db import SqlDriver
+from ..severity import Confidence
+from ..severity import Severity
 from .catalog import scoped
 from .catalog import user_schemas
-from .result import Confidence
 from .result import ModelFinding
 from .result import ReviewOptions
 from .result import RuleId
-from .result import Severity
 
 #: Below this a sequential scan of the child costs a few milliseconds and holds
 #: its lock for no time worth measuring. The finding is still true, just not

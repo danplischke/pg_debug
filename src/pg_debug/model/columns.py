@@ -14,13 +14,13 @@ from typing import Any
 
 from ..db import SafeSqlDriver
 from ..db import SqlDriver
+from ..severity import Confidence
+from ..severity import Severity
 from .catalog import scoped
 from .catalog import user_schemas
-from .result import Confidence
 from .result import ModelFinding
 from .result import ReviewOptions
 from .result import RuleId
-from .result import Severity
 
 #: More distinct values than this and the column is data, not a category.
 MAX_DISTINCT_VALUES = 32

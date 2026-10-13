@@ -23,13 +23,13 @@ from ..queries.tuple_layout import PACKED_ORDER
 from ..queries.tuple_layout import fillfactor_expr
 from ..queries.tuple_layout import row_layout_ctes
 from ..queries.tuple_layout import rows_per_page_expr
+from ..severity import Confidence
+from ..severity import Severity
 from .catalog import scoped
 from .catalog import user_schemas
-from .result import Confidence
 from .result import ModelFinding
 from .result import ReviewOptions
 from .result import RuleId
-from .result import Severity
 
 #: Padding below this is not worth a table rewrite, whatever the row count says.
 MIN_PADDING_BYTES = 1024 * 1024

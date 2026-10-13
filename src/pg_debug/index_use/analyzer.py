@@ -29,12 +29,12 @@ from ..db import SafeSqlDriver
 from ..db import SqlDriver
 from ..errors import ExplainPlanError
 from ..errors import InvalidArgumentError
-from ..model.result import Confidence
 from ..plans.explain import ExplainPlanTool
 from ..plans.metrics import conditions
 from ..plans.metrics import walk
 from ..plans.tree import ExplainPlanArtifact
 from ..plans.tree import PlanNode
+from ..severity import Confidence
 from ..statistics import StatisticsInspector
 from .catalog import COLUMNS_FOR_TABLES_SQL
 from .catalog import DATABASE_COLLATION_SQL
