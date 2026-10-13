@@ -144,3 +144,14 @@ async def test_the_query_asks_for_the_kinds_an_index_can_go_on(advisor):
     assert "relkind = ANY" in query
     assert "'{r,m,p}'" in query
     assert "information_schema" in query, "an index on a catalog table is not a recommendation"
+
+
+def test_a_workload_file_is_read_as_utf8(advisor, tmp_path):
+    """Whatever the platform's code page: on Windows that is cp1252 or similar,
+    which garbles UTF-8, and Notepad starts a UTF-8 file with a byte order mark."""
+    path = tmp_path / "workload.sql"
+    path.write_bytes(b"\xef\xbb\xbf" + "select * from orders where note = 'Größe → 表';\nselect 1;".encode())
+
+    queries = advisor._get_workload_from_file(str(path))
+
+    assert [q["query"] for q in queries] == ["select * from orders where note = 'Größe → 表'", "select 1"]

@@ -82,7 +82,7 @@ def _text(node: ast.AST) -> str | None:
 
 
 def _writes_sql(path: Path) -> bool:
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     ignored = _not_sql(tree)
     for node in ast.walk(tree):
         text = None if id(node) in ignored else _text(node)

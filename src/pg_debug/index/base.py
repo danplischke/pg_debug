@@ -524,7 +524,7 @@ class IndexTuningBase(ABC):
     def _get_workload_from_file(self, file_path: str) -> list[dict[str, Any]]:
         """Load queries from an SQL file."""
         try:
-            with open(file_path) as f:
+            with open(file_path, encoding="utf-8-sig") as f:
                 content = f.read()
 
             # Split the file content by semicolons to get individual queries
