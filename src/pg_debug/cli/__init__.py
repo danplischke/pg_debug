@@ -230,6 +230,21 @@ def read_stdin() -> str:
         raise InvalidArgumentError(f"Standard input is not UTF-8 text ({e.reason}).") from None
 
 
+def use_utf8_output() -> None:
+    """Write standard output and error as UTF-8.
+
+    On Windows, output that goes to a file or a pipe is encoded in the ANSI
+    code page, cp1252 or similar, which has no arrow to draw a plan with:
+    ``pg-debug explain ... > plan.txt`` stopped with a codec error. A console
+    is unaffected, as Python writes to it in Unicode either way.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            # Naming an encoding resets the error handler to strict unless it
+            # is passed too, and stderr's backslashreplace is worth keeping.
+            stream.reconfigure(encoding="utf-8", errors=stream.errors)
+
+
 #: Suffixes accepted for a size argument, as PostgreSQL itself writes them.
 SIZE_UNITS = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
 
@@ -806,6 +821,8 @@ async def run(args: argparse.Namespace) -> int:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Entry point for the ``pg-debug`` command."""
+    if sys.platform == "win32":
+        use_utf8_output()
     parser = build_parser()
     args = parser.parse_args(argv)
     configure_logging(args.verbose)
