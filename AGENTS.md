@@ -25,7 +25,7 @@ above need nothing else.
 | Path | Holds |
 | --- | --- |
 | `src/pg_debug/client.py`, `sync.py`, `errors.py` | The public surface: `PgDebug`, `SyncPgDebug`, the exceptions. |
-| `src/pg_debug/cli/` | The command; `render.py` formats output. |
+| `src/pg_debug/cli/` | The command. `parser.py` names each subcommand's handler (in `commands.py`) and renderer (in `render.py`) in one place; `streams.py` reads and writes UTF-8. |
 | `src/pg_debug/db/` | Driver and pool, restricted mode and its allowlist, extension and version checks. |
 | `src/pg_debug/parsing/` | pglast visitors and bind-parameter substitution for SQL we are *given*. |
 | `src/pg_debug/queries/` | SQL that more than one module runs. A module's own SQL stays beside the code that reads its rows. |
