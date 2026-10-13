@@ -23,7 +23,7 @@ from a table with variable-width columns is an estimate, and callers say so.
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 # PostgreSQL layout constants, all documented in "Database Page Layout".
 MAXALIGN = 8

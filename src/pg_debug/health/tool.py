@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from enum import Enum
-from typing import Dict
-from typing import Iterable
-from typing import List
-from typing import Set
 
 from ..errors import InvalidArgumentError
 from .checks.autovacuum import AutovacuumCalc
@@ -38,7 +35,7 @@ class HealthType(str, Enum):
     ALL = "all"
 
     @classmethod
-    def parse(cls, health_type: str | HealthType | Iterable[str | HealthType]) -> Set[HealthType]:
+    def parse(cls, health_type: str | HealthType | Iterable[str | HealthType]) -> set[HealthType]:
         """Expand a health type selector into the set of checks to run.
 
         Accepts a single value, a comma-separated string, or any iterable of
@@ -72,7 +69,7 @@ class DatabaseHealthTool:
     async def run_checks(
         self,
         health_type: str | HealthType | Iterable[str | HealthType] = HealthType.ALL,
-    ) -> Dict[str, HealthCheckResult]:
+    ) -> dict[str, HealthCheckResult]:
         """Run database health checks and return one result per check.
 
         Args:
@@ -91,7 +88,7 @@ class DatabaseHealthTool:
             InvalidArgumentError: If an unknown health type is requested.
         """
         health_types = HealthType.parse(health_type)
-        results: List[HealthCheckResult] = []
+        results: list[HealthCheckResult] = []
 
         if HealthType.INDEX in health_types:
             index_health = IndexHealthCalc(self.sql_driver)

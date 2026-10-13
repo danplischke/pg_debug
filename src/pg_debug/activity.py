@@ -9,10 +9,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from typing import Any
-from typing import Dict
-from typing import List
 from typing import LiteralString
-from typing import Optional
 from typing import cast
 
 from .db import SafeSqlDriver
@@ -57,8 +54,8 @@ class ActivityInspector:
     async def list_backends(
         self,
         include_idle: bool = False,
-        min_duration_seconds: Optional[float] = None,
-    ) -> List[Dict[str, Any]]:
+        min_duration_seconds: float | None = None,
+    ) -> list[dict[str, Any]]:
         """List server processes and what they are doing.
 
         Args:
@@ -94,7 +91,7 @@ class ActivityInspector:
         )
 
         duration_filter = ""
-        params: List[Any] = []
+        params: list[Any] = []
         if min_duration_seconds is not None:
             duration_filter = " AND clock_timestamp() - a.state_change >= make_interval(secs => {})"
             params.append(min_duration_seconds)
@@ -126,11 +123,11 @@ class ActivityInspector:
         rows = await SafeSqlDriver.execute_param_query(self.sql_driver, query, params)
         return [row.cells for row in rows] if rows else []
 
-    async def blocked_backends(self) -> List[Dict[str, Any]]:
+    async def blocked_backends(self) -> list[dict[str, Any]]:
         """List only the backends waiting on a lock held by another backend."""
         return [row for row in await self.list_backends(include_idle=True) if row.get("blocked_by")]
 
-    async def vacuum_progress(self) -> List[Dict[str, Any]]:
+    async def vacuum_progress(self) -> list[dict[str, Any]]:
         """Report vacuums currently running, and how far along they are.
 
         Returns:
@@ -176,7 +173,7 @@ class ActivityInspector:
     async def _has_query_id(self) -> bool:
         return await get_postgres_version(self.sql_driver) >= QUERY_ID_MIN_VERSION
 
-    async def lock_tree(self) -> List[Dict[str, Any]]:
+    async def lock_tree(self) -> list[dict[str, Any]]:
         """Who is blocking whom, as trees rooted at the backends that wait on nothing.
 
         ``list_backends`` says which pids block each waiter. When the database
@@ -312,7 +309,7 @@ _NODE_FIELDS = (
 )
 
 
-def assemble_lock_tree(backends: List[Dict[str, Any]], holders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def assemble_lock_tree(backends: list[dict[str, Any]], holders: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Turn the rows of the two lock-tree queries into nested trees.
 
     Args:
@@ -324,25 +321,25 @@ def assemble_lock_tree(backends: List[Dict[str, Any]], holders: List[Dict[str, A
     Returns:
         The roots, as :meth:`ActivityInspector.lock_tree` describes them.
     """
-    by_pid: Dict[int, Dict[str, Any]] = {int(row["pid"]): row for row in backends}
+    by_pid: dict[int, dict[str, Any]] = {int(row["pid"]): row for row in backends}
 
-    held: Dict[tuple[int, int], List[str]] = defaultdict(list)
+    held: dict[tuple[int, int], list[str]] = defaultdict(list)
     for row in holders:
         held[(int(row["waiter"]), int(row["holder"]))].append(row["held_mode"])
 
-    waiters_of: Dict[int, List[int]] = defaultdict(list)
+    waiters_of: dict[int, list[int]] = defaultdict(list)
     for pid, row in by_pid.items():
         for blocker in row.get("blocked_by") or []:
             waiters_of[int(blocker)].append(pid)
 
-    def build(pid: int, parent: Optional[int], trail: frozenset[int]) -> Dict[str, Any]:
+    def build(pid: int, parent: int | None, trail: frozenset[int]) -> dict[str, Any]:
         row = by_pid.get(pid, {"pid": pid})
-        node: Dict[str, Any] = {"pid": pid}
+        node: dict[str, Any] = {"pid": pid}
         node.update({field: row.get(field) for field in _NODE_FIELDS})
         node["blocked_by"] = [int(p) for p in row.get("blocked_by") or []]
         node["waits_for"] = _waits_for(row, parent, sorted(set(held.get((pid, parent), [])))) if parent is not None else None
 
-        children: List[Dict[str, Any]] = []
+        children: list[dict[str, Any]] = []
         # The longest-running waiter first: it has been stuck the longest.
         for child in sorted(waiters_of.get(pid, []), key=lambda c: -(by_pid[c].get("query_seconds") or 0)):
             if child == pid or child in trail:
@@ -370,7 +367,7 @@ def assemble_lock_tree(backends: List[Dict[str, Any]], holders: List[Dict[str, A
     return trees
 
 
-def _pids_beneath(nodes: List[Dict[str, Any]]) -> set[int]:
+def _pids_beneath(nodes: list[dict[str, Any]]) -> set[int]:
     found: set[int] = set()
     for node in nodes:
         found.add(node["pid"])
@@ -378,7 +375,7 @@ def _pids_beneath(nodes: List[Dict[str, Any]]) -> set[int]:
     return found
 
 
-def _waits_for(row: Dict[str, Any], holder: Optional[int], held_modes: List[str]) -> Dict[str, Any]:
+def _waits_for(row: dict[str, Any], holder: int | None, held_modes: list[str]) -> dict[str, Any]:
     """Describe the lock a waiter is waiting on, in words and in fields."""
     locktype = row.get("waiting_locktype")
     mode = row.get("waiting_mode")

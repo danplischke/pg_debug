@@ -20,13 +20,9 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from typing import Any
-from typing import Dict
-from typing import List
 from typing import LiteralString
-from typing import Optional
-from typing import Sequence
-from typing import Set
 from typing import cast
 
 from ..db import SafeSqlDriver
@@ -89,7 +85,7 @@ class IndexUseAnalyzer:
     def __init__(self, sql_driver: SqlDriver | SafeSqlDriver):
         self.sql_driver = sql_driver
 
-    async def analyze(self, sql: str, index: Optional[str] = None) -> List[IndexUse]:
+    async def analyze(self, sql: str, index: str | None = None) -> list[IndexUse]:
         """Report each index on the query's tables: used, or why not.
 
         Args:
@@ -138,12 +134,12 @@ class IndexUseAnalyzer:
 
         stale = await self._stale_tables()
         collation = await self._collation() if any(p.operator == "~~" for p in parsed.predicates) else None
-        forced: Optional[ExplainPlanArtifact] = None
-        forced_note: Optional[str] = None
+        forced: ExplainPlanArtifact | None = None
+        forced_note: str | None = None
         if any(r["index"] not in used_by for r in index_rows):
             forced, forced_note = await self._forced_plan(sql)
 
-        verdicts: List[IndexUse] = []
+        verdicts: list[IndexUse] = []
         for row in index_rows:
             table = f"{row['schema']}.{row['table']}"
             refs = [ref for ref, name in resolved.items() if name == table]
@@ -173,7 +169,7 @@ class IndexUseAnalyzer:
         verdicts.sort(key=lambda v: (v.used, v.table, v.index))
         return verdicts
 
-    async def _rows(self, query: LiteralString, params: List[Any]) -> List[Dict[str, Any]]:
+    async def _rows(self, query: LiteralString, params: list[Any]) -> list[dict[str, Any]]:
         rows = await SafeSqlDriver.execute_param_query(self.sql_driver, query, params)
         return [row.cells for row in rows] if rows else []
 
@@ -183,7 +179,7 @@ class IndexUseAnalyzer:
             raise ExplainPlanError(f"Could not plan the query: {result.value}")
         return result
 
-    async def _forced_plan(self, sql: str) -> tuple[Optional[ExplainPlanArtifact], Optional[str]]:
+    async def _forced_plan(self, sql: str) -> tuple[ExplainPlanArtifact | None, str | None]:
         """The plan with sequential scans disabled, or why there is none."""
         if isinstance(self.sql_driver, SafeSqlDriver):
             return None, (
@@ -201,7 +197,7 @@ class IndexUseAnalyzer:
             logger.debug(f"Could not plan with sequential scans disabled: {e}")
             return None, f"The plan with sequential scans disabled could not be taken: {e}"
 
-    async def _stale_tables(self) -> Dict[str, Dict[str, Any]]:
+    async def _stale_tables(self) -> dict[str, dict[str, Any]]:
         try:
             rows = await StatisticsInspector(self.sql_driver).stale_tables()
         except Exception as e:
@@ -209,7 +205,7 @@ class IndexUseAnalyzer:
             return {}
         return {f"{row['schema']}.{row['table']}": row for row in rows}
 
-    async def _collation(self) -> Optional[str]:
+    async def _collation(self) -> str | None:
         try:
             rows = await self.sql_driver.execute_query(cast(LiteralString, DATABASE_COLLATION_SQL))
         except Exception as e:
@@ -221,14 +217,14 @@ class IndexUseAnalyzer:
 # -- Assembling a verdict ---------------------------------------------------
 
 
-def _resolve_tables(refs: Set[str], column_rows: Sequence[Dict[str, Any]]) -> Dict[str, str]:
+def _resolve_tables(refs: set[str], column_rows: Sequence[dict[str, Any]]) -> dict[str, str]:
     """Query table reference to ``schema.table``, from what the catalog returned."""
     present = {f"{r['schema']}.{r['table']}" for r in column_rows}
-    by_name: Dict[str, Set[str]] = {}
+    by_name: dict[str, set[str]] = {}
     for name in present:
         by_name.setdefault(name.rpartition(".")[2], set()).add(name)
 
-    resolved: Dict[str, str] = {}
+    resolved: dict[str, str] = {}
     for ref in refs:
         if "." in ref and ref in present:
             resolved[ref] = ref
@@ -237,7 +233,7 @@ def _resolve_tables(refs: Set[str], column_rows: Sequence[Dict[str, Any]]) -> Di
     return resolved
 
 
-def _verdict(row: Dict[str, Any], table: str) -> IndexUse:
+def _verdict(row: dict[str, Any], table: str) -> IndexUse:
     return IndexUse(
         index=str(row["index"]),
         table=table,
@@ -252,16 +248,16 @@ def _verdict(row: Dict[str, Any], table: str) -> IndexUse:
     )
 
 
-def _node_using(root: PlanNode, index: str) -> Optional[PlanNode]:
+def _node_using(root: PlanNode, index: str) -> PlanNode | None:
     return next((node for node in walk(root) if node.index_name == index), None)
 
 
-def _scan_of(root: PlanNode, relation: str) -> Optional[PlanNode]:
+def _scan_of(root: PlanNode, relation: str) -> PlanNode | None:
     """The node that reads the table, if the plan reads it directly."""
     return next((node for node in walk(root) if node.relation_name == relation), None)
 
 
-def _describe(node: Optional[PlanNode]) -> str:
+def _describe(node: PlanNode | None) -> str:
     if node is None:
         return "no scan of the table"
     return f"{node.node_type} using {node.index_name}" if node.index_name else node.node_type
@@ -277,15 +273,15 @@ def _bare_name(text: str) -> str:
 
 def _structural_findings(
     verdict: IndexUse,
-    row: Dict[str, Any],
+    row: dict[str, Any],
     parsed: QueryPredicates,
-    predicates: List[Predicate],
+    predicates: list[Predicate],
     plan: PlanNode,
-    column_types: Dict[tuple[str, str], str],
-    collation: Optional[str],
-) -> List[IndexUseFinding]:
+    column_types: dict[tuple[str, str], str],
+    collation: str | None,
+) -> list[IndexUseFinding]:
     """Everything that stops the planner using the index, read from text and catalog."""
-    findings: List[IndexUseFinding] = []
+    findings: list[IndexUseFinding] = []
 
     if not verdict.valid:
         findings.append(
@@ -422,11 +418,11 @@ def _structural_findings(
 
 def _no_match(
     verdict: IndexUse,
-    row: Dict[str, Any],
-    keys: List[str],
+    row: dict[str, Any],
+    keys: list[str],
     leading: str,
-    leading_name: Optional[str],
-    predicates: List[Predicate],
+    leading_name: str | None,
+    predicates: list[Predicate],
     confidence: Confidence,
 ) -> IndexUseFinding:
     """Nothing in the query restricts the index's first column as written. Say what does."""
@@ -507,7 +503,7 @@ def _no_match(
 _CAST_OF = r"\(\s*(?:[a-z_][a-z0-9_$]*\.)?{column}\s*\)::([a-z_][a-z0-9_ ]*)"
 
 
-def _type_mismatch(verdict: IndexUse, plan: PlanNode, column: str, column_type: Optional[str]) -> Optional[IndexUseFinding]:
+def _type_mismatch(verdict: IndexUse, plan: PlanNode, column: str, column_type: str | None) -> IndexUseFinding | None:
     """The plan casts the column before comparing it, so the index's values are not what is compared."""
     scan = _scan_of(plan, verdict.table.rpartition(".")[2])
     if scan is None:
@@ -534,7 +530,7 @@ def _type_mismatch(verdict: IndexUse, plan: PlanNode, column: str, column_type: 
     return None
 
 
-def _partial_not_matched(verdict: IndexUse, predicates: List[Predicate]) -> Optional[IndexUseFinding]:
+def _partial_not_matched(verdict: IndexUse, predicates: list[Predicate]) -> IndexUseFinding | None:
     """A partial index the query gives the planner no way to prove it may use."""
     try:
         required = read_predicates(predicate_as_statement(verdict.table, str(verdict.predicate)))
@@ -567,7 +563,7 @@ def _partial_not_matched(verdict: IndexUse, predicates: List[Predicate]) -> Opti
 
 
 def _planner_preferred(
-    verdict: IndexUse, row: Dict[str, Any], plan: ExplainPlanArtifact, forced: ExplainPlanArtifact, forced_node: PlanNode
+    verdict: IndexUse, row: dict[str, Any], plan: ExplainPlanArtifact, forced: ExplainPlanArtifact, forced_node: PlanNode
 ) -> IndexUseFinding:
     """Nothing stops the index; the planner costed the other plan lower, and here is by how much."""
     relation = verdict.table.rpartition(".")[2]
@@ -583,7 +579,7 @@ def _planner_preferred(
         f"With sequential scans disabled the planner reads {verdict.table} by {_describe(forced_node)} at an estimated total cost "
         f"of {forced_cost:,.0f}, against {chosen_cost:,.0f} for the plan it chose, which reads the table by {_describe(chosen)}."
     )
-    remediation: List[str] = []
+    remediation: list[str] = []
     if table_pages and table_pages <= TINY_TABLE_PAGES:
         detail += (
             f" The table is {table_pages} page{'s' if table_pages != 1 else ''}: reading it whole is cheaper than any index "
@@ -626,7 +622,7 @@ def _planner_preferred(
     )
 
 
-def _other_index_or_unexplained(verdict: IndexUse, row: Dict[str, Any], plan: ExplainPlanArtifact, forced: ExplainPlanArtifact) -> IndexUseFinding:
+def _other_index_or_unexplained(verdict: IndexUse, row: dict[str, Any], plan: ExplainPlanArtifact, forced: ExplainPlanArtifact) -> IndexUseFinding:
     """Forcing changed nothing: either another index is the planner's choice either way, or nothing here explains it."""
     relation = verdict.table.rpartition(".")[2]
     forced_scan = _scan_of(forced.plan_tree, relation)
@@ -668,7 +664,7 @@ def _other_index_or_unexplained(verdict: IndexUse, row: Dict[str, Any], plan: Ex
     )
 
 
-def _stale(table: str, stale: Dict[str, Any]) -> IndexUseFinding:
+def _stale(table: str, stale: dict[str, Any]) -> IndexUseFinding:
     if stale.get("never_analyzed"):
         reason = "it has never been analyzed, so the planner is working from a default guess"
     else:

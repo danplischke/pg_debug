@@ -1,9 +1,8 @@
 import logging
 import os
 import time
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
-from typing import Tuple
 
 import docker
 import pytest
@@ -12,7 +11,7 @@ from docker import errors as docker_errors
 logger = logging.getLogger(__name__)
 
 
-def create_postgres_container(version: str) -> Generator[Tuple[str, str], None, None]:
+def create_postgres_container(version: str) -> Generator[tuple[str, str], None, None]:
     """Create a PostgreSQL container of specified version and return its connection string."""
     try:
         client = docker.from_env()

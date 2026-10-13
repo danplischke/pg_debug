@@ -11,16 +11,11 @@ should apply DDL to on trust.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from dataclasses import field
 from enum import Enum
 from typing import Any
-from typing import Dict
-from typing import Iterable
-from typing import List
-from typing import Optional
-from typing import Set
-from typing import Tuple
 
 from ..errors import InvalidArgumentError
 from ..severity import SEVERITY_ORDER
@@ -56,7 +51,7 @@ class RuleId(str, Enum):
     ALL = "all"
 
     @classmethod
-    def parse(cls, rule: str | RuleId | Iterable[str | RuleId]) -> Set[RuleId]:
+    def parse(cls, rule: str | RuleId | Iterable[str | RuleId]) -> set[RuleId]:
         """Expand a rule selector into the set of rules to run.
 
         Accepts a single value, a comma-separated string, or any iterable of
@@ -112,13 +107,13 @@ class ModelFinding:
     severity: Severity
     schema: str
     table: str
-    columns: List[str]
+    columns: list[str]
     summary: str
     detail: str
-    remediation: List[str] = field(default_factory=list)
-    evidence: Dict[str, Any] = field(default_factory=dict)
-    verify: Optional[str] = None
-    impact_bytes: Optional[int] = None
+    remediation: list[str] = field(default_factory=list)
+    evidence: dict[str, Any] = field(default_factory=dict)
+    verify: str | None = None
+    impact_bytes: int | None = None
     rank: float = 0.0
 
     @property
@@ -127,13 +122,13 @@ class ModelFinding:
         return f"{self.schema}.{self.table}"
 
     @property
-    def sort_key(self) -> Tuple[int, float, str, str, str]:
+    def sort_key(self) -> tuple[int, float, str, str, str]:
         """Severity first, then the rule's own measure of impact."""
         return (SEVERITY_ORDER[self.severity], -self.rank, self.rule.value, self.schema, self.table)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return the finding as a JSON-friendly dict."""
-        result: Dict[str, Any] = {
+        result: dict[str, Any] = {
             "rule": self.rule.value,
             "confidence": self.confidence.value,
             "severity": self.severity.value,
@@ -163,7 +158,7 @@ class ReviewOptions:
             smaller than this.
     """
 
-    schema: Optional[str] = None
+    schema: str | None = None
     min_rows: int = DEFAULT_MIN_ROWS
 
 

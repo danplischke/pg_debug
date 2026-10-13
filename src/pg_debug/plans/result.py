@@ -19,10 +19,6 @@ from dataclasses import dataclass
 from dataclasses import field
 from enum import Enum
 from typing import Any
-from typing import Dict
-from typing import List
-from typing import Optional
-from typing import Tuple
 
 from ..severity import SEVERITY_ORDER
 from ..severity import Severity
@@ -131,18 +127,18 @@ class PlanFinding:
     detail: str
     cost_ms: float = 0.0
     share_of_time: float = 0.0
-    relation: Optional[str] = None
-    evidence: Dict[str, Any] = field(default_factory=dict)
-    remediation: List[str] = field(default_factory=list)
+    relation: str | None = None
+    evidence: dict[str, Any] = field(default_factory=dict)
+    remediation: list[str] = field(default_factory=list)
 
     @property
-    def sort_key(self) -> Tuple[int, float, int]:
+    def sort_key(self) -> tuple[int, float, int]:
         """Severity, then the share of the query, then reading order."""
         return (SEVERITY_ORDER[self.severity], -self.share_of_time, ISSUE_ORDER[self.issue])
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return the finding as a JSON-friendly dict."""
-        result: Dict[str, Any] = {
+        result: dict[str, Any] = {
             "issue": self.issue.value,
             "severity": self.severity.value,
             "node_type": self.node_type,

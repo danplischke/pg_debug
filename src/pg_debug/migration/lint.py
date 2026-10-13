@@ -19,11 +19,6 @@ import logging
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
-from typing import Dict
-from typing import List
-from typing import Optional
-from typing import Set
-from typing import Tuple
 
 from pglast import ast
 from pglast import parse_sql
@@ -61,7 +56,7 @@ _BINARY_COERCIBLE = {
 #: Subcommands that only touch the catalog. Measured: each takes ACCESS
 #: EXCLUSIVE and leaves relfilenode alone, so the lock is held for no time at
 #: all whatever the table's size.
-_INSTANT_ALTERS: Dict[Any, Tuple[str, str]] = {
+_INSTANT_ALTERS: dict[Any, tuple[str, str]] = {
     AlterTableType.AT_DropColumn: ("drop_column", "DROP COLUMN"),
     AlterTableType.AT_DropNotNull: ("drop_not_null", "DROP NOT NULL"),
     AlterTableType.AT_ColumnDefault: ("set_default", "Setting a column default"),
@@ -101,20 +96,20 @@ class StatementReview:
     severity: Severity
     summary: str
     detail: str
-    table: Optional[str] = None
-    table_bytes: Optional[int] = None
-    safer: List[str] = field(default_factory=list)
+    table: str | None = None
+    table_bytes: int | None = None
+    safer: list[str] = field(default_factory=list)
     #: Functions the column default calls, when there is one and it is not a
     #: constant. Resolved against pg_proc to decide whether it really rewrites.
-    default_functions: List[str] = field(default_factory=list)
+    default_functions: list[str] = field(default_factory=list)
 
     @property
     def blocks(self) -> str:
         return self.lock.blocks
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return the review as a JSON-friendly dict."""
-        result: Dict[str, Any] = {
+        result: dict[str, Any] = {
             "statement": self.statement,
             "kind": self.kind,
             "severity": self.severity.value,
@@ -147,7 +142,7 @@ class MigrationLinter:
         """
         self.sql_driver = sql_driver
 
-    async def review(self, sql: str) -> List[StatementReview]:
+    async def review(self, sql: str) -> list[StatementReview]:
         """Review every statement in a migration.
 
         Args:
@@ -178,7 +173,7 @@ class MigrationLinter:
         # Stable within a severity, so the migration's own order survives.
         return sorted(reviews, key=lambda review: SEVERITY_ORDER[review.severity])
 
-    async def _resolve_default_volatility(self, reviews: List[StatementReview]) -> None:
+    async def _resolve_default_volatility(self, reviews: list[StatementReview]) -> None:
         """Settle whether a computed column default really rewrites the table.
 
         Only a *volatile* default forces the rewrite — ``now()`` is stable and
@@ -233,7 +228,7 @@ class MigrationLinter:
 
     # -- Sizing -------------------------------------------------------------
 
-    async def _add_table_sizes(self, reviews: List[StatementReview]) -> None:
+    async def _add_table_sizes(self, reviews: list[StatementReview]) -> None:
         """Fill in how big each table actually is, if we can see the database."""
         if self.sql_driver is None:
             return
@@ -289,7 +284,7 @@ class MigrationLinter:
 
     # -- Classification -----------------------------------------------------
 
-    def _review_statement(self, raw: Any, sql: str) -> Optional[StatementReview]:
+    def _review_statement(self, raw: Any, sql: str) -> StatementReview | None:
         stmt = raw.stmt if isinstance(raw, ast.RawStmt) else raw
         text = _statement_text(raw, sql)
 
@@ -372,7 +367,7 @@ class MigrationLinter:
             safer=[text.rstrip(";").replace("CREATE INDEX", "CREATE INDEX CONCURRENTLY", 1) + ";"],
         )
 
-    def _drop(self, stmt: ast.DropStmt, text: str) -> Optional[StatementReview]:
+    def _drop(self, stmt: ast.DropStmt, text: str) -> StatementReview | None:
         if stmt.removeType == ObjectType.OBJECT_INDEX:
             if stmt.concurrent:
                 return _review(
@@ -432,7 +427,7 @@ class MigrationLinter:
             detail="It cannot run inside a transaction block.",
         )
 
-    def _alter_table(self, stmt: ast.AlterTableStmt, text: str) -> Optional[StatementReview]:
+    def _alter_table(self, stmt: ast.AlterTableStmt, text: str) -> StatementReview | None:
         table = _relation_name(stmt.relation)
         # A statement with several subcommands holds one lock for all of them,
         # so it is as unsafe as its worst part.
@@ -442,7 +437,7 @@ class MigrationLinter:
             return None
         return max(reviews, key=lambda review: (review.duration is not Duration.INSTANT, review.rewrites_table))
 
-    def _alter_command(self, cmd: ast.AlterTableCmd, text: str, table: Optional[str]) -> Optional[StatementReview]:
+    def _alter_command(self, cmd: ast.AlterTableCmd, text: str, table: str | None) -> StatementReview | None:
         subtype = cmd.subtype
 
         if subtype == AlterTableType.AT_AddColumn:
@@ -528,7 +523,7 @@ class MigrationLinter:
 
         return None
 
-    def _add_column(self, cmd: ast.AlterTableCmd, text: str, table: Optional[str]) -> StatementReview:
+    def _add_column(self, cmd: ast.AlterTableCmd, text: str, table: str | None) -> StatementReview:
         column = cmd.def_ if isinstance(cmd.def_, ast.ColumnDef) else None
         default = _default_expression(column)
         generated = _is_generated(column)
@@ -587,7 +582,7 @@ class MigrationLinter:
             ),
         )
 
-    def _alter_column_type(self, cmd: ast.AlterTableCmd, text: str, table: Optional[str]) -> StatementReview:
+    def _alter_column_type(self, cmd: ast.AlterTableCmd, text: str, table: str | None) -> StatementReview:
         column = cmd.def_ if isinstance(cmd.def_, ast.ColumnDef) else None
         target = _type_name(column)
 
@@ -619,7 +614,7 @@ class MigrationLinter:
             ],
         )
 
-    def _add_constraint(self, cmd: ast.AlterTableCmd, text: str, table: Optional[str]) -> Optional[StatementReview]:
+    def _add_constraint(self, cmd: ast.AlterTableCmd, text: str, table: str | None) -> StatementReview | None:
         constraint = cmd.def_ if isinstance(cmd.def_, ast.Constraint) else None
         if constraint is None:
             return None
@@ -728,8 +723,8 @@ def _review(
     rewrites: bool,
     summary: str,
     detail: str,
-    table: Optional[str] = None,
-    safer: Optional[List[str]] = None,
+    table: str | None = None,
+    safer: list[str] | None = None,
 ) -> StatementReview:
     return StatementReview(
         statement=statement,
@@ -755,13 +750,13 @@ def _statement_text(raw: Any, sql: str) -> str:
     return sql[start:end].strip().rstrip(";")
 
 
-def _relation_name(relation: Any) -> Optional[str]:
+def _relation_name(relation: Any) -> str | None:
     if relation is None:
         return None
     return f"{relation.schemaname}.{relation.relname}" if relation.schemaname else relation.relname
 
 
-def _first_relation(relations: Any) -> Optional[str]:
+def _first_relation(relations: Any) -> str | None:
     for relation in relations or ():
         name = _relation_name(relation)
         if name:
@@ -769,22 +764,22 @@ def _first_relation(relations: Any) -> Optional[str]:
     return None
 
 
-def _default_expression(column: Optional[ast.ColumnDef]) -> Any:
+def _default_expression(column: ast.ColumnDef | None) -> Any:
     for constraint in (column.constraints or ()) if column else ():
         if constraint.contype == ConstrType.CONSTR_DEFAULT:
             return constraint.raw_expr
     return None
 
 
-def _is_generated(column: Optional[ast.ColumnDef]) -> bool:
+def _is_generated(column: ast.ColumnDef | None) -> bool:
     if column is None:
         return False
     return any(constraint.contype == ConstrType.CONSTR_GENERATED for constraint in (column.constraints or ()))
 
 
-def _function_names(node: Any) -> Set[str]:
+def _function_names(node: Any) -> set[str]:
     """Every function called anywhere in an expression."""
-    found: Set[str] = set()
+    found: set[str] = set()
     if isinstance(node, ast.FuncCall):
         found.add(".".join(part.sval for part in node.funcname or ()))
     for attribute in getattr(node, "__slots__", ()) or ():
@@ -808,19 +803,19 @@ def _render(node: Any) -> str:
         return "..."
 
 
-def _type_name(column: Optional[ast.ColumnDef]) -> Optional[str]:
+def _type_name(column: ast.ColumnDef | None) -> str | None:
     if column is None or column.typeName is None:
         return None
     names = [part.sval for part in column.typeName.names]
     return names[-1] if names else None
 
 
-def _constraint_name(table: Optional[str], column: Optional[str]) -> str:
+def _constraint_name(table: str | None, column: str | None) -> str:
     base = f"{(table or 'tbl').split('.')[-1]}_{column or 'col'}_not_null"
     return base[:63]
 
 
-def _index_name(table: Optional[str], columns: str) -> str:
+def _index_name(table: str | None, columns: str) -> str:
     base = f"{(table or 'tbl').split('.')[-1]}_{columns.replace(', ', '_')}_key"
     return base[:63]
 

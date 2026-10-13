@@ -3,7 +3,6 @@ import math
 import os
 from dataclasses import dataclass
 from typing import Any
-from typing import Optional
 from typing import override
 
 from pglast.ast import SelectStmt
@@ -91,7 +90,7 @@ class LLMOptimizerTool(IndexTuningBase):
         sql_driver: SqlDriver,
         max_no_progress_attempts: int = 5,
         pareto_alpha: float = 2.0,
-        model: Optional[str] = None,
+        model: str | None = None,
     ):
         """
         Args:

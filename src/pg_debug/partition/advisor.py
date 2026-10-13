@@ -27,11 +27,7 @@ import logging
 import re
 from datetime import datetime
 from typing import Any
-from typing import Dict
-from typing import List
 from typing import LiteralString
-from typing import Optional
-from typing import Tuple
 from typing import cast
 
 import humanize
@@ -170,7 +166,7 @@ class PartitionAdvisor:
         self.min_table_bytes = min_table_bytes
         self.min_pruning_share = min_pruning_share
 
-    async def analyze(self, query_list: Optional[List[str]] = None, limit: int = 200) -> List[PartitionCandidate]:
+    async def analyze(self, query_list: list[str] | None = None, limit: int = 200) -> list[PartitionCandidate]:
         """Assess every table large enough to be worth the question.
 
         Args:
@@ -202,27 +198,27 @@ class PartitionAdvisor:
 
     # -- Reading ------------------------------------------------------------
 
-    async def _candidate_tables(self) -> List[Dict[str, Any]]:
+    async def _candidate_tables(self) -> list[dict[str, Any]]:
         rows = await SafeSqlDriver.execute_param_query(self.sql_driver, CANDIDATE_TABLES_SQL, [self.min_table_bytes])
         return [dict(row.cells) for row in rows or []]
 
-    async def _column_stats(self, idents: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+    async def _column_stats(self, idents: list[str]) -> dict[str, list[dict[str, Any]]]:
         rows = await SafeSqlDriver.execute_param_query(self.sql_driver, COLUMN_STATS_SQL, [idents])
-        by_table: Dict[str, List[Dict[str, Any]]] = {}
+        by_table: dict[str, list[dict[str, Any]]] = {}
         for row in rows or []:
             cells = dict(row.cells)
             by_table.setdefault(f"{cells['schema']}.{cells['table']}", []).append(cells)
         return by_table
 
-    async def _key_columns(self, idents: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+    async def _key_columns(self, idents: list[str]) -> dict[str, list[dict[str, Any]]]:
         rows = await SafeSqlDriver.execute_param_query(self.sql_driver, KEY_COLUMNS_SQL, [idents])
-        by_table: Dict[str, List[Dict[str, Any]]] = {}
+        by_table: dict[str, list[dict[str, Any]]] = {}
         for row in rows or []:
             cells = dict(row.cells)
             by_table.setdefault(f"{cells['schema']}.{cells['table']}", []).append(cells)
         return by_table
 
-    async def _workload(self, query_list: Optional[List[str]], limit: int) -> List[Dict[str, Any]]:
+    async def _workload(self, query_list: list[str] | None, limit: int) -> list[dict[str, Any]]:
         """The queries to judge by, with the weight each one carries."""
         if query_list:
             return [{"query": query, "weight": 1.0, "calls": 1} for query in query_list]
@@ -243,11 +239,11 @@ class PartitionAdvisor:
 
     def _assess(
         self,
-        table: Dict[str, Any],
-        columns: Dict[str, List[Dict[str, Any]]],
-        keys: Dict[str, List[Dict[str, Any]]],
-        workload: List[Dict[str, Any]],
-    ) -> Optional[PartitionCandidate]:
+        table: dict[str, Any],
+        columns: dict[str, list[dict[str, Any]]],
+        keys: dict[str, list[dict[str, Any]]],
+        workload: list[dict[str, Any]],
+    ) -> PartitionCandidate | None:
         name = f"{table['schema']}.{table['table']}"
         table_columns = columns.get(name, [])
         if not table_columns:
@@ -314,7 +310,7 @@ class PartitionAdvisor:
 # -- Weighing ---------------------------------------------------------------
 
 
-def _weigh_workload(workload: List[Dict[str, Any]], table: str, qualified: str) -> Tuple[float, Dict[str, Dict[str, Any]], Dict[str, float]]:
+def _weigh_workload(workload: list[dict[str, Any]], table: str, qualified: str) -> tuple[float, dict[str, dict[str, Any]], dict[str, float]]:
     """Split the recorded time into what touches the table and what prunes.
 
     Returns ``(touching, pruning, deleting)``: total weight of queries naming
@@ -322,8 +318,8 @@ def _weigh_workload(workload: List[Dict[str, Any]], table: str, qualified: str) 
     deletes doing so — the last being the strongest argument there is.
     """
     touching = 0.0
-    pruning: Dict[str, Dict[str, Any]] = {}
-    deleting: Dict[str, float] = {}
+    pruning: dict[str, dict[str, Any]] = {}
+    deleting: dict[str, float] = {}
 
     for entry in workload:
         try:
@@ -367,7 +363,7 @@ def _mentions_table(stmt: Any, table: str, qualified: str) -> bool:
     return any(name in (table, qualified) for name in visitor.tables)
 
 
-def _strategy_for(column: Dict[str, Any], pruning: Dict[str, Any]) -> Optional[Strategy]:
+def _strategy_for(column: dict[str, Any], pruning: dict[str, Any]) -> Strategy | None:
     """Which partitioning strategy this column could support, if any."""
     kinds = pruning.get("kinds") or set()
     if not kinds:
@@ -391,7 +387,7 @@ def _strategy_for(column: Dict[str, Any], pruning: Dict[str, Any]) -> Optional[S
     return None
 
 
-def _blockers(keys: List[Dict[str, Any]], column: str) -> List[str]:
+def _blockers(keys: list[dict[str, Any]], column: str) -> list[str]:
     """Unique constraints that would have to change to include the key."""
     blockers = []
     for key in keys:
@@ -406,7 +402,7 @@ def _blockers(keys: List[Dict[str, Any]], column: str) -> List[str]:
     return blockers
 
 
-def _reasons(table: Dict[str, Any], column: Dict[str, Any], strategy: Strategy, share: float, deletes_prune: bool, recommended: bool) -> List[str]:
+def _reasons(table: dict[str, Any], column: dict[str, Any], strategy: Strategy, share: float, deletes_prune: bool, recommended: bool) -> list[str]:
     """Why the verdict is what it is, in this table's own numbers.
 
     The share itself is a field of its own, so the first line says what the
@@ -452,7 +448,7 @@ def _reasons(table: Dict[str, Any], column: Dict[str, Any], strategy: Strategy, 
 # -- The shape of the target ------------------------------------------------
 
 
-def _ddl(table: Dict[str, Any], column: Dict[str, Any], strategy: Strategy, keys: List[Dict[str, Any]]) -> List[str]:
+def _ddl(table: dict[str, Any], column: dict[str, Any], strategy: Strategy, keys: list[dict[str, Any]]) -> list[str]:
     """The shape of the partitioned table, and what the data implies about it.
 
     Not a migration. Converting a populated table is a separate operation with
@@ -502,7 +498,7 @@ def _ddl(table: Dict[str, Any], column: Dict[str, Any], strategy: Strategy, keys
     return ddl
 
 
-def _range_partitions(ident: str, column: Dict[str, Any]) -> List[str]:
+def _range_partitions(ident: str, column: dict[str, Any]) -> list[str]:
     """Monthly bounds covering the span the histogram reports.
 
     The bounds are real rather than placeholders because the span is the one
@@ -542,7 +538,7 @@ def _range_partitions(ident: str, column: Dict[str, Any]) -> List[str]:
     return lines
 
 
-def _parse_bound(value: str) -> Optional[datetime]:
+def _parse_bound(value: str) -> datetime | None:
     """A histogram bound as a datetime, or None if it is not one we can read."""
     text = value.strip()
     # PostgreSQL renders a timestamptz offset as '+00', which is not ISO 8601
@@ -555,7 +551,7 @@ def _parse_bound(value: str) -> Optional[datetime]:
         return None
 
 
-def _months(first: datetime, last: datetime) -> List[datetime]:
+def _months(first: datetime, last: datetime) -> list[datetime]:
     """The start of every month between the two bounds, inclusive."""
     months = []
     cursor = first.replace(day=1, hour=0, minute=0, second=0, microsecond=0)

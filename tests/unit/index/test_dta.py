@@ -3,8 +3,6 @@ import json
 import re
 from logging import getLogger
 from typing import Any
-from typing import Dict
-from typing import Set
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -23,7 +21,7 @@ logger = getLogger(__name__)
 
 
 class MockCell:
-    def __init__(self, data: Dict[str, Any]):
+    def __init__(self, data: dict[str, Any]):
         self.cells = data
 
 
@@ -756,7 +754,7 @@ async def test_replace_parameters_multiple(create_dta):
     )
 
     # We'll need to return different values based on the context
-    def identify_column_side_effect(context, table_columns: Dict[str, Set[str]]):
+    def identify_column_side_effect(context, table_columns: dict[str, set[str]]):
         if "status =" in context:
             return ("users", "status")
         elif "amount BETWEEN" in context:

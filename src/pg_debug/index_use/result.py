@@ -15,9 +15,6 @@ from dataclasses import dataclass
 from dataclasses import field
 from enum import Enum
 from typing import Any
-from typing import Dict
-from typing import List
-from typing import Optional
 
 from ..model.result import Confidence
 
@@ -84,10 +81,10 @@ class IndexUseFinding:
     confidence: Confidence
     summary: str
     detail: str
-    evidence: Dict[str, Any] = field(default_factory=dict)
-    remediation: List[str] = field(default_factory=list)
+    evidence: dict[str, Any] = field(default_factory=dict)
+    remediation: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return the finding as a JSON-friendly dict."""
         return {
             "reason": self.reason.value,
@@ -126,15 +123,15 @@ class IndexUse:
     table: str
     definition: str
     method: str
-    columns: List[str]
+    columns: list[str]
     key_columns: int
-    predicate: Optional[str]
+    predicate: str | None
     valid: bool
     size_bytes: int
     used: bool
-    node_type: Optional[str] = None
-    findings: List[IndexUseFinding] = field(default_factory=list)
-    notes: List[str] = field(default_factory=list)
+    node_type: str | None = None
+    findings: list[IndexUseFinding] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
     @property
     def description(self) -> str:
@@ -148,7 +145,7 @@ class IndexUse:
             text += f" WHERE {self.predicate}"
         return text
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return the verdict as a JSON-friendly dict."""
         return {
             "index": self.index,

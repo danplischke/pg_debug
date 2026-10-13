@@ -14,9 +14,8 @@ queries that use them.
 
 import ast
 import re
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
-from typing import Set
 
 PACKAGE = Path(__file__).resolve().parents[2] / "src" / "pg_debug"
 
@@ -55,9 +54,9 @@ STILL_WRITING_SQL = {
 }
 
 
-def _not_sql(tree: ast.Module) -> Set[int]:
+def _not_sql(tree: ast.Module) -> set[int]:
     """Ids of the strings that may start like a statement without being one."""
-    ignored: Set[int] = set()
+    ignored: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             first = node.body[0] if node.body else None

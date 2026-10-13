@@ -3,10 +3,10 @@ import logging
 import time
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Iterable
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
-from typing import Iterable
 
 from pglast import parse_sql
 from pglast.ast import SelectStmt

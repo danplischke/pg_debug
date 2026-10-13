@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
-from typing import Dict
-from typing import List
 
 
 @dataclass
@@ -29,10 +27,10 @@ class HealthCheckResult:
     name: str
     healthy: bool
     summary: str
-    findings: List[Dict[str, Any]] = field(default_factory=list)
-    metrics: Dict[str, Any] = field(default_factory=dict)
+    findings: list[dict[str, Any]] = field(default_factory=list)
+    metrics: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return the result as a JSON-friendly dict."""
         return {
             "name": self.name,

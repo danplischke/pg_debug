@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Iterable
 from enum import Enum
 from typing import Any
-from typing import Dict
-from typing import Iterable
-from typing import List
 from typing import Literal
-from typing import Optional
 
 from .activity import ActivityInspector
 from .configuration import ConfigFinding
@@ -80,7 +77,7 @@ class AccessMode(str, Enum):
     RESTRICTED = "restricted"
 
 
-def resolve_database_url(database_url: Optional[str] = None) -> str:
+def resolve_database_url(database_url: str | None = None) -> str:
     """Return the database URL to connect to.
 
     Falls back to the ``DATABASE_URI`` then ``DATABASE_URL`` environment
@@ -125,12 +122,12 @@ class PgDebug:
 
     def __init__(
         self,
-        database_url: Optional[str] = None,
+        database_url: str | None = None,
         access_mode: AccessMode | str = AccessMode.UNRESTRICTED,
-        timeout: Optional[int] = None,
-        search_path: Optional[str] = None,
-        llm_model: Optional[str] = None,
-        pool: Optional[DbConnPool] = None,
+        timeout: int | None = None,
+        search_path: str | None = None,
+        llm_model: str | None = None,
+        pool: DbConnPool | None = None,
     ):
         """
         Args:
@@ -168,7 +165,7 @@ class PgDebug:
         self._owns_pool = pool is None
 
     @property
-    def effective_timeout(self) -> Optional[int]:
+    def effective_timeout(self) -> int | None:
         """The statement timeout actually applied, in seconds.
 
         Restricted mode defaults to :data:`DEFAULT_RESTRICTED_TIMEOUT` because
@@ -236,11 +233,11 @@ class PgDebug:
 
     # -- Schema introspection ------------------------------------------------
 
-    async def list_schemas(self) -> List[Dict[str, Any]]:
+    async def list_schemas(self) -> list[dict[str, Any]]:
         """List all schemas in the database."""
         return await SchemaInspector(await self.sql_driver()).list_schemas()
 
-    async def list_objects(self, schema_name: str, object_type: str | ObjectType = ObjectType.TABLE) -> List[Dict[str, Any]]:
+    async def list_objects(self, schema_name: str, object_type: str | ObjectType = ObjectType.TABLE) -> list[dict[str, Any]]:
         """List objects of a given type (table, view, sequence, extension)."""
         return await SchemaInspector(await self.sql_driver()).list_objects(schema_name, object_type)
 
@@ -249,13 +246,13 @@ class PgDebug:
         schema_name: str,
         object_name: str,
         object_type: str | ObjectType = ObjectType.TABLE,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Describe a single database object, including columns and indexes."""
         return await SchemaInspector(await self.sql_driver()).get_object_details(schema_name, object_name, object_type)
 
     # -- Query execution -----------------------------------------------------
 
-    async def execute_sql(self, sql: str) -> List[Dict[str, Any]]:
+    async def execute_sql(self, sql: str) -> list[dict[str, Any]]:
         """Run a SQL statement and return its rows.
 
         Args:
@@ -274,7 +271,7 @@ class PgDebug:
         self,
         sql: str,
         analyze: bool = False,
-        hypothetical_indexes: Optional[List[Dict[str, Any]]] = None,
+        hypothetical_indexes: list[dict[str, Any]] | None = None,
     ) -> ExplainPlanArtifact:
         """Return the execution plan for a query.
 
@@ -323,7 +320,7 @@ class PgDebug:
 
     # -- Plan diagnosis ------------------------------------------------------
 
-    async def diagnose_query(self, sql: str, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
+    async def diagnose_query(self, sql: str, min_ratio: float = DEFAULT_MIN_RATIO) -> list[PlanFinding]:
         """Run a query and say what is wrong with the plan it produced.
 
         Where :meth:`explain_query` hands back the plan, this reads it: the
@@ -359,7 +356,7 @@ class PgDebug:
         """
         return await PlanDiagnoser(await self.sql_driver()).diagnose(sql, min_ratio=min_ratio)
 
-    async def diagnose_plan(self, plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> List[PlanFinding]:
+    async def diagnose_plan(self, plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> list[PlanFinding]:
         """Diagnose a plan that already exists, checking this database's catalog.
 
         The same reading as :meth:`diagnose_query`, over ``EXPLAIN (ANALYZE,
@@ -388,7 +385,7 @@ class PgDebug:
 
     # -- Index use -----------------------------------------------------------
 
-    async def explain_index_use(self, sql: str, index: Optional[str] = None) -> List[IndexUse]:
+    async def explain_index_use(self, sql: str, index: str | None = None) -> list[IndexUse]:
         """Say whether the planner uses each index on the query's tables, and if not, why.
 
         The two halves of "why is my index not used" need different
@@ -422,7 +419,7 @@ class PgDebug:
 
     # -- Planner statistics --------------------------------------------------
 
-    async def column_stats(self, table: str) -> List[Dict[str, Any]]:
+    async def column_stats(self, table: str) -> list[dict[str, Any]]:
         """Report the planner's per-column statistics for a table.
 
         This is what to look at when ``explain --analyze`` shows estimated rows
@@ -434,7 +431,7 @@ class PgDebug:
         """
         return await StatisticsInspector(await self.sql_driver()).column_stats(table)
 
-    async def extended_statistics(self, table: str) -> List[Dict[str, Any]]:
+    async def extended_statistics(self, table: str) -> list[dict[str, Any]]:
         """List the extended statistics objects defined on a table.
 
         Without them the planner treats columns as independent and
@@ -447,10 +444,10 @@ class PgDebug:
     async def review_data_model(
         self,
         rules: str | RuleId | Iterable[str | RuleId] = RuleId.ALL,
-        schema: Optional[str] = None,
+        schema: str | None = None,
         min_rows: int = DEFAULT_MIN_ROWS,
         proven_only: bool = False,
-    ) -> List[ModelFinding]:
+    ) -> list[ModelFinding]:
         """Review the data model for defects, and say how to fix each one.
 
         Where the other diagnostics ask what the server is doing, this asks
@@ -483,7 +480,7 @@ class PgDebug:
         reviewer = ModelReviewer(await self.sql_driver())
         return await reviewer.review(rules=rules, schema=schema, min_rows=min_rows, proven_only=proven_only)
 
-    async def check_migration(self, sql: str) -> List[StatementReview]:
+    async def check_migration(self, sql: str) -> list[StatementReview]:
         """Review a migration before running it.
 
         Reports, for each statement, the lock it takes, how long it holds it,
@@ -505,7 +502,7 @@ class PgDebug:
         """
         return await MigrationLinter(await self.sql_driver()).review(sql)
 
-    async def review_configuration(self) -> List[ConfigFinding]:
+    async def review_configuration(self) -> list[ConfigFinding]:
         """Review the server's settings against what it is actually doing.
 
         Every finding is argued from a counter this server is already keeping —
@@ -525,11 +522,11 @@ class PgDebug:
 
     async def suggest_partitions(
         self,
-        sql: Optional[str | List[str]] = None,
+        sql: str | list[str] | None = None,
         min_table_bytes: int = DEFAULT_MIN_TABLE_BYTES,
         min_pruning_share: float = DEFAULT_MIN_PRUNING_SHARE,
         limit: int = 200,
-    ) -> List[PartitionCandidate]:
+    ) -> list[PartitionCandidate]:
         """Decide whether a table is worth partitioning, from what the workload does.
 
         The number that decides it is not the table's size but the share of
@@ -568,9 +565,9 @@ class PgDebug:
     async def list_activity(
         self,
         include_idle: bool = False,
-        min_duration_seconds: Optional[float] = None,
+        min_duration_seconds: float | None = None,
         blocked_only: bool = False,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Report what the server is doing right now.
 
         Args:
@@ -591,11 +588,11 @@ class PgDebug:
             return await inspector.blocked_backends()
         return await inspector.list_backends(include_idle=include_idle, min_duration_seconds=min_duration_seconds)
 
-    async def vacuum_progress(self) -> List[Dict[str, Any]]:
+    async def vacuum_progress(self) -> list[dict[str, Any]]:
         """Report running vacuums and how far along they are."""
         return await ActivityInspector(await self.sql_driver()).vacuum_progress()
 
-    async def lock_tree(self) -> List[Dict[str, Any]]:
+    async def lock_tree(self) -> list[dict[str, Any]]:
         """Report who is blocking whom, as trees rooted at the backends that wait on nothing.
 
         Returns:
@@ -611,7 +608,7 @@ class PgDebug:
     async def analyze_db_health(
         self,
         health_type: str | HealthType | Iterable[str | HealthType] = HealthType.ALL,
-    ) -> Dict[str, HealthCheckResult]:
+    ) -> dict[str, HealthCheckResult]:
         """Run database health checks.
 
         Args:
@@ -635,8 +632,8 @@ class PgDebug:
         self,
         sort_by: SortBy = "resources",
         limit: int = 10,
-        interval_seconds: Optional[float] = None,
-    ) -> List[Dict[str, Any]]:
+        interval_seconds: float | None = None,
+    ) -> list[dict[str, Any]]:
         """Report the most expensive queries recorded by pg_stat_statements.
 
         Args:
@@ -679,8 +676,8 @@ class PgDebug:
         self,
         max_index_size_mb: int = 10000,
         method: TuningMethod = "dta",
-        llm_model: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        llm_model: str | None = None,
+    ) -> dict[str, Any]:
         """Recommend indexes for the workload recorded by pg_stat_statements.
 
         Args:
@@ -700,11 +697,11 @@ class PgDebug:
 
     async def analyze_query_indexes(
         self,
-        queries: List[str],
+        queries: list[str],
         max_index_size_mb: int = 10000,
         method: TuningMethod = "dta",
-        llm_model: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        llm_model: str | None = None,
+    ) -> dict[str, Any]:
         """Recommend indexes for a specific list of queries.
 
         Args:
@@ -734,7 +731,7 @@ class PgDebug:
         presentation = await self._index_tuning_presentation(method, llm_model)
         return await presentation.analyze_queries(queries=queries, max_index_size_mb=max_index_size_mb)
 
-    async def _index_tuning_presentation(self, method: TuningMethod, llm_model: Optional[str] = None) -> TextPresentation:
+    async def _index_tuning_presentation(self, method: TuningMethod, llm_model: str | None = None) -> TextPresentation:
         if method not in ("dta", "llm"):
             raise InvalidArgumentError(f"Unknown index tuning method: {method}. Valid values are: dta, llm.")
 

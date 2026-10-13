@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 from typing import Any
-from typing import List
-from typing import Tuple
+from typing import LiteralString
 from typing import cast
-
-from typing_extensions import LiteralString
 
 from .result import ReviewOptions
 
@@ -21,7 +18,7 @@ def user_schemas(alias: str = "n") -> str:
     return f"{alias}.nspname <> 'information_schema' AND {alias}.nspname NOT LIKE 'pg\\_%'"
 
 
-def scoped(sql: str, options: ReviewOptions, column: str) -> Tuple[LiteralString, List[Any]]:
+def scoped(sql: str, options: ReviewOptions, column: str) -> tuple[LiteralString, list[Any]]:
     """Narrow a rule's query to one schema, when one was asked for.
 
     Args:

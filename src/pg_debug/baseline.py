@@ -19,16 +19,14 @@ repository next to the workflow that reads it.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from typing import Dict
-from typing import List
-from typing import Mapping
-from typing import Sequence
 
 from .configuration import ConfigFinding
 from .errors import InvalidArgumentError
@@ -54,14 +52,14 @@ HEALTH_IDENTITY_KEYS = (
     "covered_by",
 )
 
-Key = Dict[str, Any]
+Key = dict[str, Any]
 
 
 def _canonical(key: Mapping[str, Any]) -> str:
     return json.dumps(key, sort_keys=True, separators=(",", ":"), default=str)
 
 
-def health_keys(results: Mapping[str, HealthCheckResult]) -> List[Key]:
+def health_keys(results: Mapping[str, HealthCheckResult]) -> list[Key]:
     """The identity of everything the health checks flagged.
 
     Each finding becomes ``{"check": name, ...identifying fields}``. A check
@@ -69,7 +67,7 @@ def health_keys(results: Mapping[str, HealthCheckResult]) -> List[Key]:
     hit rate — becomes ``{"check": name}`` on its own, since the verdict is
     about the check itself.
     """
-    keys: List[Key] = []
+    keys: list[Key] = []
     for name, result in results.items():
         if result.healthy:
             continue
@@ -119,8 +117,8 @@ class Partition:
             configuration findings.
     """
 
-    new: List[Key] = field(default_factory=list)
-    known: List[Key] = field(default_factory=list)
+    new: list[Key] = field(default_factory=list)
+    known: list[Key] = field(default_factory=list)
     new_failures: int = 0
 
 
@@ -129,7 +127,7 @@ class Baseline:
     """A set of accepted findings for one command."""
 
     command: str
-    keys: List[Key] = field(default_factory=list)
+    keys: list[Key] = field(default_factory=list)
     created: str = ""
 
     def __post_init__(self) -> None:
@@ -187,7 +185,7 @@ class Baseline:
         Path(path).write_text("\n".join(lines))
 
 
-def keys_of(command: str, result: Any) -> List[Key]:
+def keys_of(command: str, result: Any) -> list[Key]:
     """Every finding of a result as a key, in result order."""
     if command == "health":
         return health_keys(result)
@@ -224,7 +222,7 @@ def partition(command: str, result: Any, baseline: Baseline) -> Partition:
 
 def describe_key(key: Mapping[str, Any]) -> str:
     """A key as a short phrase: ``Index health: public.orders orders_idx``."""
-    parts: List[str] = []
+    parts: list[str] = []
     schema, table = key.get("schema"), key.get("table")
     if schema and table:
         parts.append(f"{schema}.{table}")

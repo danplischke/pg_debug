@@ -3,11 +3,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
-from typing import AsyncIterator
 from typing import ClassVar
-from typing import Optional
+from typing import LiteralString
 
 import pglast
 from pglast.ast import A_Const
@@ -23,7 +23,6 @@ from pglast.enums import A_Expr_Kind
 from psycopg.sql import SQL
 from psycopg.sql import Composable
 from psycopg.sql import Literal
-from typing_extensions import LiteralString
 
 from . import allowlist
 from .driver import QUERY_MARKER
@@ -176,7 +175,7 @@ class SafeSqlDriver(SqlDriver):
         query: LiteralString,
         params: list[Any] | None = None,
         force_readonly: bool = True,  # do not use value passed in
-    ) -> Optional[list[SqlDriver.RowResult]]:  # noqa: UP007
+    ) -> list[SqlDriver.RowResult] | None:  # noqa: UP007
         """Execute a query after validating it is safe"""
         self._validate(query)
 
@@ -207,7 +206,7 @@ class SafeSqlDriver(SqlDriver):
                 force_readonly=True,
             )
 
-    async def execute_query_and_rollback(self, query: LiteralString, params: list[Any] | None = None) -> Optional[list[SqlDriver.RowResult]]:
+    async def execute_query_and_rollback(self, query: LiteralString, params: list[Any] | None = None) -> list[SqlDriver.RowResult] | None:
         """Always refuses. Restricted mode does not run statements to see what they do.
 
         Inherited unchanged this would be a hole rather than a feature: the base

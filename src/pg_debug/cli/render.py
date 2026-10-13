@@ -7,13 +7,11 @@ it into something readable in a terminal.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
+from collections.abc import Mapping
+from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any
-from typing import Dict
-from typing import Iterable
-from typing import List
-from typing import Mapping
-from typing import Sequence
 
 import humanize
 
@@ -54,7 +52,7 @@ def render_rows(rows: Sequence[Mapping[str, Any]], empty: str = "(no rows)", max
     if not rows:
         return empty
 
-    columns: List[str] = []
+    columns: list[str] = []
     for row in rows:
         for key in row:
             if key not in columns:
@@ -118,14 +116,14 @@ def render_lock_tree(roots: Sequence[Mapping[str, Any]]) -> str:
     if not roots:
         return "(nothing is blocked)"
 
-    lines: List[str] = []
+    lines: list[str] = []
     for root in roots:
         _lock_tree_lines(root, 0, lines)
         lines.append("")
     return "\n".join(lines).rstrip()
 
 
-def _lock_tree_lines(node: Mapping[str, Any], depth: int, lines: List[str]) -> None:
+def _lock_tree_lines(node: Mapping[str, Any], depth: int, lines: list[str]) -> None:
     indent = "  " * depth
     state = node.get("state") or node.get("backend_type") or "?"
     parts = [f"{indent}pid {node.get('pid')}:"]
@@ -256,7 +254,7 @@ def render_index_recommendations(result: Mapping[str, Any]) -> str:
             lines.append(f"   warning: {rec['warning']}")
         lines.append("")
 
-    query_impact: Iterable[Dict[str, Any]] = result.get("query_impact", [])
+    query_impact: Iterable[dict[str, Any]] = result.get("query_impact", [])
     for impact in query_impact:
         lines.append(f"Query: {impact['query']}")
         lines.append(f"  cost {impact['base_cost']} -> {impact['new_cost']} ({impact['improvement_multiple']}x)")
@@ -270,7 +268,7 @@ def render_index_use(verdicts: Sequence[Any]) -> str:
     if not verdicts:
         return "(no indexes on the tables this query reads)"
 
-    lines: List[str] = []
+    lines: list[str] = []
     for verdict in verdicts:
         size = humanize.naturalsize(verdict.size_bytes, binary=True) if verdict.size_bytes else ""
         head = f"{verdict.table}: {verdict.index}  {verdict.description}" + (f"  {size}" if size else "")
@@ -299,7 +297,7 @@ def render_model_findings(findings: Sequence[Any]) -> str:
     if not findings:
         return "No data model findings."
 
-    lines: List[str] = []
+    lines: list[str] = []
     current_table = None
     for finding in findings:
         if finding.qualified_table != current_table:
@@ -318,7 +316,7 @@ def render_model_findings(findings: Sequence[Any]) -> str:
         for statement in finding.remediation:
             lines.append(f"    {statement}")
 
-    counts: Dict[str, int] = {}
+    counts: dict[str, int] = {}
     for finding in findings:
         counts[finding.severity.value] = counts.get(finding.severity.value, 0) + 1
     summary = ", ".join(f"{count} {severity}" for severity, count in counts.items())
@@ -333,7 +331,7 @@ def render_configuration_review(findings: Sequence[Any]) -> str:
     if not findings:
         return "Nothing measurable is wrong with the configuration."
 
-    lines: List[str] = []
+    lines: list[str] = []
     for finding in findings:
         lines.append("")
         lines.append(f"[{finding.severity.value}] {finding.setting} = {finding.current}")
@@ -357,7 +355,7 @@ def render_migration_review(reviews: Sequence[Any]) -> str:
     if not reviews:
         return "Nothing in this migration takes a lock worth reporting."
 
-    lines: List[str] = []
+    lines: list[str] = []
     for review in reviews:
         lines.append("")
         lines.append(f"[{review.severity.value}] {review.statement}")
@@ -370,7 +368,7 @@ def render_migration_review(reviews: Sequence[Any]) -> str:
             for statement in review.safer:
                 lines.append(f"      {statement}")
 
-    counts: Dict[str, int] = {}
+    counts: dict[str, int] = {}
     for review in reviews:
         counts[review.severity.value] = counts.get(review.severity.value, 0) + 1
     summary = ", ".join(f"{count} {severity}" for severity, count in counts.items())
@@ -391,7 +389,7 @@ def render_plan_findings(findings: Sequence[Any]) -> str:
     if not findings:
         return "Nothing wrong with this plan: the estimates match what the query found, and nothing spilled to disk."
 
-    lines: List[str] = []
+    lines: list[str] = []
     for finding in findings:
         where = f" on {finding.relation}" if finding.relation else ""
         lines.append("")
@@ -424,7 +422,7 @@ def render_partition_candidates(candidates: Sequence[Any]) -> str:
     recommended = [candidate for candidate in candidates if candidate.recommended]
     against = [candidate for candidate in candidates if not candidate.recommended]
 
-    lines: List[str] = []
+    lines: list[str] = []
     for candidate in recommended:
         lines.extend(_partition_candidate_lines(candidate))
 
@@ -439,7 +437,7 @@ def render_partition_candidates(candidates: Sequence[Any]) -> str:
     return "\n".join(lines).strip("\n")
 
 
-def _partition_candidate_lines(candidate: Any) -> List[str]:
+def _partition_candidate_lines(candidate: Any) -> list[str]:
     verdict = "partition" if candidate.recommended else "leave as it is"
     lines = [
         "",
