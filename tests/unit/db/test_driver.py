@@ -1,4 +1,5 @@
 # ruff: noqa: B017
+import logging
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -469,3 +470,21 @@ async def test_a_connection_the_pool_cannot_hand_out_is_a_query_error():
     with pytest.raises(QueryError, match="couldn't get a connection"):
         async with driver.session():
             pass
+
+
+# -- What a failed statement logs -------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_failed_statement_is_logged_in_one_line_and_its_text_only_at_debug(caplog):
+    """A health run carries on past a check that fails. With every failed
+    statement logged in full at ERROR, six checks timing out behind a lock
+    printed some 290 lines of pg-debug's own SQL to stderr."""
+    driver = SqlDriver(conn=RejectingConnection(undefined_table()))
+
+    with caplog.at_level(logging.DEBUG, logger="pg_debug.db.driver"), pytest.raises(QueryError):
+        await driver.execute_query("SELECT *\n  FROM nope\n WHERE true")
+
+    shown = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    assert shown == ['Error executing query: relation "nope" does not exist']
+    assert any("FROM nope" in record.getMessage() for record in caplog.records if record.levelno == logging.DEBUG)

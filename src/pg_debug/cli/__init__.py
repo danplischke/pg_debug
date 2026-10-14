@@ -96,7 +96,12 @@ async def run(args: argparse.Namespace) -> int:
     ) as pg:
         result = await args.func(pg, args)
 
-    if getattr(args, "save_baseline", None):
+    # Health checks that could not run. A baseline of such a run would hold
+    # nothing for them, so it is not saved: the refusal is said, with them,
+    # once the report is printed.
+    could_not_run = [name for name, check in result.items() if check.error is not None] if args.command == "health" else []
+
+    if getattr(args, "save_baseline", None) and not could_not_run:
         saved = Baseline.of(args.command, result)
         saved.save(args.save_baseline)
         print(f"Saved a baseline of {len(saved)} finding(s) to {args.save_baseline}.", file=sys.stderr)
@@ -109,7 +114,7 @@ async def run(args: argparse.Namespace) -> int:
 
     print(format_result(args, result, baseline))
     if split is not None and not args.json:
-        print(render_baseline_trailer(args.baseline, split))
+        print(render_baseline_trailer(args.baseline, split, could_not_run=len(could_not_run)))
 
     if args.command == "health":
         return _health_exit_code(args, result, split)
@@ -137,6 +142,8 @@ def _health_exit_code(args: argparse.Namespace, results: dict[str, HealthCheckRe
 
     In this order:
 
+    - 1 when ``--save-baseline`` was asked for and a check could not run, so
+      the baseline was not saved: what was asked for was not done.
     - ``UNHEALTHY_EXIT_CODE``, with ``--exit-code``, when a check that ran
       found a problem; against a baseline, a problem the baseline does not
       hold.
@@ -152,8 +159,16 @@ def _health_exit_code(args: argparse.Namespace, results: dict[str, HealthCheckRe
     incomplete = render_incomplete_health_run(results)
     if incomplete:
         if getattr(args, "save_baseline", None):
-            incomplete += f" The baseline saved to {args.save_baseline} does not cover them."
+            # A baseline without them would fail the gate on whatever they
+            # find once they run, and saved over an accepted one it would
+            # throw away what was accepted, so the file is left as it was.
+            incomplete += (
+                f" Nothing was written to {args.save_baseline}: a baseline of this run would hold nothing for them, "
+                "and whatever they find once they run would fail as new."
+            )
         print(f"{PROG}: {incomplete}", file=sys.stderr)
+        if getattr(args, "save_baseline", None):
+            return 1
 
     if getattr(args, "exit_code", False):
         if split is not None:

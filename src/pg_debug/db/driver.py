@@ -651,7 +651,11 @@ class SqlDriver:
                     logger.error("Error rolling back transaction: %s", rollback_error)
 
             if not isinstance(e, asyncio.CancelledError):
-                logger.error("Error executing query (%s): %s", query, e)
+                # The statement only at debug: pg-debug's own statements run
+                # to dozens of lines, and a health run that carries on past a
+                # failed check would otherwise print each one in full.
+                logger.error("Error executing query: %s", e)
+                logger.debug("The statement that failed: %s", query)
             raise
 
     async def execute_query_and_rollback(

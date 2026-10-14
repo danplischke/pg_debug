@@ -91,12 +91,21 @@ def _health_check_json(name: str, check: Any, baseline: Baseline | None) -> dict
     return payload
 
 
-def render_baseline_trailer(path: str, split: Partition) -> str:
-    """The line after the report that says what the baseline changed."""
+def render_baseline_trailer(path: str, split: Partition, could_not_run: int = 0) -> str:
+    """The line after the report that says what the baseline changed.
+
+    ``could_not_run`` counts the checks that never looked. Nothing new among
+    the others is not a pass, so the line says how many were not compared.
+    """
+    among = " among the checks that ran" if could_not_run else ""
+    unrun = f"{could_not_run} check could not run and was" if could_not_run == 1 else f"{could_not_run} checks could not run and were"
     if not split.new:
-        return f"Baseline {path}: {len(split.known)} known finding(s), nothing new."
-    lines = [f"Baseline {path}: {len(split.known)} known finding(s) ignored, {len(split.new)} new:"]
+        line = f"Baseline {path}: {len(split.known)} known finding(s), nothing new{among}."
+        return f"{line} {unrun} not compared, so this is not a pass." if could_not_run else line
+    lines = [f"Baseline {path}: {len(split.known)} known finding(s) ignored, {len(split.new)} new{among}:"]
     lines.extend(f"  {describe_key(key)}" for key in split.new)
+    if could_not_run:
+        lines.append(f"{unrun} not compared.")
     return "\n".join(lines)
 
 

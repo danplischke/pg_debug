@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from unittest.mock import AsyncMock
 from unittest.mock import Mock
 from unittest.mock import call
@@ -763,3 +764,27 @@ async def test_running_a_statement_to_observe_it_is_refused(safe_driver, mock_sq
     with refused("it would have to run the statement to observe it"):
         await safe_driver.execute_query_and_rollback("SELECT 1")
     mock_sql_driver.execute_query.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_statement_that_failed_is_logged_once_and_a_timeout_in_one_line(caplog):
+    """The wrapped driver logs a statement that fails; restricted mode logged
+    it a second time, and a timeout with the first lines of the statement."""
+    failing = Mock(spec=SqlDriver)
+    failing.execute_query = AsyncMock(side_effect=QueryError("permission denied"))
+
+    async def slow(*args, **kwargs):
+        await asyncio.sleep(1)
+
+    slow_driver = Mock(spec=SqlDriver)
+    slow_driver.execute_query = AsyncMock(side_effect=slow)
+
+    with caplog.at_level(logging.DEBUG, logger="pg_debug.db.restricted"):
+        with pytest.raises(QueryError, match="permission denied"):
+            await SafeSqlDriver(failing, timeout=5).execute_query("SELECT 1")
+        with pytest.raises(QueryError, match="timed out"):
+            await SafeSqlDriver(slow_driver, timeout=0.01).execute_query("SELECT\n  1\nFROM\n  pg_class")
+
+    shown = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    assert shown == ["Query execution timed out after 0.01 seconds"]
+    assert any("pg_class" in record.getMessage() for record in caplog.records if record.levelno == logging.DEBUG)

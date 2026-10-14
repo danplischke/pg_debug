@@ -67,12 +67,51 @@ def test_health_keys_cover_findings_and_checks_that_are_unhealthy_without_any():
 
 
 def test_a_health_check_that_could_not_run_has_no_key():
-    """It is unhealthy and names nothing, like a connection count over its
+    """It is unhealthy and names nothing, like a cache hit rate below its
     limit, but it found nothing: a key for it would accept whatever it finds
     once it runs."""
     results = {"Replication health": HealthCheckResult.could_not_run("Replication health", "permission denied")}
 
     assert health_keys(results) == []
+
+
+def test_no_baseline_is_taken_of_a_health_run_in_which_a_check_could_not_run():
+    results = {
+        "Index bloat": health("Index bloat", False, [{"schema": "s", "table": "t", "index": "i"}]),
+        "Replication health": HealthCheckResult.could_not_run("Replication health", "permission denied"),
+    }
+
+    with pytest.raises(InvalidArgumentError, match=r"1 of 2 health checks could not run \(Replication health\)"):
+        Baseline.of("health", results)
+
+
+def test_a_session_left_idle_in_transaction_is_known_by_its_job_not_its_pid():
+    finding = {
+        "kind": "idle_in_transaction",
+        "pid": 4242,
+        "usename": "app",
+        "datname": "shop",
+        "application_name": "checkout",
+        "idle_in_transaction_seconds": 300,
+        "query": "SELECT 1",
+    }
+
+    key = health_finding_key("Connection health", finding)
+
+    assert key == {"check": "Connection health", "kind": "idle_in_transaction", "usename": "app", "datname": "shop", "application_name": "checkout"}
+    assert describe_key(key) == "Connection health: idle_in_transaction usename=app datname=shop application_name=checkout"
+
+
+def test_a_baseline_holds_each_identity_once(tmp_path):
+    """Three sessions of one job left idle in transaction are one accepted finding."""
+    path = tmp_path / "health.json"
+    sessions = [{"kind": "idle_in_transaction", "pid": pid, "usename": "app", "datname": "shop"} for pid in (1, 2, 3)]
+
+    Baseline.of("health", {"Connection health": health("Connection health", False, sessions)}).save(path)
+
+    assert json.loads(path.read_text())["findings"] == [
+        {"check": "Connection health", "kind": "idle_in_transaction", "usename": "app", "datname": "shop"}
+    ]
 
 
 def test_a_model_finding_is_the_rule_and_the_table_and_its_columns():

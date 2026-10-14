@@ -634,16 +634,22 @@ class PgDebug:
     ) -> dict[str, HealthCheckResult]:
         """Run database health checks.
 
+        Each check runs on its own: one the server refuses, or a statement
+        timeout cancels behind a lock, is returned with ``error`` set rather
+        than raised, and the others still run.
+
         Args:
             health_type: Which checks to run: ``index``, ``connection``,
                 ``vacuum``, ``sequence``, ``replication``, ``buffer``,
-                ``constraint`` or ``all`` (default). Accepts a comma-separated
-                string or an iterable.
+                ``constraint``, ``statistics``, ``table``, ``scan`` or
+                ``all`` (default). Accepts a comma-separated string or an
+                iterable.
 
         Returns:
             A mapping of check name to its :class:`HealthCheckResult`, each
             carrying a ``healthy`` flag, a text ``summary``, the flagged
-            ``findings`` and the ``metrics`` behind the verdict.
+            ``findings``, the ``metrics`` behind the verdict and, for a check
+            that could not run, the ``error`` that stopped it.
 
         Raises:
             InvalidArgumentError: If an unknown health type is requested.

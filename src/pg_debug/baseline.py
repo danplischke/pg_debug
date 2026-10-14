@@ -37,7 +37,10 @@ from .severity import Severity
 BASELINE_VERSION = 1
 
 #: The keys of a health finding that say *what* it is about, in the order
-#: they are recorded. Everything else a finding carries is a measurement.
+#: they are recorded. Everything else a finding carries is a measurement, or
+#: evidence that changes from run to run: a session left idle in a transaction
+#: is known by its role, database and application name, never by its pid,
+#: which the same job gets anew each time it reconnects.
 HEALTH_IDENTITY_KEYS = (
     "schema",
     "table",
@@ -50,6 +53,9 @@ HEALTH_IDENTITY_KEYS = (
     "database",
     "kind",
     "covered_by",
+    "usename",
+    "datname",
+    "application_name",
 )
 
 Key = dict[str, Any]
@@ -63,11 +69,11 @@ def health_keys(results: Mapping[str, HealthCheckResult]) -> list[Key]:
     """The identity of everything the health checks flagged.
 
     Each finding becomes ``{"check": name, ...identifying fields}``. A check
-    that is unhealthy without naming any object — connection count, cache
-    hit rate — becomes ``{"check": name}`` on its own, since the verdict is
-    about the check itself. A check that could not run found nothing and
-    gives no key: accepting its failure would accept whatever it would have
-    found once it ran.
+    that is unhealthy without naming any object — a cache hit rate — becomes
+    ``{"check": name}`` on its own, since the verdict is about the check
+    itself. A check that could not run found nothing and gives no key:
+    accepting its failure would accept whatever it would have found once it
+    ran.
     """
     keys: list[Key] = []
     for name, result in results.items():
@@ -143,7 +149,21 @@ class Baseline:
 
     @classmethod
     def of(cls, command: str, result: Any) -> Baseline:
-        """The baseline that accepts everything ``result`` found."""
+        """The baseline that accepts everything ``result`` found.
+
+        Raises:
+            InvalidArgumentError: If health checks in ``result`` could not
+                run. Such a baseline would hold nothing for them, so whatever
+                they find once they run would fail the gate as new, and saved
+                over an accepted baseline it would discard what was accepted.
+        """
+        if command == "health":
+            failed = [name for name, check in result.items() if check.error is not None]
+            if failed:
+                raise InvalidArgumentError(
+                    f"No baseline of this run: {len(failed)} of {len(result)} health {'check' if len(result) == 1 else 'checks'} "
+                    f"could not run ({', '.join(failed)}), and it would hold nothing for them. Take one from a run in which every check ran."
+                )
         return cls(command=command, keys=keys_of(command, result), created=datetime.now(UTC).isoformat(timespec="seconds"))
 
     @classmethod
@@ -170,8 +190,12 @@ class Baseline:
         return cls(command=command, keys=[dict(key) for key in payload["findings"]], created=str(payload.get("created") or ""))
 
     def save(self, path: str | Path) -> None:
-        """Write the baseline, one finding per line in a stable order."""
-        ordered = sorted(self.keys, key=_canonical)
+        """Write the baseline, one finding per line in a stable order.
+
+        Each identity is written once: three sessions of the same job left
+        idle in transaction are one accepted finding, not three.
+        """
+        ordered = sorted({_canonical(key): key for key in self.keys}.values(), key=_canonical)
         lines = [
             "{",
             f'  "version": {BASELINE_VERSION},',
@@ -233,6 +257,8 @@ def describe_key(key: Mapping[str, Any]) -> str:
     for name in ("index", "name", "sequence", "column", "constraint", "slot_name", "setting", "kind", "covered_by"):
         if key.get(name):
             parts.append(str(key[name]))
+    # A session's identity reads as nothing without the field names.
+    parts.extend(f"{name}={key[name]}" for name in ("usename", "datname", "application_name") if key.get(name))
     if key.get("columns"):
         parts.append("(" + ", ".join(str(c) for c in key["columns"]) + ")")
     label = key.get("check") or key.get("rule") or "finding"

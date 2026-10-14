@@ -476,7 +476,10 @@ def build_parser() -> argparse.ArgumentParser:
     health.add_argument(
         "--exit-code",
         action="store_true",
-        help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any check reports a problem, for use in CI.",
+        help=(
+            f"Exit with status {UNHEALTHY_EXIT_CODE} when a check that ran finds a problem, for use in CI. "
+            "A check that could not run makes the exit status 1 either way."
+        ),
     )
     add_baseline_arguments(health)
     health.set_defaults(func=cmd_health, render=render_health_checks, json_payload=health_checks_json)

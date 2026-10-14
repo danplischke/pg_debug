@@ -270,7 +270,7 @@ def test_health_exit_code_is_zero_when_healthy(pg_client):
     assert run(["health", "--exit-code"])[0] == 0
 
 
-def test_health_without_exit_code_flag_always_succeeds(pg_client):
+def test_health_without_exit_code_succeeds_when_a_check_finds_a_problem(pg_client):
     pg_client.analyze_db_health = AsyncMock(return_value=health_results(("Connection health", False, "too many connections", {})))
 
     assert run(["health"])[0] == 0
@@ -1215,18 +1215,57 @@ def test_json_output_marks_each_finding_against_the_baseline(pg_client, tmp_path
     assert [(f["index"], f["baseline"]) for f in findings] == [("orders_a", "known"), ("orders_b", "new")]
 
 
-def test_a_check_that_could_not_run_is_not_saved_as_an_accepted_finding(pg_client, tmp_path):
-    """Accepting a failure to look would accept whatever the check finds once it runs."""
-    pg_client.analyze_db_health = AsyncMock(
-        return_value={**unhealthy_index_results("orders_a"), **health_results(could_not_run("Replication health"))}
-    )
+def test_a_run_in_which_a_check_could_not_run_saves_no_baseline(pg_client, tmp_path):
+    """A baseline of it would hold nothing for that check, so what it finds
+    once it runs would fail as new; saved over the accepted baseline, a lock
+    during one run threw away everything the team had accepted."""
     path = tmp_path / "health.json"
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a"))
+    run(["health", "--save-baseline", str(path)])
+    accepted = path.read_text()
+    pg_client.analyze_db_health = AsyncMock(
+        return_value={
+            **health_results(could_not_run("Index bloat"), could_not_run("Unused index check")),
+            **health_results(("Vacuum health", False, "Tables approaching transaction ID wraparound:", {})),
+        }
+    )
 
-    code, _, err = run(["health", "--save-baseline", str(path)])
+    code, out, err = run(["health", "--exit-code", "--save-baseline", str(path)])
 
     assert code == 1
-    assert json.loads(path.read_text())["findings"] == [{"check": "Index bloat", "index": "orders_a", "schema": "public", "table": "orders"}]
-    assert f"The baseline saved to {path} does not cover them." in err
+    assert path.read_text() == accepted
+    assert "Index bloat: Could not run" in out
+    assert "2 of 3 health checks could not run, so this run is incomplete: Index bloat, Unused index check." in err
+    assert f"Nothing was written to {path}" in err
+    assert "Saved a baseline" not in err
+
+
+def test_against_a_baseline_an_incomplete_run_is_not_reported_as_a_pass(pg_client, tmp_path):
+    """Nothing new, said of a run in which nothing ran, reads as a pass."""
+    path = tmp_path / "health.json"
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a"))
+    run(["health", "--save-baseline", str(path)])
+    pg_client.analyze_db_health = AsyncMock(return_value=health_results(could_not_run("Index bloat"), could_not_run("Unused index check")))
+
+    code, out, _ = run(["health", "--exit-code", "--baseline", str(path)])
+
+    assert code == 1
+    assert out.splitlines()[-1] == (
+        f"Baseline {path}: 0 known finding(s), nothing new among the checks that ran. "
+        "2 checks could not run and were not compared, so this is not a pass."
+    )
+
+    pg_client.analyze_db_health = AsyncMock(
+        return_value={**unhealthy_index_results("orders_a", "orders_b"), **health_results(could_not_run("Replication health"))}
+    )
+    code, out, _ = run(["health", "--exit-code", "--baseline", str(path)])
+
+    assert code == cli.UNHEALTHY_EXIT_CODE
+    assert out.splitlines()[-3:] == [
+        f"Baseline {path}: 1 known finding(s) ignored, 1 new among the checks that ran:",
+        "  Index bloat: public.orders orders_b",
+        "1 check could not run and was not compared.",
+    ]
 
 
 def test_against_a_baseline_an_incomplete_run_still_fails(pg_client, tmp_path):
