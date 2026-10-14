@@ -36,8 +36,8 @@ def driver(**settings) -> MagicMock:
     """A server on PostgreSQL 16 that answers the setting reads it is asked for."""
 
     async def answer(query, *args, **kwargs):
-        if "server_version" in query:
-            return [SqlDriver.RowResult(cells={"server_version": "16.4"})]
+        if "server_version_num" in query:
+            return [SqlDriver.RowResult(cells={"server_version_num": "160004"})]
         if query == PLATFORM_SQL:
             # The platform probe, answered as a server that carries no platform's signals.
             return [SqlDriver.RowResult(cells={"platform_roles": []})]

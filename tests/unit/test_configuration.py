@@ -162,8 +162,8 @@ async def test_the_reviewer_judges_fsync_by_the_platform_it_is_given():
     async def answer(query, *args, **kwargs):
         if "pg_settings" in query:
             return [SqlDriver.RowResult(cells={"name": "fsync", "setting": "off", "unit": None, "source": "configuration file", "boot_val": "on"})]
-        if query.strip() == "SHOW server_version":
-            return [SqlDriver.RowResult(cells={"server_version": "16.4"})]
+        if query.strip() == "SHOW server_version_num":
+            return [SqlDriver.RowResult(cells={"server_version_num": "160004"})]
         return [SqlDriver.RowResult(cells=healthy_measurements())]
 
     driver.execute_query = AsyncMock(side_effect=answer)
