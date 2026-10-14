@@ -1,9 +1,12 @@
 """Health check for planner statistics freshness."""
 
+from typing import cast
+
 import humanize
 
 from ...db import SafeSqlDriver
 from ...db import SqlDriver
+from ...db.window import table_window
 from ...statistics import DEFAULT_MIN_CHANGED_ROWS
 from ...statistics import DEFAULT_STALE_FRACTION
 from ...statistics import StatisticsInspector
@@ -39,16 +42,20 @@ class StatisticsHealthCalc:
             stale_fraction=self.stale_fraction,
             min_changed_rows=self.min_changed_rows,
         )
+        # Drift is read from the counters, which start again at a crash or a
+        # reset; whether a table has statistics at all is not.
+        window = await table_window(cast(SqlDriver, self.sql_driver))
+        metrics = {**thresholds, **window.to_dict()}
 
         if not tables:
             return HealthCheckResult(
                 name=STATISTICS_HEALTH,
                 healthy=True,
-                summary="All tables have current statistics.",
-                metrics=thresholds,
+                summary=f"All tables have current statistics, judging drift by the changes counted {window.describe()}.",
+                metrics=metrics,
             )
 
-        lines = ["Tables with outdated statistics:"]
+        lines = [f"Tables with outdated statistics, judging drift by the changes counted {window.describe()}:"]
         for table in tables:
             qualified = f"{table['schema']}.{table['table']}"
             if table["never_analyzed"]:
@@ -63,7 +70,7 @@ class StatisticsHealthCalc:
             healthy=False,
             summary="\n".join(lines),
             findings=tables,
-            metrics=thresholds,
+            metrics=metrics,
         )
 
 

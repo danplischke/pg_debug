@@ -24,6 +24,7 @@ from .checks.constraint import ConstraintHealthCalc
 from .checks.index import DUPLICATE_INDEXES
 from .checks.index import INDEX_BLOAT
 from .checks.index import INVALID_INDEXES
+from .checks.index import MIN_WINDOW_DAYS
 from .checks.index import UNUSED_INDEXES
 from .checks.index import IndexHealthCalc
 from .checks.replication import REPLICATION_HEALTH
@@ -85,8 +86,9 @@ class HealthType(str, Enum):
 class DatabaseHealthTool:
     """Tool for analyzing database health metrics."""
 
-    def __init__(self, sql_driver):
+    def __init__(self, sql_driver, min_window_days: float = MIN_WINDOW_DAYS):
         self.sql_driver = sql_driver
+        self.min_window_days = min_window_days
 
     async def run_checks(
         self,
@@ -150,7 +152,7 @@ class DatabaseHealthTool:
         checks: list[tuple[str, Callable[[], Awaitable[HealthCheckResult]]]] = []
 
         if HealthType.INDEX in health_types:
-            index_health = IndexHealthCalc(self.sql_driver)
+            index_health = IndexHealthCalc(self.sql_driver, min_window_days=self.min_window_days)
             checks += [
                 (INVALID_INDEXES, index_health.invalid_index_check),
                 (DUPLICATE_INDEXES, index_health.duplicate_index_check),

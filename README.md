@@ -138,7 +138,7 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `vacuum-progress` | — |
 | `index-use SQL` | a file path, inline SQL, or `-` for stdin; `-i, --index NAME` to report one index |
 | `column-stats TABLE` | — |
-| `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
+| `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--min-window-days DAYS` (default 7: how long the index counters must have counted before an index is called unused), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
 | `config` | `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
 | `partitions` | `--min-size SIZE` (default 1GB, accepts `500MB`/`2GB`), `--min-pruning-share SHARE` (default 0.5), `--limit N` (default 200) |
 | `check-migration SQL` | a file path, inline SQL, or `-` for stdin; `--offline`, `--exit-code` |
@@ -578,7 +578,8 @@ context = QueryContext.from_file("pg-debug.toml")
 | `vacuum_progress()` | `list[dict]` — one per running vacuum |
 | `explain_index_use(sql, index=None)` | `list[IndexUse]` — one per index on the query's tables, unused first, each with `findings` |
 | `column_stats(table)` / `extended_statistics(table)` | `list[dict]` — planner statistics |
-| `analyze_db_health(health_type="all")` | `dict[str, HealthCheckResult]` — check name to result |
+| `analyze_db_health(health_type="all", min_window_days=7)` | `dict[str, HealthCheckResult]` — check name to result |
+| `counting_windows()` | `dict` — `tables`, `checkpoints` and `statements` (None without `pg_stat_statements`), each with `counting_since`, `counting_seconds` and `counting_began_with`; `statements` also has `statements_evicted` |
 | `review_data_model(rules="all", schema=None, min_rows=1000, proven_only=False)` | `list[ModelFinding]` — most severe first |
 | `check_migration(sql)` | `list[StatementReview]` — most severe first |
 | `review_configuration()` | `list[ConfigFinding]` — most severe first |

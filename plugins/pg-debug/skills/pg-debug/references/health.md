@@ -9,6 +9,7 @@ pg-debug health                          # everything
 pg-debug health --type index,vacuum      # a subset
 pg-debug --json health                   # structured, for scripts
 pg-debug health --exit-code              # exit 3 if a check finds a problem, 1 if one could not run (CI)
+pg-debug health --min-window-days 30     # call an index unused only after a month of counting
 pg-debug health --save-baseline b.json   # accept today's findings
 pg-debug health --exit-code --baseline b.json   # then fail only on new ones
 ```
@@ -67,10 +68,16 @@ table with autovacuum switched off, and a large table whose default scale
 factor means it waits for a fifth of itself to die first. The fixes differ, so
 relay which one it is.
 
-Interpret before relaying. "Unused index" on a database that restarted
-yesterday means the counters are young, not that the index is dead — check
-`metrics.max_scans` and how long statistics have been accumulating. Cache hit
-rate on an idle test database is meaningless.
+Interpret before relaying. The counters behind `index`, `scan` and
+`statistics` count since a reset or since PostgreSQL last discarded them (a
+crash, an immediate shutdown, a failover, a restore), not since the last
+clean restart; each says since when in its summary and in
+`metrics.counting_since`. The unused-index check does not call anything
+unused until they have counted for a week, and says "Index use not judged"
+instead; `--min-window-days` moves that, which is for a database whose
+traffic repeats faster, not for getting an answer sooner. On 16 and later a
+flagged index carries `last_scan`. Cache hit rate on an idle test database
+is meaningless.
 
 pg_debug marks every statement it runs with a `/* pg_debug */` comment and
 excludes marked statements from `top-queries` and from index tuning, so its own

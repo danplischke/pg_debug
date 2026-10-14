@@ -241,10 +241,23 @@ Table, index and database counters, and `pg_stat_statements`, count from
 their last reset, and on managed platforms resets are routine: every Neon
 suspend (after five idle minutes, by default) and compute restart, and on any
 platform a crash, a failover, a point-in-time restore or a major upgrade; a
-new replica or branch starts with counters of its own. Most of pg-debug's
-counter-based findings do not yet state the window behind them, so read it
-before calling an index unused, a query the most expensive, or a table
-neglected by autovacuum:
+new replica or branch starts with counters of its own.
+
+pg-debug states the window where it argues from counters:
+- `health`'s `index`, `scan` and `statistics` checks carry `counting_since`,
+  `counting_seconds` and `counting_began_with` (`reset` or `restart`) in
+  their metrics and say it in the summary.
+- The unused-index check declines to judge until the counters have counted
+  for a week (`--min-window-days`, or `min_window_days=` in Python), and
+  says so.
+- `config`'s spill, checkpoint and cache findings carry the window in their
+  evidence.
+- Cumulative `top-queries` says on stderr since when its totals count, how
+  often entries were evicted, and when a crash lost recent statements.
+- `pg.counting_windows()` returns all three windows.
+
+`tune-workload`, `partitions` and the autovacuum checks do not state it yet,
+so before relaying them, read it yourself:
 
 ```bash
 pg-debug execute "SELECT now() - pg_postmaster_start_time() AS uptime,
@@ -257,9 +270,8 @@ On PostgreSQL 17 and later read `crash_reset` from `pg_stat_checkpointer`
 instead. Table and index counters count from the later of `database_reset`
 and `crash_reset`. After a crash `database_reset` reads NULL while
 `crash_reset` moves to the restart, which is why both are read; uptime alone
-is no window, because a clean restart moves it and keeps the counters. The
-`scan` health check's `counting_since` is `database_reset`, so a crash leaves
-it NULL. `pg_stat_statements_info.stats_reset` (14 and later) is the window of
+is no window, because a clean restart moves it and keeps the counters.
+`pg_stat_statements_info.stats_reset` (14 and later) is the window of
 `top-queries`, `tune-workload` and `partitions`, and it is separate: on a
 self-hosted PostgreSQL 16, `pg_stat_statements` survived a crash that reset
 everything else, while on Neon it goes with every suspend. A `dealloc` above
@@ -269,8 +281,10 @@ zero means entries were evicted to make room. On Supabase the view is
 Relay the window with the finding: "scanned 0 times since the compute started
 40 minutes ago" is not "unused". No source gives a general minimum window for
 calling an index unused (PlanetScale's own advisor waits four weeks, on
-history it keeps itself), so on a platform that resets this often, wait for
-representative traffic or say the counters cannot answer yet. On 16 and later
+history it keeps itself); pg-debug's week is a judgment that covers a weekly
+job, not a month-end one. On a platform that resets this often, wait for
+representative traffic or say the counters cannot answer yet, rather than
+lowering `--min-window-days` to get an answer. On 16 and later
 `last_idx_scan` in `pg_stat_user_indexes` says when an index was last used
 within the window. Do not suggest resetting statistics to get a clean
 baseline: that destroys the only history there is. To rank the workload as it

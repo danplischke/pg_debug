@@ -27,6 +27,7 @@ from .db import DbConnPool
 from .db.privileges import StatisticsAccess
 from .health import HealthCheckResult
 from .health import HealthType
+from .health.checks.index import MIN_WINDOW_DAYS
 from .index_use import IndexUse
 from .migration import StatementReview
 from .model import DEFAULT_MIN_ROWS
@@ -285,9 +286,10 @@ class SyncPgDebug:
     def analyze_db_health(
         self,
         health_type: str | HealthType | Iterable[str | HealthType] = HealthType.ALL,
+        min_window_days: float = MIN_WINDOW_DAYS,
     ) -> dict[str, HealthCheckResult]:
         """Run database health checks."""
-        return self._call(self._client.analyze_db_health, health_type)
+        return self._call(self._client.analyze_db_health, health_type, min_window_days)
 
     def get_top_queries(
         self,
@@ -318,6 +320,10 @@ class SyncPgDebug:
         return self._call(self._client.withheld_backends)
 
     # -- Index tuning --------------------------------------------------------
+
+    def counting_windows(self) -> dict[str, dict[str, Any] | None]:
+        """How long each set of counters pg-debug argues from has been counting."""
+        return self._call(self._client.counting_windows)
 
     def analyze_workload_indexes(
         self,

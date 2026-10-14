@@ -14,6 +14,7 @@ from ..client import DATABASE_URL_ENV_VARS
 from ..client import AccessMode
 from ..context import CONFIG_FILE_NAME
 from ..health import HealthType
+from ..health.checks.index import MIN_WINDOW_DAYS
 from ..index.base import MAX_NUM_INDEX_TUNING_QUERIES
 from ..index.llm_settings import DEFAULT_LLM_MODEL
 from ..model import DEFAULT_MIN_ROWS
@@ -480,6 +481,16 @@ def build_parser() -> argparse.ArgumentParser:
             f"Exit with status {UNHEALTHY_EXIT_CODE} when a check that ran finds a problem, for use in CI. "
             "A check that could not run makes the exit status 1, unless a check that ran found a problem; "
             "with --save-baseline such a run saves nothing and exits 1."
+        ),
+    )
+    health.add_argument(
+        "--min-window-days",
+        type=float,
+        default=MIN_WINDOW_DAYS,
+        metavar="DAYS",
+        help=(
+            "Call an index unused only once the index counters have been counting this many days "
+            f"(default: {MIN_WINDOW_DAYS:g}). A crash, a failover, a restore or pg_stat_reset() starts them again."
         ),
     )
     add_baseline_arguments(health)

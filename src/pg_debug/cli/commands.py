@@ -12,6 +12,7 @@ from typing import Any
 from ..db.privileges import is_withheld
 from .render import Shown
 from .render import lock_tree_nodes
+from .render import note_statement_window
 from .render import note_withheld_backends
 from .render import note_withheld_lock_tree
 from .render import note_withheld_queries
@@ -128,8 +129,17 @@ async def _noting(
     return Shown(result, note=note(access, result))
 
 
+def _also_noting(result: Any, note: str | None) -> Any:
+    """The result with one more note for standard error."""
+    if note is None:
+        return result
+    if isinstance(result, Shown):
+        return Shown(result.rows, text=result.text, note=f"{result.note}\n{note}" if result.note else note)
+    return Shown(result, note=note)
+
+
 async def cmd_health(pg: PgDebug, args: argparse.Namespace) -> Any:
-    return await pg.analyze_db_health(args.health_type)
+    return await pg.analyze_db_health(args.health_type, min_window_days=args.min_window_days)
 
 
 async def cmd_config(pg: PgDebug, args: argparse.Namespace) -> Any:
@@ -160,7 +170,9 @@ async def cmd_model(pg: PgDebug, args: argparse.Namespace) -> Any:
 async def cmd_top_queries(pg: PgDebug, args: argparse.Namespace) -> Any:
     if args.interval is None:
         queries = await pg.get_top_queries(sort_by=args.sort_by, limit=args.limit)
-        return await _noting(pg, queries, queries, note_withheld_queries)
+        shown = await _noting(pg, queries, queries, note_withheld_queries)
+        windows = await pg.counting_windows()
+        return _also_noting(shown, note_statement_window(windows))
     sample = await pg.sample_top_queries(args.interval, sort_by=args.sort_by, limit=args.limit)
     if not sample.withheld:
         return sample.queries

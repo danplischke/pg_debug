@@ -13,6 +13,8 @@ from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
+from datetime import timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from typing import Any
@@ -839,6 +841,35 @@ def note_withheld_queries(access: StatisticsAccess, rows: Sequence[Mapping[str, 
     its = "its" if count == 1 else "their"
     whose = "is another role's" if count == 1 else "are other roles'"
     return _noting(access, [f"{count} of these queries {whose}: pg_stat_statements shows {access.role} {its} counters but not {its} text."])
+
+
+def note_statement_window(windows: Mapping[str, Any]) -> str | None:
+    """Since when ``top-queries`` totals have been counting, which they do not say themselves."""
+    window = windows.get("statements")
+    if window is None:
+        return None
+    advice = "--interval measures what runs now."
+    if not window.get("counting_since"):
+        return f"pg_stat_statements before 1.9 does not record when it was last reset, so these totals cover a span it cannot date; {advice}"
+    since = datetime.fromisoformat(window["counting_since"])
+    age = humanize.naturaldelta(timedelta(seconds=window.get("counting_seconds") or 0))
+    note = f"These totals are counts since {since:%Y-%m-%d %H:%M %Z} ({age}), when pg_stat_statements was last reset; {advice}"
+    evicted = window.get("statements_evicted")
+    if evicted:
+        note += (
+            f" It has evicted statements {evicted:,} time{'s' if evicted != 1 else ''} since to make room "
+            "(pg_stat_statements.max), so some of these have counted for less."
+        )
+    tables = windows.get("tables") or {}
+    if tables.get("counting_began_with") == "restart" and tables.get("counting_since") and tables["counting_since"] > window["counting_since"]:
+        # A crash does not move pg_stat_statements' stats_reset; it reloads
+        # what it saved at the last clean shutdown, and loses what came after.
+        discarded = datetime.fromisoformat(tables["counting_since"])
+        note += (
+            f" PostgreSQL discarded its statistics at {discarded:%Y-%m-%d %H:%M %Z} (a crash, an immediate shutdown, a failover "
+            "or a restore), and pg_stat_statements then lost what it had recorded since its last clean shutdown."
+        )
+    return note
 
 
 def note_withheld_sample(access: StatisticsAccess, withheld: int, sort_by: str) -> str | None:

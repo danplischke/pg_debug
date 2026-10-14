@@ -21,6 +21,10 @@ from .db import obfuscate_password
 from .db import privileges
 from .db.driver import check_statement_timeout
 from .db.privileges import StatisticsAccess
+from .db.statements import locate_pg_stat_statements
+from .db.window import checkpoint_window
+from .db.window import statement_window
+from .db.window import table_window
 from .errors import ConnectionFailedError
 from .errors import ExtensionRequiredError
 from .errors import InvalidArgumentError
@@ -28,6 +32,7 @@ from .errors import PgDebugError
 from .health import DatabaseHealthTool
 from .health import HealthCheckResult
 from .health import HealthType
+from .health.checks.index import MIN_WINDOW_DAYS
 from .index.base import MAX_NUM_INDEX_TUNING_QUERIES
 from .index.base import IndexTuningBase
 from .index.dta import DatabaseTuningAdvisor
@@ -703,6 +708,7 @@ class PgDebug:
     async def analyze_db_health(
         self,
         health_type: str | HealthType | Iterable[str | HealthType] = HealthType.ALL,
+        min_window_days: float = MIN_WINDOW_DAYS,
     ) -> dict[str, HealthCheckResult]:
         """Run database health checks.
 
@@ -716,6 +722,11 @@ class PgDebug:
                 ``constraint``, ``statistics``, ``table``, ``scan`` or
                 ``all`` (default). Accepts a comma-separated string or an
                 iterable.
+            min_window_days: How many days the index counters must have
+                been counting before an index they show unscanned is called
+                unused (default 7). A crash, a failover, a restore or
+                ``pg_stat_reset()`` starts them again; with less than this,
+                the unused-index check says why it did not judge.
 
         Returns:
             A mapping of check name to its :class:`HealthCheckResult`, each
@@ -726,7 +737,7 @@ class PgDebug:
         Raises:
             InvalidArgumentError: If an unknown health type is requested.
         """
-        health_tool = DatabaseHealthTool(await self.sql_driver())
+        health_tool = DatabaseHealthTool(await self.sql_driver(), min_window_days=min_window_days)
         return await health_tool.run_checks(health_type)
 
     async def get_top_queries(
@@ -830,6 +841,33 @@ class PgDebug:
             :func:`pg_debug.db.privileges.withheld_backends`.
         """
         return await privileges.withheld_backends(await self.sql_driver())
+
+    async def counting_windows(self) -> dict[str, dict[str, Any] | None]:
+        """How long each set of counters pg-debug argues from has been counting.
+
+        A counter is a count since it last started from zero: an index
+        unscanned for a year and one unscanned since a crash an hour ago look
+        the same in it. A clean restart does not start them again; a crash,
+        an immediate shutdown, a failover, a restore or a reset does. See
+        :mod:`pg_debug.db.window`.
+
+        Returns:
+            ``tables`` for this database's table and index counters,
+            ``checkpoints`` for the checkpoint counters, and ``statements``
+            for pg_stat_statements (None when it is not installed here), each
+            with ``counting_since``, ``counting_seconds`` and
+            ``counting_began_with`` (``reset``, ``restart`` or None when
+            PostgreSQL did not record it). ``statements`` also has
+            ``statements_evicted`` from pg_stat_statements 1.9 on: entries
+            evicted for new ones, which counted for less than the window.
+        """
+        driver = await self.sql_driver()
+        stats = await locate_pg_stat_statements(driver)
+        return {
+            "tables": (await table_window(driver)).to_dict(),
+            "checkpoints": (await checkpoint_window(driver)).to_dict(),
+            "statements": (await statement_window(driver, stats)).to_dict() if stats else None,
+        }
 
     # -- Index tuning --------------------------------------------------------
 

@@ -1,3 +1,5 @@
+from datetime import UTC
+from datetime import datetime
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -5,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from pg_debug.db import SqlDriver
+from pg_debug.db.window import CountingWindow
 from pg_debug.health import HealthType
 from pg_debug.health.checks.statistics import StatisticsHealthCalc
 from pg_debug.statistics import StatisticsInspector
@@ -18,6 +21,17 @@ def make_driver(rows=()):
 
 def executed_query(driver):
     return driver.execute_query.call_args[0][0]
+
+
+#: The counters, reset by pg_stat_reset() at the start of October.
+WINDOW = CountingWindow(since=datetime(2026, 10, 1, tzinfo=UTC), now=datetime(2026, 10, 8, tzinfo=UTC), began_with="reset")
+WINDOW_EVIDENCE = {"counting_since": "2026-10-01T00:00:00+00:00", "counting_seconds": 7 * 86400, "counting_began_with": "reset"}
+
+
+@pytest.fixture(autouse=True)
+def counting_for_a_week():
+    with patch("pg_debug.health.checks.statistics.table_window", AsyncMock(return_value=WINDOW)):
+        yield
 
 
 # -- Column statistics ------------------------------------------------------
@@ -110,8 +124,8 @@ async def test_statistics_check_when_everything_is_current():
 
     assert result.name == "Statistics health"
     assert result.healthy is True
-    assert result.summary == "All tables have current statistics."
-    assert result.metrics == {"stale_fraction": 0.2, "min_changed_rows": 1000}
+    assert result.summary == "All tables have current statistics, judging drift by the changes counted since 2026-10-01 00:00 UTC (7 days)."
+    assert result.metrics == {"stale_fraction": 0.2, "min_changed_rows": 1000, **WINDOW_EVIDENCE}
 
 
 @pytest.mark.asyncio
@@ -165,7 +179,7 @@ async def test_statistics_check_passes_its_thresholds_through():
         result = await calc.stale_statistics_check()
 
     stale_tables.assert_awaited_once_with(stale_fraction=0.5, min_changed_rows=10)
-    assert result.metrics == {"stale_fraction": 0.5, "min_changed_rows": 10}
+    assert result.metrics == {"stale_fraction": 0.5, "min_changed_rows": 10, **WINDOW_EVIDENCE}
 
 
 def test_statistics_is_part_of_all_checks():

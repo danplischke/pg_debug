@@ -80,7 +80,12 @@ PostgreSQL showed the connecting role: `statistics_access()` says whether it is
 shown everything and how it could be; `withheld_backends()` gives
 `in_transaction`, `locks` and `blocking` for each backend it is not; and
 `sample_top_queries(interval_seconds, ...)` returns the ranking with
-`withheld`, how many other roles' statements ran and could not be ranked. The model review is
+`withheld`, how many other roles' statements ran and could not be ranked.
+`counting_windows()` says since when the table, checkpoint and
+`pg_stat_statements` counters have counted; relay it with any cumulative
+figure, since a crash or a reset starts them again.
+`analyze_db_health(..., min_window_days=7)` is how long the index counters must
+have counted before an index is called unused. The model review is
 `review_data_model(rules=, schema=, min_rows=, proven_only=)`; each
 `ModelFinding` has `rule`, `confidence`, `severity`, `summary`, `detail`,
 `evidence`, `remediation`, `verify` and `impact_bytes`, plus `to_dict()`.

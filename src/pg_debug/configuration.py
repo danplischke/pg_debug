@@ -25,6 +25,9 @@ from typing import Any
 from .db import SafeSqlDriver
 from .db import SqlDriver
 from .db.extensions import get_postgres_version
+from .db.window import CountingWindow
+from .db.window import checkpoint_window
+from .db.window import table_window
 from .platform import Platform
 from .platform import PlatformDetection
 from .severity import SEVERITY_ORDER
@@ -169,7 +172,27 @@ class ConfigurationReviewer:
             WHERE d.datname = current_database()
             """,
         )
-        return dict(rows[0].cells) if rows else {}
+        measurements = dict(rows[0].cells) if rows else {}
+        # Each counter is a count since it last started from zero, which a
+        # crash, a failover or a reset may have done an hour ago.
+        measurements["table_window"] = await table_window(self.sql_driver)
+        measurements["checkpoint_window"] = await checkpoint_window(self.sql_driver)
+        return measurements
+
+
+# -- Counting windows -------------------------------------------------------
+
+
+def _window(measurements: dict[str, Any], name: str) -> dict[str, Any]:
+    """When the counters behind a finding started, as evidence."""
+    window = measurements.get(name)
+    return window.to_dict() if isinstance(window, CountingWindow) else {}
+
+
+def _counted(measurements: dict[str, Any], name: str) -> str:
+    """`` since 2026-10-14 21:01 UTC (3 hours)`` for a summary, or nothing when not read."""
+    window = measurements.get(name)
+    return f" {window.describe()}" if isinstance(window, CountingWindow) else ""
 
 
 # -- Units ------------------------------------------------------------------
@@ -342,14 +365,14 @@ def _work_mem(settings: dict[str, dict[str, Any]], measurements: dict[str, Any])
         current=_humanize(current),
         recommended=_humanize(max((current or 0) * 2, average)),
         severity=Severity.MEDIUM,
-        summary=f"Queries have spilled {_humanize(temp_bytes)} to disk in {temp_files:,} temporary files.",
+        summary=f"Queries have spilled {_humanize(temp_bytes)} to disk in {temp_files:,} temporary files{_counted(measurements, 'table_window')}.",
         detail=(
             f"A sort or hash that does not fit in work_mem is written to disk instead. The average spill here is "
             f"{_humanize(average)}, against a work_mem of {_humanize(current)}. Raise it carefully: the limit "
             f"applies per operation, not per query, so a complex query with several sorts can use it several "
             f"times over, and every connection can do so at once."
         ),
-        evidence={"temp_files": temp_files, "temp_bytes": temp_bytes, "average_spill_bytes": average},
+        evidence={"temp_files": temp_files, "temp_bytes": temp_bytes, "average_spill_bytes": average, **_window(measurements, "table_window")},
     )
 
 
@@ -373,7 +396,7 @@ def _checkpoints(settings: dict[str, dict[str, Any]], measurements: dict[str, An
         current=_humanize(current),
         recommended=_humanize((current or 0) * 2),
         severity=Severity.MEDIUM,
-        summary=f"{share:.0%} of checkpoints happened on request rather than on schedule.",
+        summary=f"{share:.0%} of checkpoints happened on request rather than on schedule{_counted(measurements, 'checkpoint_window')}.",
         detail=(
             f"{requested:,} checkpoints were requested against {timed:,} that came round on the timer. The usual "
             f"reason is max_wal_size filling up before checkpoint_timeout elapses, and those arrive at whatever "
@@ -382,7 +405,7 @@ def _checkpoints(settings: dict[str, dict[str, Any]], measurements: dict[str, An
             f"an explicit CHECKPOINT command, a backup and a shutdown are counted here too, so check this is "
             f"write volume before acting on it."
         ),
-        evidence={"checkpoints_timed": timed, "checkpoints_requested": requested},
+        evidence={"checkpoints_timed": timed, "checkpoints_requested": requested, **_window(measurements, "checkpoint_window")},
     )
 
 
@@ -416,6 +439,7 @@ def _shared_buffers(settings: dict[str, dict[str, Any]], measurements: dict[str,
             "blocks_read": reads,
             "blocks_hit": hits,
             "database_bytes": database_bytes,
+            **_window(measurements, "table_window"),
         },
     )
 

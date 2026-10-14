@@ -270,7 +270,9 @@ async def test_analyze_db_health_flags_a_duplicate_index(pg, tuning_table):
     await pg.execute_sql(f"CREATE INDEX {tuning_table}_status_idx ON {tuning_table} (status)")
     await pg.execute_sql(f"CREATE INDEX {tuning_table}_status_dup_idx ON {tuning_table} (status)")
 
-    results = await pg.analyze_db_health("index")
+    # The test server's counters are minutes old, which is too short a window
+    # to call an index unused unless the minimum is lowered.
+    results = await pg.analyze_db_health("index", min_window_days=0)
 
     pair = {f"{tuning_table}_status_idx", f"{tuning_table}_status_dup_idx"}
 

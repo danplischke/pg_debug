@@ -37,6 +37,7 @@ def pg_client():
         client.__aexit__ = AsyncMock(return_value=None)
         client.statistics_access = AsyncMock(return_value=MONITOR)
         client.withheld_backends = AsyncMock(return_value=[])
+        client.counting_windows = AsyncMock(return_value={"tables": None, "checkpoints": None, "statements": None})
         yield client
 
 
@@ -237,7 +238,7 @@ def test_health_renders_one_line_per_check(pg_client):
 
     assert code == 0
     assert out.splitlines()[:2] == ["Connection health: ok", "Vacuum health: ok"]
-    pg_client.analyze_db_health.assert_awaited_once_with("connection,vacuum")
+    pg_client.analyze_db_health.assert_awaited_once_with("connection,vacuum", min_window_days=7.0)
 
 
 def test_health_json_includes_findings_and_metrics(pg_client):
@@ -1466,3 +1467,70 @@ def test_a_baseline_from_another_command_is_an_error(pg_client, tmp_path):
 
     assert code == 1
     assert "baseline for `pg-debug health`, not `pg-debug model`" in err
+
+
+def test_the_window_an_unused_index_needs_is_passed_through(pg_client):
+    """A crash, a failover or pg_stat_reset() starts the counters again."""
+    pg_client.analyze_db_health = AsyncMock(return_value=health_results(("Unused index check", True, "ok", {})))
+
+    run(["health", "--type", "index", "--min-window-days", "30"])
+
+    pg_client.analyze_db_health.assert_awaited_once_with("index", min_window_days=30.0)
+
+
+def test_cumulative_top_queries_say_since_when_they_counted(pg_client):
+    """A total since a migration months ago and one since a reset this
+    morning look alike; the ranking says neither."""
+    pg_client.get_top_queries = AsyncMock(return_value=[{"query": "SELECT 1", "calls": 3}])
+    pg_client.counting_windows = AsyncMock(
+        return_value={
+            "tables": None,
+            "checkpoints": None,
+            "statements": {
+                "counting_since": "2026-10-14T09:00:00+00:00",
+                "counting_seconds": 3 * 3600,
+                "counting_began_with": "reset",
+                "statements_evicted": 12,
+            },
+        }
+    )
+
+    code, out, err = run(["--json", "top-queries"])
+
+    assert code == 0
+    assert json.loads(out) == [{"query": "SELECT 1", "calls": 3}]
+    assert "These totals are counts since 2026-10-14 09:00 UTC (3 hours), when pg_stat_statements was last reset" in err
+    assert "evicted statements 12 times since" in err
+
+
+def test_top_queries_before_pg_stat_statements_1_9_say_their_span_is_not_dated(pg_client):
+    pg_client.get_top_queries = AsyncMock(return_value=[])
+    pg_client.counting_windows = AsyncMock(
+        return_value={
+            "tables": None,
+            "checkpoints": None,
+            "statements": {"counting_since": None, "counting_seconds": None, "counting_began_with": None},
+        }
+    )
+
+    _, _, err = run(["top-queries"])
+
+    assert "does not record when it was last reset" in err
+
+
+def test_cumulative_top_queries_say_a_crash_lost_statements(pg_client):
+    """A crash leaves pg_stat_statements' stats_reset alone and loses what it
+    recorded since the last clean shutdown."""
+    pg_client.get_top_queries = AsyncMock(return_value=[])
+    pg_client.counting_windows = AsyncMock(
+        return_value={
+            "tables": {"counting_since": "2026-10-14T10:00:00+00:00", "counting_seconds": 7200, "counting_began_with": "restart"},
+            "checkpoints": None,
+            "statements": {"counting_since": "2026-10-01T00:00:00+00:00", "counting_seconds": 13 * 86400, "counting_began_with": "reset"},
+        }
+    )
+
+    _, _, err = run(["top-queries"])
+
+    assert "PostgreSQL discarded its statistics at 2026-10-14 10:00 UTC" in err
+    assert "lost what it had recorded since its last clean shutdown" in err

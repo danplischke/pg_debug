@@ -1,5 +1,7 @@
 """The sequential scan check: charged in bytes, quiet when the reading is justified."""
 
+from datetime import UTC
+from datetime import datetime
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -7,11 +9,16 @@ from unittest.mock import patch
 import pytest
 
 from pg_debug.db import SqlDriver
+from pg_debug.db.window import CountingWindow
 from pg_debug.health.checks.seq_scan import SEQ_SCAN_HEALTH
 from pg_debug.health.checks.seq_scan import SeqScanHealthCalc
 
 MiB = 1024 * 1024
 GiB = 1024 * MiB
+
+
+#: Counting since a crash at the start of September, read in October.
+WINDOW = CountingWindow(since=datetime(2026, 9, 1, tzinfo=UTC), now=datetime(2026, 10, 8, tzinfo=UTC), began_with="restart")
 
 
 def table(
@@ -33,7 +40,6 @@ def table(
         "seq_rows_read": seq_rows_read if seq_rows_read is not None else seq_scans * live_rows,
         "index_scans": index_scans,
         "last_seq_scan": last_seq_scan,
-        "counting_since": "2026-09-01 00:00:00+00",
     }
 
 
@@ -45,7 +51,10 @@ def driver(rows=()):
 
 @pytest.fixture
 def pg16():
-    with patch("pg_debug.health.checks.seq_scan.get_postgres_version", AsyncMock(return_value=16)):
+    with (
+        patch("pg_debug.health.checks.seq_scan.get_postgres_version", AsyncMock(return_value=16)),
+        patch("pg_debug.health.checks.seq_scan.table_window", AsyncMock(return_value=WINDOW)),
+    ):
         yield
 
 
@@ -129,7 +138,10 @@ async def test_the_size_threshold_is_passed_to_the_query(pg16):
 @pytest.mark.asyncio
 async def test_last_scan_is_null_before_postgres_16():
     d = driver([])
-    with patch("pg_debug.health.checks.seq_scan.get_postgres_version", AsyncMock(return_value=15)):
+    with (
+        patch("pg_debug.health.checks.seq_scan.get_postgres_version", AsyncMock(return_value=15)),
+        patch("pg_debug.health.checks.seq_scan.table_window", AsyncMock(return_value=WINDOW)),
+    ):
         await SeqScanHealthCalc(d).sequential_scan_check()
 
     query = d.execute_query.await_args.args[0]
@@ -141,5 +153,7 @@ async def test_last_scan_is_null_before_postgres_16():
 async def test_the_report_says_when_counting_started(pg16):
     result = await check([table()])
 
-    assert result.metrics["counting_since"] == "2026-09-01 00:00:00+00"
+    assert result.metrics["counting_since"] == "2026-09-01T00:00:00+00:00"
+    assert result.metrics["counting_began_with"] == "restart"
+    assert result.summary.startswith("Tables read sequentially far more than through an index, counting since 2026-09-01 00:00 UTC (a month):")
     assert "last at 2026-10-07 09:00:00+00" in result.summary

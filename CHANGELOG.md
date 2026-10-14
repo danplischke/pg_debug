@@ -154,6 +154,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are in `pg_debug.db.privileges`. `list_activity()` rows and `lock_tree()`
   nodes carry `in_transaction`.
 
+- `pg.counting_windows()`, `SyncPgDebug.counting_windows()` and
+  `health --min-window-days` (`analyze_db_health(min_window_days=)`). Every
+  finding argued from a counter is argued from what happened since the
+  counter last started from zero, and nothing said when that was. The
+  method returns, for this database's table and index counters, the
+  checkpoint counters and `pg_stat_statements`, when they started counting,
+  for how long, and whether a reset or a restart that discarded them started
+  them; for `pg_stat_statements` 1.9 and later also how often it evicted
+  entries since. The window is the later of the database's
+  `stats_reset` and `pg_stat_bgwriter.stats_reset`, which a crash, an
+  immediate shutdown, a failover or a restore moves; not the server's uptime,
+  since a clean restart keeps the counters.
+
 ### Changed
 
 - A statement that failed was logged at ERROR with its full text, so a
@@ -323,6 +336,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   withheld from too, and is told `GRANT ... WITH INHERIT TRUE` on 16 and
   later, or `ALTER ROLE ... INHERIT` on 15, rather than a grant that changes
   nothing. It works in restricted mode and on a standby.
+
+- `health` called every index in a database unused the day after a crash,
+  a failover, a restore or `pg_stat_reset()`, which starts the index
+  counters again: each had been scanned almost never, in the hours the
+  counters had. The unused-index check now reads how long they have been
+  counting and declines to judge on less than seven days, saying so and why
+  they started again; `--min-window-days` moves that. A week is a judgment:
+  it covers a weekly job, and is the shortest history DBtune asks for; no
+  source gives a figure for indexes. On PostgreSQL 16 and later a flagged
+  index carries `last_scan`. The `scan` check's `counting_since` was the
+  database's `stats_reset`, which a crash leaves NULL; it is now the same
+  window. The `index`, `scan` and `statistics` checks put the window in their
+  metrics (`counting_since`, `counting_seconds`, `counting_began_with`) and
+  in their summaries, and `config`'s spill, checkpoint and cache findings in
+  their evidence. Cumulative `top-queries` says on standard error since when
+  its totals count, how many times `pg_stat_statements` evicted entries
+  since, and, after a crash, that it lost what it had recorded since the last
+  clean shutdown, which its own reset time does not show.
 
 - After a crash or `pg_stat_reset()`, `health --type statistics` said every
   table's statistics were current, and `tune-queries` and `tune-workload`

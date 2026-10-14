@@ -372,3 +372,26 @@ async def test_a_server_with_nothing_measurably_wrong_reports_nothing():
 def test_the_hit_rate_threshold_is_a_share_not_a_percentage():
     """A rule reading 99 where it means 0.99 would fire on every server."""
     assert 0 < GOOD_CACHE_HIT_RATE < 1
+
+
+# -- Counting windows -------------------------------------------------------
+
+
+def test_a_finding_argued_from_a_counter_says_since_when_it_counted():
+    """Two gigabytes spilled is a different finding over a year and over the hour since a crash."""
+    from datetime import UTC
+    from datetime import datetime
+
+    from pg_debug.db.window import CountingWindow
+
+    since_crash = CountingWindow(since=datetime(2026, 10, 14, 9, tzinfo=UTC), now=datetime(2026, 10, 14, 12, tzinfo=UTC), began_with="restart")
+    measurements = healthy_measurements(temp_files=100, temp_bytes=MIN_TEMP_BYTES * 2, table_window=since_crash, checkpoint_window=since_crash)
+
+    spills = _work_mem(setting("work_mem", "4096", "kB"), measurements)
+    checkpoints = _checkpoints(setting("max_wal_size", "1024", "MB"), healthy_measurements(checkpoints_requested=500, checkpoint_window=since_crash))
+
+    assert spills is not None and checkpoints is not None
+    assert spills.summary.endswith("temporary files since 2026-10-14 09:00 UTC (3 hours).")
+    assert spills.evidence["counting_began_with"] == "restart"
+    assert spills.evidence["counting_seconds"] == 3 * 3600
+    assert checkpoints.evidence["counting_since"] == "2026-10-14T09:00:00+00:00"

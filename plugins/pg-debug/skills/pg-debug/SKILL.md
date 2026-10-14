@@ -83,9 +83,10 @@ recognises the platform from the URL's host and the server's own settings and
 roles, and uses it for three things only: the `fsync = off` and
 `full_page_writes = off` Neon and Lakebase run with (low notes there, when the
 `neon.timeline_id` setting, a `neon.tech` host or a Lakebase host says so), the advice on getting HypoPG, and keeping the timeout on its own side
-on an Aurora DSQL host, which refuses `statement_timeout`. Most counter-based
-findings still do not say when their counters started, while a Neon suspend, a
-failover or a point-in-time restore starts them again from zero.
+on an Aurora DSQL host, which refuses `statement_timeout`. A Neon suspend, a
+crash, a failover or a point-in-time restore starts the counters again from
+zero; `health`, `config` and `top-queries` say since when theirs count, and
+the unused-index check declines to judge on less than a week.
 Connecting also wakes a scale-to-zero compute (Neon, Aurora serverless), and
 its first timings run cold. [platforms.md](references/platforms.md) has the
 endpoints, roles and cautions for each platform.

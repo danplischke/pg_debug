@@ -67,6 +67,11 @@ class StatementStatistics:
         return self.version >= (1, 8)
 
     @property
+    def has_info(self) -> bool:
+        """1.9 records its own reset, and its evictions, in pg_stat_statements_info."""
+        return self.version >= (1, 9)
+
+    @property
     def has_toplevel(self) -> bool:
         """1.9, with PostgreSQL 14, keeps a statement run inside a function
         apart from the same statement run at top level, as two rows with the
