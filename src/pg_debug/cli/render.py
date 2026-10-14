@@ -80,7 +80,9 @@ def _with_baseline(payload: dict[str, Any], key: Key, baseline: Baseline | None)
 
 def _health_check_json(name: str, check: Any, baseline: Baseline | None) -> dict[str, Any]:
     payload = check.to_dict()
-    if baseline is None or check.healthy:
+    if baseline is None or check.healthy or check.error is not None:
+        # A check that could not run found nothing, so there is nothing to
+        # mark known or new; its "error" says why.
         return payload
     if not check.findings:
         payload["baseline"] = "known" if {"check": name} in baseline else "new"
@@ -273,10 +275,23 @@ def render_column_stats(result: Mapping[str, Any]) -> str:
 
 
 def render_health_checks(results: Mapping[str, Any], empty: str = "No health checks were performed.") -> str:
-    """Render health check results as one ``name: summary`` line per check."""
+    """Render health check results as one ``name: summary`` line per check.
+
+    A check that could not run is listed in its place, its summary saying so
+    and why, so the report shows every check that was asked for.
+    """
     if not results:
         return empty
     return "\n".join(f"{name}: {result.summary}" for name, result in results.items())
+
+
+def render_incomplete_health_run(results: Mapping[str, Any]) -> str | None:
+    """The line for stderr that says which checks could not run, if any did not."""
+    failed = [name for name, result in results.items() if result.error is not None]
+    if not failed:
+        return None
+    noun = "check" if len(results) == 1 else "checks"
+    return f"{len(failed)} of {len(results)} health {noun} could not run, so this run is incomplete: {', '.join(failed)}."
 
 
 def render_object_details(details: Mapping[str, Any]) -> str:
@@ -547,6 +562,7 @@ __all__ = [
     "render_column_stats",
     "render_configuration_review",
     "render_health_checks",
+    "render_incomplete_health_run",
     "render_index_recommendations",
     "render_index_use",
     "render_lock_tree",

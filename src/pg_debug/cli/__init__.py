@@ -23,6 +23,7 @@ from ..client import AccessMode
 from ..client import PgDebug
 from ..db import obfuscate_password
 from ..errors import PgDebugError
+from ..health import HealthCheckResult
 from ..migration import MigrationLinter
 from ..plans import diagnose_plan
 from ..severity import Severity
@@ -34,6 +35,7 @@ from .parser import parse_index_spec
 from .parser import parse_size
 from .parser import split_index_columns
 from .render import render_baseline_trailer
+from .render import render_incomplete_health_run
 from .render import to_json
 from .streams import read_sql_or_file
 from .streams import use_utf8_output
@@ -109,12 +111,12 @@ async def run(args: argparse.Namespace) -> int:
     if split is not None and not args.json:
         print(render_baseline_trailer(args.baseline, split))
 
+    if args.command == "health":
+        return _health_exit_code(args, result, split)
+
     if split is not None and getattr(args, "exit_code", False):
         # Against a baseline, only what is new can fail the build.
         return UNHEALTHY_EXIT_CODE if split.new_failures else 0
-
-    if args.command == "health" and getattr(args, "exit_code", False):
-        return UNHEALTHY_EXIT_CODE if any(not check.healthy for check in result.values()) else 0
 
     if args.command == "config" and getattr(args, "exit_code", False):
         return UNHEALTHY_EXIT_CODE if any(finding.severity is Severity.HIGH for finding in result) else 0
@@ -128,6 +130,41 @@ async def run(args: argparse.Namespace) -> int:
         return UNHEALTHY_EXIT_CODE if any(finding.severity is Severity.HIGH for finding in result) else 0
 
     return 0
+
+
+def _health_exit_code(args: argparse.Namespace, results: dict[str, HealthCheckResult], split: Partition | None) -> int:
+    """The exit status of a health run, once every check's result is printed.
+
+    In this order:
+
+    - ``UNHEALTHY_EXIT_CODE``, with ``--exit-code``, when a check that ran
+      found a problem; against a baseline, a problem the baseline does not
+      hold.
+    - 1 when any check could not run, with or without ``--exit-code``: the
+      run is incomplete, and a run that did not look everywhere cannot pass.
+    - 0 otherwise.
+
+    A problem found outranks an incomplete run. It stands whatever the checks
+    that could not run would have said, and running again will not make it go
+    away, while 1 reads as an error worth retrying. Which checks could not
+    run is said on stderr either way.
+    """
+    incomplete = render_incomplete_health_run(results)
+    if incomplete:
+        if getattr(args, "save_baseline", None):
+            incomplete += f" The baseline saved to {args.save_baseline} does not cover them."
+        print(f"{PROG}: {incomplete}", file=sys.stderr)
+
+    if getattr(args, "exit_code", False):
+        if split is not None:
+            # Against a baseline, only what is new can fail the build.
+            found = split.new_failures > 0
+        else:
+            found = any(not check.healthy and check.error is None for check in results.values())
+        if found:
+            return UNHEALTHY_EXIT_CODE
+
+    return 1 if incomplete else 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -276,6 +276,57 @@ def test_health_without_exit_code_flag_always_succeeds(pg_client):
     assert run(["health"])[0] == 0
 
 
+def could_not_run(name, error="canceling statement due to statement timeout"):
+    return (name, False, f"Could not run: {error}", {"error": error})
+
+
+def test_health_prints_every_check_and_exits_1_when_one_could_not_run(pg_client):
+    pg_client.analyze_db_health = AsyncMock(
+        return_value=health_results(
+            could_not_run("Invalid index check"),
+            ("Vacuum health", True, "ok", {}),
+        )
+    )
+
+    code, out, err = run(["health"])
+
+    assert code == 1
+    assert out.splitlines() == ["Invalid index check: Could not run: canceling statement due to statement timeout", "Vacuum health: ok"]
+    assert "1 of 2 health checks could not run, so this run is incomplete: Invalid index check." in err
+
+
+def test_health_exit_code_is_1_when_the_only_failure_is_a_check_that_could_not_run(pg_client):
+    """3 says the database has a problem; a check that did not run has not found one."""
+    pg_client.analyze_db_health = AsyncMock(return_value=health_results(could_not_run("Invalid index check"), ("Vacuum health", True, "ok", {})))
+
+    assert run(["health", "--exit-code"])[0] == 1
+
+
+def test_health_exit_code_puts_a_problem_found_before_an_incomplete_run(pg_client):
+    pg_client.analyze_db_health = AsyncMock(
+        return_value=health_results(
+            could_not_run("Invalid index check"),
+            ("Vacuum health", False, "Tables approaching transaction ID wraparound:", {}),
+        )
+    )
+
+    code, _, err = run(["health", "--exit-code"])
+
+    assert code == cli.UNHEALTHY_EXIT_CODE
+    assert "could not run" in err
+
+
+def test_health_json_carries_the_reason_a_check_could_not_run(pg_client):
+    pg_client.analyze_db_health = AsyncMock(
+        return_value=health_results(could_not_run("Replication health", "permission denied for function pg_last_wal_replay_lsn"))
+    )
+
+    code, out, _ = run(["--json", "health", "--type", "replication"])
+
+    assert code == 1
+    assert json.loads(out)["Replication health"]["error"] == "permission denied for function pg_last_wal_replay_lsn"
+
+
 def model_findings(*findings):
     """Build the list review_data_model returns."""
     return [
@@ -1162,6 +1213,36 @@ def test_json_output_marks_each_finding_against_the_baseline(pg_client, tmp_path
     assert code == 0
     findings = json.loads(out)["Index bloat"]["findings"]
     assert [(f["index"], f["baseline"]) for f in findings] == [("orders_a", "known"), ("orders_b", "new")]
+
+
+def test_a_check_that_could_not_run_is_not_saved_as_an_accepted_finding(pg_client, tmp_path):
+    """Accepting a failure to look would accept whatever the check finds once it runs."""
+    pg_client.analyze_db_health = AsyncMock(
+        return_value={**unhealthy_index_results("orders_a"), **health_results(could_not_run("Replication health"))}
+    )
+    path = tmp_path / "health.json"
+
+    code, _, err = run(["health", "--save-baseline", str(path)])
+
+    assert code == 1
+    assert json.loads(path.read_text())["findings"] == [{"check": "Index bloat", "index": "orders_a", "schema": "public", "table": "orders"}]
+    assert f"The baseline saved to {path} does not cover them." in err
+
+
+def test_against_a_baseline_an_incomplete_run_still_fails(pg_client, tmp_path):
+    """Nothing new was found, but only among the checks that ran."""
+    path = tmp_path / "health.json"
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a"))
+    run(["health", "--save-baseline", str(path)])
+    pg_client.analyze_db_health = AsyncMock(
+        return_value={**unhealthy_index_results("orders_a"), **health_results(could_not_run("Replication health"))}
+    )
+
+    code, out, err = run(["--json", "health", "--exit-code", "--baseline", str(path)])
+
+    assert code == 1
+    assert "baseline" not in json.loads(out)["Replication health"]
+    assert "1 of 3 health checks could not run" in err
 
 
 def test_model_baseline_gates_only_new_high_severity_findings(pg_client, tmp_path):

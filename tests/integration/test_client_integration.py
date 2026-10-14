@@ -260,7 +260,7 @@ async def test_analyze_db_health(pg):
         "Constraint health",
     }
     assert all(check.name == name and check.summary for name, check in results.items())
-    assert results["Connection health"].metrics["total_connections"] >= 1
+    assert results["Connection health"].metrics["client_connections"] >= 1
     # A healthy check reports nothing to act on.
     assert all(not check.findings for check in results.values() if check.healthy)
 

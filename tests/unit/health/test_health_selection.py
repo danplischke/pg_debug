@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -5,7 +6,9 @@ from unittest.mock import patch
 import pytest
 
 from pg_debug.db import SqlDriver
+from pg_debug.errors import ConnectionFailedError
 from pg_debug.errors import InvalidArgumentError
+from pg_debug.errors import QueryError
 from pg_debug.health import DatabaseHealthTool
 from pg_debug.health import HealthCheckResult
 from pg_debug.health import HealthType
@@ -82,12 +85,87 @@ async def test_health_reports_when_nothing_ran():
         assert await tool.health("vacuum") == "No health checks were performed."
 
 
+def buffer_checks(buffer_cls, index_hit_rate, table_hit_rate):
+    buffer_cls.return_value.index_hit_rate = AsyncMock(**index_hit_rate)
+    buffer_cls.return_value.table_hit_rate = AsyncMock(**table_hit_rate)
+
+
+TABLES_HEALTHY = {"return_value": HealthCheckResult(name="Buffer health for tables", healthy=True, summary="98.0%")}
+
+
 @pytest.mark.asyncio
-async def test_run_checks_propagates_driver_errors():
+async def test_a_check_that_raises_is_reported_and_the_others_still_run():
+    """A lock on one table timed out one check; the rest of the report is
+    still worth having, and the failed check says why it has no verdict."""
     tool = DatabaseHealthTool(MagicMock(spec=SqlDriver))
 
     with patch("pg_debug.health.tool.BufferHealthCalc") as buffer_cls:
-        buffer_cls.return_value.index_hit_rate = AsyncMock(side_effect=RuntimeError("connection lost"))
+        buffer_checks(buffer_cls, {"side_effect": QueryError("canceling statement due to statement timeout")}, TABLES_HEALTHY)
 
-        with pytest.raises(RuntimeError, match="connection lost"):
+        result = await tool.run_checks("buffer")
+
+    assert list(result) == ["Buffer health for indexes", "Buffer health for tables"]
+    failed = result["Buffer health for indexes"]
+    assert failed.healthy is False
+    assert failed.error == "canceling statement due to statement timeout"
+    assert failed.summary == "Could not run: canceling statement due to statement timeout"
+    assert result["Buffer health for tables"].summary == "98.0%"
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_error_is_reported_with_its_type():
+    tool = DatabaseHealthTool(MagicMock(spec=SqlDriver))
+
+    with patch("pg_debug.health.tool.BufferHealthCalc") as buffer_cls:
+        buffer_checks(buffer_cls, {"side_effect": KeyError("rate")}, TABLES_HEALTHY)
+
+        result = await tool.run_checks("buffer")
+
+    assert result["Buffer health for indexes"].error == "KeyError: 'rate'"
+    assert result["Buffer health for tables"].error is None
+
+
+@pytest.mark.asyncio
+async def test_a_password_in_an_error_is_masked():
+    tool = DatabaseHealthTool(MagicMock(spec=SqlDriver))
+
+    with patch("pg_debug.health.tool.BufferHealthCalc") as buffer_cls:
+        buffer_checks(buffer_cls, {"side_effect": QueryError("lost postgresql://app:hunter2@db/prod")}, TABLES_HEALTHY)
+
+        result = await tool.run_checks("buffer")
+
+    error = result["Buffer health for indexes"].error
+    assert error is not None and "hunter2" not in error
+
+
+@pytest.mark.asyncio
+async def test_a_failed_check_is_reported_but_cancellation_still_stops_the_run():
+    """Ctrl-C, or a caller's own timeout around the run, must not be turned
+    into one more check that could not run."""
+    tool = DatabaseHealthTool(MagicMock(spec=SqlDriver))
+
+    with patch("pg_debug.health.tool.BufferHealthCalc") as buffer_cls:
+        buffer_checks(buffer_cls, {"side_effect": QueryError("permission denied")}, {"side_effect": asyncio.CancelledError()})
+
+        with pytest.raises(asyncio.CancelledError):
             await tool.run_checks("buffer")
+
+    buffer_cls.return_value.table_hit_rate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_once_the_database_cannot_be_reached_the_remaining_checks_are_not_attempted():
+    """Each would wait out the connection timeout to fail the same way."""
+    tool = DatabaseHealthTool(MagicMock(spec=SqlDriver))
+
+    with patch("pg_debug.health.tool.BufferHealthCalc") as buffer_cls:
+        buffer_checks(buffer_cls, {"side_effect": ConnectionFailedError("Could not connect to database: refused")}, TABLES_HEALTHY)
+
+        result = await tool.run_checks("buffer")
+
+    buffer_cls.return_value.table_hit_rate.assert_not_awaited()
+    assert result["Buffer health for indexes"].error == "Could not connect to database: refused"
+    assert result["Buffer health for tables"].error == (
+        "not attempted, since the database could not be reached (Could not connect to database: refused)"
+    )
+    assert all(not check.healthy for check in result.values())

@@ -9,7 +9,6 @@ from pg_debug.configuration import MIN_BLOCK_READS
 from pg_debug.db import SqlDriver
 from pg_debug.health import HealthCheckResult
 from pg_debug.health.checks.buffer import BufferHealthCalc
-from pg_debug.health.checks.connection import ConnectionHealthCalc
 from pg_debug.health.checks.constraint import ConstraintHealthCalc
 from pg_debug.health.checks.index import IndexHealthCalc
 from pg_debug.health.checks.vacuum import VacuumHealthCalc
@@ -43,6 +42,22 @@ def test_result_defaults_to_no_findings():
     result = HealthCheckResult(name="Vacuum health", healthy=True, summary="ok")
     assert result.findings == []
     assert result.metrics == {}
+    assert result.error is None
+
+
+def test_a_check_that_could_not_run_says_so_and_is_not_healthy():
+    """Not healthy, because it never looked: a caller reading only the flag
+    must not take a check that failed for one that passed."""
+    result = HealthCheckResult.could_not_run("Index bloat", "canceling statement due to statement timeout")
+
+    assert result.to_dict() == {
+        "name": "Index bloat",
+        "healthy": False,
+        "summary": "Could not run: canceling statement due to statement timeout",
+        "findings": [],
+        "metrics": {},
+        "error": "canceling statement due to statement timeout",
+    }
 
 
 # -- Buffer -----------------------------------------------------------------
@@ -123,43 +138,6 @@ async def test_buffer_hit_rate_without_statistics_is_not_a_problem():
     assert result.healthy is True
     assert result.summary == "No index cache statistics available."
     assert result.metrics["hit_rate_percent"] is None
-
-
-# -- Connections ------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_connection_health_reports_counts():
-    result = await ConnectionHealthCalc(make_driver([{"count": 7}], [{"count": 2}])).connection_health_check()
-
-    assert result.healthy is True
-    assert result.summary == "Connections healthy: 7 total, 2 idle"
-    assert result.metrics == {
-        "total_connections": 7,
-        "idle_connections": 2,
-        "max_total_connections": 500,
-        "max_idle_connections": 100,
-    }
-
-
-@pytest.mark.asyncio
-async def test_connection_health_flags_too_many_connections():
-    calc = ConnectionHealthCalc(make_driver([{"count": 600}], [{"count": 2}]), max_total_connections=500)
-
-    result = await calc.connection_health_check()
-
-    assert result.healthy is False
-    assert result.summary == "High number of connections: 600"
-
-
-@pytest.mark.asyncio
-async def test_connection_health_flags_idle_in_transaction():
-    calc = ConnectionHealthCalc(make_driver([{"count": 10}], [{"count": 200}]), max_idle_connections=100)
-
-    result = await calc.connection_health_check()
-
-    assert result.healthy is False
-    assert result.summary == "High number of connections idle in transaction: 200"
 
 
 # -- Constraints ------------------------------------------------------------

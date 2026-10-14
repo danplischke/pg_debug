@@ -65,11 +65,13 @@ def health_keys(results: Mapping[str, HealthCheckResult]) -> list[Key]:
     Each finding becomes ``{"check": name, ...identifying fields}``. A check
     that is unhealthy without naming any object — connection count, cache
     hit rate — becomes ``{"check": name}`` on its own, since the verdict is
-    about the check itself.
+    about the check itself. A check that could not run found nothing and
+    gives no key: accepting its failure would accept whatever it would have
+    found once it ran.
     """
     keys: list[Key] = []
     for name, result in results.items():
-        if result.healthy:
+        if result.healthy or result.error is not None:
             continue
         if not result.findings:
             keys.append({"check": name})

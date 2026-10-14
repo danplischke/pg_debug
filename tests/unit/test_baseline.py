@@ -66,6 +66,15 @@ def test_health_keys_cover_findings_and_checks_that_are_unhealthy_without_any():
     assert health_keys(results) == [{"check": "Connection health"}, {"check": "Index bloat", "schema": "s", "table": "t", "index": "i"}]
 
 
+def test_a_health_check_that_could_not_run_has_no_key():
+    """It is unhealthy and names nothing, like a connection count over its
+    limit, but it found nothing: a key for it would accept whatever it finds
+    once it runs."""
+    results = {"Replication health": HealthCheckResult.could_not_run("Replication health", "permission denied")}
+
+    assert health_keys(results) == []
+
+
 def test_a_model_finding_is_the_rule_and_the_table_and_its_columns():
     assert model_finding_key(model()) == {"rule": "missing_primary_key", "schema": "public", "table": "orders", "columns": ["id"]}
 
