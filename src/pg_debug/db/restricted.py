@@ -132,21 +132,23 @@ class SafeSqlDriver(SqlDriver):
                 # Skip attributes that don't exist (this is normal in pglast)
                 continue
 
-            # Handle lists of nodes
-            if isinstance(attr, list):
-                for item in attr:
-                    if isinstance(item, Node):
-                        self._validate_node(item)
+            self._validate_children(attr)
 
-            # Handle tuples of nodes
-            elif isinstance(attr, tuple):
-                for item in attr:
-                    if isinstance(item, Node):
-                        self._validate_node(item)
+    def _validate_children(self, value: Any) -> None:
+        """Validate every node in an attribute, however deeply pglast nests it.
 
-            # Handle single nodes
-            elif isinstance(attr, Node):
-                self._validate_node(attr)
+        Some attributes are sequences of sequences: a function in FROM is
+        ``RangeFunction.functions = ((FuncCall, None),)``, and the rows of a
+        ``VALUES`` list are ``SelectStmt.valuesLists``. A walk that looked one
+        level into a sequence never reached the calls inside, so
+        ``SELECT * FROM pg_terminate_backend(...)`` ran a function the
+        allowlist refuses in the select list.
+        """
+        if isinstance(value, Node):
+            self._validate_node(value)
+        elif isinstance(value, list | tuple):
+            for item in value:
+                self._validate_children(item)
 
     def _validate(self, query: str) -> None:
         """Refuse the query unless every statement in it is read-only.
