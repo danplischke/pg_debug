@@ -1,9 +1,12 @@
 # ruff: noqa: B017
 import asyncio
 import socket
+import struct
+import threading
 import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from contextlib import contextmanager
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -272,25 +275,54 @@ def test_a_driver_needs_a_connection_or_a_url():
 # "couldn't get a connection", as a QueryError.
 
 
-def closed_port() -> int:
-    """A local port nothing listens on: connecting to it is refused at once."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+@contextmanager
+def refusing_server():
+    """A local server that answers every connection the way PostgreSQL does
+    when max_connections is reached, and yields its port.
+
+    A closed port is no stand-in: Windows does not refuse a connection to
+    one, and libpq waits out its connect_timeout there.
+    """
+    refusal = b"SFATAL\0VFATAL\0C53300\0Msorry, too many clients already\0\0"
+    listener = socket.create_server(("127.0.0.1", 0))
+
+    def answer(client: socket.socket) -> None:
+        with client:
+            while header := client.recv(4, socket.MSG_WAITALL):
+                body = client.recv(struct.unpack("!i", header)[0] - 4, socket.MSG_WAITALL)
+                if body[:4] in (struct.pack("!i", 80877103), struct.pack("!i", 80877104)):
+                    client.sendall(b"N")  # no SSL, no GSS encryption: go on in the clear
+                    continue
+                client.sendall(b"E" + struct.pack("!i", len(refusal) + 4) + refusal)
+                return
+
+    def serve() -> None:
+        while True:
+            try:
+                client, _ = listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=answer, args=(client,), daemon=True).start()
+
+    threading.Thread(target=serve, daemon=True).start()
+    try:
+        yield listener.getsockname()[1]
+    finally:
+        listener.close()
 
 
 def test_a_refused_connection_fails_at_once_with_the_reason():
-    port = closed_port()
-    pool = DbConnPool(f"postgresql://nobody@127.0.0.1:{port}/db")
-    started = time.monotonic()
+    with refusing_server() as port:
+        pool = DbConnPool(f"postgresql://nobody@127.0.0.1:{port}/db")
+        started = time.monotonic()
 
-    with pytest.raises(ConnectionFailedError) as excinfo:
-        # psycopg connects asynchronously only on a selector loop, which is
-        # not the one Windows makes by default.
-        asyncio.run(asyncio.wait_for(pool.pool_connect(), timeout=15), loop_factory=asyncio.SelectorEventLoop)
+        with pytest.raises(ConnectionFailedError) as excinfo:
+            # psycopg connects asynchronously only on a selector loop, which is
+            # not the one Windows makes by default.
+            asyncio.run(asyncio.wait_for(pool.pool_connect(), timeout=15), loop_factory=asyncio.SelectorEventLoop)
 
     assert time.monotonic() - started < 15
-    assert f"port {port} failed" in str(excinfo.value)
+    assert "sorry, too many clients already" in str(excinfo.value)
     assert "couldn't get a connection" not in str(excinfo.value)
     assert pool.pool is None
 
