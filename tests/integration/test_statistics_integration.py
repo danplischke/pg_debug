@@ -40,6 +40,14 @@ def reset_counters(url):
             time.sleep(0.1)
             conn.execute("SELECT pg_stat_clear_snapshot()")
         conn.execute("SELECT pg_stat_reset()")
+        # Before PostgreSQL 15 the statistics collector applies the reset
+        # when it gets to it; wait until it has.
+        while conn.execute("SELECT count(*) FROM pg_stat_user_tables WHERE relname = ANY(%s) AND n_tup_ins = 0", [[ANALYZED, NEVER]]).fetchone() != (
+            2,
+        ):
+            assert time.monotonic() < deadline, "the reset never reached the statistics"
+            time.sleep(0.1)
+            conn.execute("SELECT pg_stat_clear_snapshot()")
     try:
         yield
     finally:

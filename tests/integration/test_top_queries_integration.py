@@ -198,6 +198,9 @@ async def test_the_workload_is_this_database_s_read_from_where_the_extension_is(
         admin.execute("CREATE SCHEMA IF NOT EXISTS extensions")
         admin.execute("CREATE SCHEMA IF NOT EXISTS reporting")
         admin.execute("CREATE EXTENSION pg_stat_statements SCHEMA extensions")
+        # The server is shared with every other test, whose statements would
+        # otherwise outrank the few this one runs.
+        admin.execute("SELECT extensions.pg_stat_statements_reset()")
         admin.execute(f"DROP DATABASE IF EXISTS {OTHER_DATABASE}")
         admin.execute(f"CREATE DATABASE {OTHER_DATABASE}")
     other = make_conninfo(connection_string, dbname=OTHER_DATABASE)
