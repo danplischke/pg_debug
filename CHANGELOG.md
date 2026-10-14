@@ -24,9 +24,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exhaustion, collation changes after an OS upgrade and reading waits from
   one snapshot; `slow-queries.md` adds the planner pitfalls no rule names yet:
   generic plans, JIT on short queries, row-level security that looks like a
-  missing index, deep `OFFSET` pages and N+1 queries. Every PostgreSQL claim
-  in them was checked against a PostgreSQL 16 server, and every claim about a
-  platform against its documentation.
+  missing index, deep `OFFSET` pages and N+1 queries. The claims about
+  PostgreSQL were checked against a PostgreSQL 16 server; the claims about
+  platforms come from their documentation and have not been tried on them.
 
 - Python 3.14 is supported, and the package metadata says so; CI runs the
   suite on 3.12, 3.13 and 3.14, and on macOS and Windows, where the
