@@ -370,7 +370,7 @@ async def test_analyze_db_health_returns_one_entry_per_check(pg):
 @pytest.mark.parametrize(
     "sort_by,expected_method,expected_kwargs",
     [
-        ("resources", "get_top_resource_queries", {}),
+        ("resources", "get_top_resource_queries", {"limit": 5}),
         ("mean_time", "get_top_queries_by_time", {"limit": 5, "sort_by": "mean"}),
         ("total_time", "get_top_queries_by_time", {"limit": 5, "sort_by": "total"}),
     ],

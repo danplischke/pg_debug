@@ -229,3 +229,18 @@ async def test_resource_queries_pg13(mock_pg13_driver, mock_extension_installed)
     assert "mean_exec_time" in call_args, "Should use mean_exec_time for PG13"
     # wal_bytes should be the actual column for PG13
     assert "wal_bytes" in call_args, "Should use wal_bytes column for PG13"
+
+
+@pytest.mark.asyncio
+async def test_the_resource_ranking_takes_a_limit_and_ranks_by_the_largest_share(mock_pg13_driver, mock_extension_installed):
+    """--limit did nothing here, and the rows came in order of execution time."""
+    calc = TopQueriesCalc(sql_driver=mock_pg13_driver)
+
+    await calc.get_top_resource_queries(limit=3)
+    limited = str(mock_pg13_driver.execute_query.call_args)
+    await calc.get_top_resource_queries()
+    unlimited = str(mock_pg13_driver.execute_query.call_args)
+
+    assert "LIMIT 3" in limited
+    assert "LIMIT" not in unlimited
+    assert "ORDER BY GREATEST(" in limited

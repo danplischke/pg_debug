@@ -94,9 +94,9 @@ pg-debug top-queries --sort-by total_time --limit 5   # biggest total consumer
 pg-debug top-queries --interval 10                    # measure the next 10s only
 ```
 
-`resources` blends execution time, buffer access and WAL volume, and reports
-everything above a threshold — `--limit` does not apply to it in cumulative
-mode. Use `mean_time` to find individually slow queries and `total_time` to
+`resources` blends execution time, buffer access and WAL volume: it lists the
+queries over 5% of any one resource, the largest share first, up to `--limit`.
+Use `mean_time` to find individually slow queries and `total_time` to
 find what the database actually spends its life doing; they often disagree, and
 the disagreement is the interesting part.
 

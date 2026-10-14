@@ -752,9 +752,9 @@ class PgDebug:
             sort_by: ``resources`` (default) ranks by a blend of execution
                 time, buffer access and WAL volume; ``mean_time`` and
                 ``total_time`` rank by execution time.
-            limit: Number of queries to return. Ignored when ranking by
-                ``resources`` over cumulative counters, which reports every
-                query above its threshold.
+            limit: Number of queries to return. Ranked by ``resources``, they
+                are the queries over its threshold with the largest share of
+                any one resource.
             interval_seconds: Sample over this many seconds instead of
                 reporting cumulative totals. Cumulative counters cover
                 everything since statistics were last reset, which is often
@@ -779,7 +779,7 @@ class PgDebug:
         top_queries_tool = TopQueriesCalc(sql_driver=await self.sql_driver())
 
         if sort_by == "resources":
-            return await top_queries_tool.get_top_resource_queries()
+            return await top_queries_tool.get_top_resource_queries(limit=limit)
         return await top_queries_tool.get_top_queries_by_time(limit=limit, sort_by="mean" if sort_by == "mean_time" else "total")
 
     async def sample_top_queries(

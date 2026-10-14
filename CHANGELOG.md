@@ -367,6 +367,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rather than failing every statement. The README and the skill said to
   copy them with `--set`, which is no longer needed.
 
+- `top-queries --limit` did nothing in its default ranking, `resources`
+  over cumulative counters: it listed every query over 5% of any resource,
+  however many, in order of execution time, so `--limit 3` could print
+  thirty rows. It now lists the queries over the threshold with the largest
+  share of any one resource first, as `--interval` already ranked them, up to
+  `--limit`. `get_top_resource_queries()` takes `limit`.
+
 - After a crash or `pg_stat_reset()`, `health --type statistics` said every
   table's statistics were current, and `tune-queries` and `tune-workload`
   refused with "Statistics are not up-to-date", on the same database. Both

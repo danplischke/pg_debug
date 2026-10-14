@@ -504,7 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="resources",
         help="Ranking criteria (default: resources).",
     )
-    top_queries.add_argument("-n", "--limit", type=int, default=10, help="Number of queries to report when ranking by time (default: 10).")
+    top_queries.add_argument("-n", "--limit", type=int, default=10, help="Number of queries to report (default: 10).")
     top_queries.add_argument(
         "-i",
         "--interval",

@@ -347,7 +347,7 @@ class TopQueriesCalc:
         logger.info("Found %s slow queries", len(slow_queries))
         return slow_queries
 
-    async def get_top_resource_queries(self, frac_threshold: float = 0.05) -> list[dict[str, Any]]:
+    async def get_top_resource_queries(self, frac_threshold: float = 0.05, limit: int | None = None) -> list[dict[str, Any]]:
         """Reports the most time consuming queries based on a resource blend.
 
         A query is reported when it accounts for more than ``frac_threshold`` of
@@ -356,6 +356,8 @@ class TopQueriesCalc:
 
         Args:
             frac_threshold: Fraction threshold for filtering queries (default: 0.05)
+            limit: How many to return, those with the largest share of any one
+                resource first; None returns every query over the threshold.
 
         Returns:
             One dict per query with its execution, buffer and WAL statistics.
@@ -420,7 +422,17 @@ class TopQueriesCalc:
                     OR shared_blks_read_frac > {frac_threshold}
                     OR shared_blks_dirtied_frac > {frac_threshold}
                     OR total_wal_bytes_frac > {frac_threshold}
-                ORDER BY total_exec_time DESC
+                -- Ranked as a sample ranks them: by the largest share of
+                -- any one resource, so a query that dominates I/O ranks with
+                -- one that dominates time.
+                ORDER BY GREATEST(
+                    COALESCE(total_exec_time_frac, 0),
+                    COALESCE(shared_blks_accessed_frac, 0),
+                    COALESCE(shared_blks_read_frac, 0),
+                    COALESCE(shared_blks_dirtied_frac, 0),
+                    COALESCE(total_wal_bytes_frac, 0)
+                ) DESC, total_exec_time DESC
+                {"" if limit is None else f"LIMIT {int(limit)}"}
             """,
         )
 
