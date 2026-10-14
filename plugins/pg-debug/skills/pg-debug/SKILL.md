@@ -1,6 +1,6 @@
 ---
 name: pg-debug
-description: Diagnose and tune a live PostgreSQL database with the pg-debug CLI or its pg_debug Python library: why a query is slow, spilled to disk or misestimated its rows, whether an index would help (simulated with HypoPG, never created) and which to add, what is blocking a stuck database, health (bloat, unused indexes, vacuum and wraparound, stale statistics), the most expensive queries, server settings, data model defects, whether a migration will lock or rewrite a table, whether a table is worth partitioning, and what tables, columns and indexes exist. Use it whenever the user asks why Postgres is slow, stuck or blocked, about EXPLAIN plans, indexes, row-level security, schema design, migration safety, partitioning or database health, even without naming pg-debug, and when writing code against pg_debug.
+description: Diagnose and tune a live PostgreSQL database with the pg-debug CLI or its pg_debug Python library: why a query is slow, spilled to disk or misestimated its rows, whether an index would help (simulated with HypoPG, never created) and which to add, what is blocking a stuck database, health (bloat, unused indexes, vacuum and wraparound, stale statistics), the most expensive queries, server settings, data model defects, whether a migration will lock or rewrite a table, whether a table is worth partitioning, and what tables, columns and indexes exist. It also covers running it behind a connection pooler (PgBouncer, Supavisor, transaction pooling) or on a managed or serverless platform (Neon, Supabase, RDS, Aurora, Cloud SQL, AlloyDB, Azure, scale-to-zero computes), read replicas, standbys and replication slots, and whether to shard (Citus). Use it whenever the user asks why Postgres is slow, stuck or blocked, about EXPLAIN plans, indexes, row-level security, schema design, migration safety, partitioning or partition maintenance, poolers, managed Postgres, replicas, sharding or database health, even without naming pg-debug, and when writing code against pg_debug.
 ---
 
 # pg_debug
@@ -54,6 +54,31 @@ In unrestricted mode there is no timeout unless you ask for one. On a
 production database, `--timeout 10` is cheap insurance against an accidental
 sequential scan.
 
+**Behind a transaction pooler** (PgBouncer in transaction mode, Supavisor, a
+`-pooler` host), check the build first. One whose `pg-debug --help` describes
+`--search-path` as "for every statement" keeps its state inside each
+transaction and works through the pooler. One that says "to set on the
+connection", the released 0.2.0 among them, fails longer commands with
+`prepared statement "_pg3_0" already exists` and leaves its timeout, search
+path and hypothetical indexes on the pooler's backends for other clients: with
+it, connect to the direct or session endpoint.
+
+Connect as a dedicated role holding `pg_monitor` where the platform lets you
+grant it, rather than the application's login role or the platform's admin
+role; pg-debug needs no superuser. Planning a query also needs SELECT on its
+tables, and `--role` needs the connecting role to be a member of that role.
+Without `pg_read_all_stats`, which `pg_monitor` includes, other roles'
+sessions and query text are hidden, and mostly without a word.
+
+On a managed platform, identify it before relaying a finding: pg-debug does not
+detect it. It reports the `fsync = off` that Neon runs with as HIGH, judges
+connections against fixed thresholds whatever `max_connections` is, and most
+counter-based findings do not say when their counters started, while a Neon
+suspend, a failover or a point-in-time restore starts them again from zero.
+Connecting also wakes a scale-to-zero compute (Neon, Aurora serverless), and
+its first timings run cold. [platforms.md](references/platforms.md) has the
+endpoints, roles and cautions for each platform.
+
 ## Which command answers which question
 
 Run the command, then read the reference file next to this one before
@@ -75,7 +100,12 @@ and answering the question.
 | Is the schema built well? | `pg-debug model` | [schema.md](references/schema.md) |
 | Is this migration safe to run? | `pg-debug check-migration <file>` | [schema.md](references/schema.md) |
 | Should this table be partitioned? | `pg-debug partitions` | [schema.md](references/schema.md) |
+| Partition maintenance: pruning, attach and detach, pg_partman | `pg-debug explain "<query>"` against the partitioned table | [schema.md](references/schema.md) |
 | What tables, columns and indexes exist? | `pg-debug schemas`, `objects`, `describe` | below |
+| Running it behind a connection pooler (PgBouncer, Supavisor, a `-pooler` host) | `pg-debug --version` and `--help`, as Connecting says; a build that sets `--search-path` "on the connection" needs the direct or session endpoint | [platforms.md](references/platforms.md) |
+| On a managed or serverless platform (Neon, Supabase, RDS/Aurora, Cloud SQL/AlloyDB, Azure) | the connection URL's host and port, to name the platform, then the command for the question | [platforms.md](references/platforms.md) |
+| On a read replica, or about replication slots | `pg-debug health --type replication,vacuum`; the replica's own URL for the queries it runs | [scale-out.md](references/scale-out.md) |
+| Should we shard? (Citus, sharding proxies) | `pg-debug config`, `health --type vacuum`, `top-queries --interval 10` | [scale-out.md](references/scale-out.md) |
 | Writing Python that uses pg_debug | the `pg_debug` package | [python.md](references/python.md) |
 
 An empty result is an answer, not a failure: a plan whose estimates matched, a

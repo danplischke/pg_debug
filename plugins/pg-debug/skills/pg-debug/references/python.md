@@ -44,6 +44,16 @@ The client connects lazily; `await pg.connect()` first if you want a bad URL to
 fail immediately. Close it (or use the context manager) so the pool is
 released.
 
+On a scale-to-zero platform that matters more. Once connected, an open client
+keeps one pooled connection open, and an Aurora serverless instance does not
+auto-pause while any connection is open. Open a client for a piece of work and
+close it after (`async with`, `with` for `SyncPgDebug`, or `close()`) rather
+than holding one for the life of a long-running process; a pool handed in with
+`pool=` is not closed with the client, so close it too. Connecting wakes a
+suspended Neon compute and resets its idle timer, and any connection attempt,
+even one that fails to log in, resumes a paused Aurora serverless instance,
+which takes about 15 seconds. The first timings after a wake run cold.
+
 Failures raise rather than returning error strings. Catch `PgDebugError`, or
 the specific subclass — `ConnectionFailedError`, `InvalidArgumentError`,
 `ExtensionRequiredError` (has `.extension`), `ExplainPlanError`, `QueryError`

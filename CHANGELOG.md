@@ -8,6 +8,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The Claude Code skill covers what it was silent on: transaction poolers and
+  managed platforms, read replicas and replication slots, sharding, and
+  partitions once they exist. A new `platforms.md` says which endpoint to
+  use, how to tell a build that works through a pooler from one that does
+  not, which role to connect as, how long the counters behind a finding have
+  been counting, which settings Neon, Supabase, RDS, Aurora, Cloud SQL,
+  AlloyDB and Azure fix or re-tune, where pg-debug misreads them today
+  (Neon's `fsync = off` reported HIGH, its `walproposer` row taken for a
+  replica, fixed connection thresholds), and when the evidence lives outside
+  SQL. A new `scale-out.md` covers replicas, slots and logical replication,
+  and answers "should we shard?" from what the server shows, starting from
+  "not yet". `schema.md` adds pruning, lock slots and the DDL that maintains
+  partitions; `incidents.md` adds the DDL lock queue, multixact member
+  exhaustion, collation changes after an OS upgrade and reading waits from
+  one snapshot; `slow-queries.md` adds the planner pitfalls no rule names yet:
+  generic plans, JIT on short queries, row-level security that looks like a
+  missing index, deep `OFFSET` pages and N+1 queries. Every PostgreSQL claim
+  in them was checked against a PostgreSQL 16 server, and every claim about a
+  platform against its documentation.
+
 - Python 3.14 is supported, and the package metadata says so; CI runs the
   suite on 3.12, 3.13 and 3.14, and on macOS and Windows, where the
   container-backed tests skip and the rest run.

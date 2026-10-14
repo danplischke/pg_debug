@@ -1,7 +1,8 @@
 # Slow queries, plans and indexes
 
 How to read `diagnose`, `explain`, `index-use`, `column-stats` and the index
-advisor, and what each of their answers does and does not mean.
+advisor, what each of their answers does and does not mean, and the planner
+pitfalls none of them names yet.
 
 ## Diagnosing a slow query
 
@@ -181,6 +182,165 @@ Two common findings, and what they mean:
   independent selectivities for columns that are not independent. That is what
   `CREATE STATISTICS ... ON a, b FROM t` fixes — check `column-stats` first to
   see whether such an object already exists.
+
+## Planner pitfalls
+
+Five causes of slow queries that none of `diagnose`'s rules names yet. An
+empty result, or a "discarded rows" finding with the generic advice to add an
+index, does not rule them out; when the symptom fits, check by hand.
+
+### A prepared statement that slows down after a few runs
+
+Applications prepare statements without asking for it: psycopg prepares one
+once it has run five times on a connection. PostgreSQL plans a prepared
+statement's first five executions with the values given (custom plans), then
+builds a generic plan without them and compares its estimated cost with the
+custom plans' average; from then on it may run the generic one. A generic plan
+ignores the value, so it serves a skewed value badly and cannot prune
+partitions when it is planned. The symptom is a query that is fast when run by
+hand with a value and slow from the application.
+
+A generic plan shows `$1` where a custom plan shows the value. On PostgreSQL
+16 and later, `explain` plans a query written with `$1` as the generic plan,
+unless it contains `LIKE`; with a value written in, it shows the custom plan
+for that value. Compare the two:
+
+```bash
+pg-debug explain 'SELECT * FROM orders WHERE status = $1'
+pg-debug explain "SELECT * FROM orders WHERE status = 'refunded'"
+```
+
+On older servers, and always in `diagnose`, pg-debug fills `$1` from the
+column statistics instead, which gives a custom plan for a value it chose. On
+a partitioned table the generic plan lists every partition, because it was
+planned with no value at all; pg-debug cannot tell from it whether the
+application's executions prune them, so do not read the list as the
+partitions the application scans. On PostgreSQL 14 and later,
+`pg_prepared_statements` counts `generic_plans` and `custom_plans` for each
+statement; read it from the application's connection, since the view shows
+only the statements of the session that reads it.
+
+`plan_cache_mode = force_custom_plan` plans every execution with its own
+values, paying the planning time each time. The setting is read when a cached
+plan is executed, not when it is prepared, so set it where the statement runs:
+for the role (`ALTER ROLE app_user SET plan_cache_mode = force_custom_plan`) or
+in the transaction that runs it (`SET LOCAL`). Behind a transaction pooler use
+`SET LOCAL` or `set_config('plan_cache_mode', 'force_custom_plan', true)`,
+never `SET`, which stays on the server connection for the next client of the
+same role and database. Trying it with `--set` shows nothing, because pg-debug
+never executes a cached plan.
+
+### JIT on a short query
+
+JIT compiles a query when its estimated cost passes `jit_above_cost` (100,000
+by default; inlining and optimization start at 500,000). Compiling takes time
+up front: it pays off for long, CPU-bound queries and can cost a short one
+more than it saves, and because it goes by the estimate, a query whose cost is
+overestimated is compiled anyway. `diagnose` does not look at JIT, and the
+text output of `explain --analyze` leaves it out. The JSON plan has it, and
+has no `JIT` key when nothing was compiled:
+
+```bash
+pg-debug --json explain --analyze "<query>" | jq '{jit_ms: .JIT.Timing.Total, execution_ms: ."Execution Time"}'
+```
+
+When JIT is a large share of the execution time, raise `jit_above_cost` above
+the plan's `Total Cost` for the role that runs the query, rather than turning
+JIT off for the whole server. Measure the change before proposing it:
+
+```bash
+pg-debug --json explain --analyze --set jit_above_cost=<above the total cost> "<query>" | jq '{jit: .JIT, execution_ms: ."Execution Time"}'
+```
+
+`ALTER ROLE app_user SET jit_above_cost = ...` makes it stick, and `--role`
+will not pick that up afterwards (see above), so keep passing `--set` when you
+check it. Which queries in the workload are compiled shows in the `jit_*`
+columns of `pg_stat_statements` (PostgreSQL 15 and later), which `top-queries`
+does not report; read them with `pg-debug execute`.
+
+### Row-level security that looks like a missing index
+
+Two policy problems look like a missing index: `diagnose` reports rows the
+scan discarded with the advice to add one, and `tune-queries` has nothing
+useful to propose. Plan the query both as the connecting user (no `--role`),
+which bypasses the policy when it owns the table or is a superuser, and as the
+application's role (`--role`, `--set`, as above); when the scans differ, the
+policy is the cause.
+
+**A function the policy calls for every row.** A policy written
+`user_id = auth.uid()` can evaluate `auth.uid()` for every row the scan reads;
+written `user_id = (select auth.uid())`, the call runs once, as an InitPlan,
+which pg-debug's plan shows as a one-row `Result` node under the scan, with a
+parameter in the scan's filter where the call was. Measured
+on a table of 100,000 rows of which the role sees 1,000, the per-row policy
+took 83–104 ms and the rewritten one 7 ms; Supabase documents the same rewrite
+taking a query from 179 ms to 9 ms. The same holds for `auth.jwt()`, and
+Supabase's own advisor flags it as `auth_rls_initplan`. Index the column the
+policy filters on as well, and test that index with `-i`, because the advisor
+never proposes a column only the policy restricts. On Supabase the plan has to
+be taken as `authenticated`, since `postgres` bypasses RLS, and with that
+role's 8-second timeout, which `--role` does not apply:
+
+```bash
+pg-debug --timeout 8 diagnose --role authenticated --set 'request.jwt.claims={"sub":"<user uuid>","role":"authenticated"}' "<query>"
+```
+
+**A condition that is not leakproof.** PostgreSQL enforces a policy before any
+condition of the query that calls a function or operator not marked
+`LEAKPROOF`. Such a condition cannot be pushed below the policy, so an index
+on it goes unused: the plan taken without `--role` uses the index, and the
+role's plan applies the condition as a `Filter` after the policy's. `index-use` run as the
+role calls the index unused with an "unexplained" reason, and neither the
+hypothetical index it suggests nor `tune-queries` does better, for the same
+reason. Check the functions in the condition, and for an operator the function
+behind it (`pg_operator.oprcode`):
+
+```bash
+pg-debug execute "SELECT proname, proleakproof FROM pg_proc WHERE proname = 'lower'"
+```
+
+The fix is a condition built from leakproof functions and operators, or
+marking the function `LEAKPROOF` after reviewing it, which only a superuser
+can do; on a platform that grants no superuser, such as RDS or Neon, only the
+rewrite is open.
+
+### Deep pages with OFFSET
+
+`OFFSET` does not skip rows. The scan produces every row before the page and
+the `Limit` throws them away, so the node under the `Limit` reports `OFFSET`
+plus `LIMIT` actual rows, and each page costs more than the one before.
+`diagnose` does not name the `OFFSET`. On a deep page it usually finds
+nothing; when the page ends early in the table, it reports the scan under the
+`Limit` as a row overestimate instead. That finding is the `Limit` stopping
+the scan early, as any `LIMIT` does, not a bad estimate, and `ANALYZE` will
+not change it. Measure a deep page with its numbers written in: wherever
+pg-debug fills in parameters, `OFFSET $1` becomes `OFFSET 0` and `LIMIT $1`
+becomes `LIMIT 100`, which measures the first page and draws that same
+overestimate finding.
+
+The fix is keyset pagination: keep the last row's sort key and ask for the
+rows after it, with an index on that key, for example
+`WHERE id < $1 ORDER BY id DESC FETCH FIRST 10 ROWS ONLY`. Each page then
+reads only its own rows.
+
+### One cheap query called very often (N+1)
+
+Code that loads a list and then runs one query per item shows in
+`pg_stat_statements` as one template with a very high call count, a low mean
+time and a large share of the total time, often shaped
+`WHERE <foreign key> = $1`. Look for it in the live workload:
+
+```bash
+pg-debug top-queries --interval 10 --sort-by total_time
+```
+
+No call count proves it: it is an inference from counters and query text, so
+confirm it in the application's code, a query inside a loop, before reporting
+it as N+1. An index makes each call cheaper but keeps every round trip; the
+fix is in the application, fetching the set in one query, a join or one query
+over all the keys. `top-queries` reads `pg_stat_statements` for every database
+on the server, and on some platforms the platform's own queries land there
+too, so make sure the template is the application's.
 
 ## Recommending indexes
 

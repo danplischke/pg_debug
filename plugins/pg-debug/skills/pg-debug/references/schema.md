@@ -1,6 +1,6 @@
 # Schema design, migrations and partitioning
 
-Reading `model`, `check-migration` and `partitions`: what to relay, and what not to apply on trust.
+Reading `model`, `check-migration` and `partitions`, and running a partitioned table once it exists: what to relay, and what not to apply on trust.
 
 ## Reviewing the data model
 
@@ -104,6 +104,175 @@ The `ddl` is the **target shape, not a migration**. It creates a new empty
 partitioned table; it does not convert the existing one, which needs a copy, a
 constraint reconciliation and a name swap. Say that plainly rather than letting
 someone read it as a script to run against a populated table. Suggest
-`pg_partman` for creating and rolling partitions afterwards.
+`pg_partman` for creating and rolling partitions afterwards, and read the next
+section before relaying any of the conversion.
 
 If nothing is recommended, that is a finding, not a failure to find one.
+
+## Once a table is partitioned
+
+`partitions` judges plain tables only, so on a table that is already
+partitioned it says nothing. What goes wrong afterwards shows in plans, in the
+lock manager and in the DDL that maintains the partitions, and pg-debug reaches
+those through `explain`, `activity`, `check-migration` and `execute`.
+
+### Pruning
+
+Pruning "is driven only by the constraints defined implicitly by the partition
+keys, not by the presence of indexes". A query prunes only when it restricts
+the partition key; an index on another column does not narrow which
+partitions it reads. `enable_partition_pruning` (on by default) governs
+pruning at plan time and at execution alike, so check it when nothing prunes
+anywhere.
+
+The planner handles "up to a few thousand partitions fairly well" only when
+typical queries let it prune all but a few. Planning time and memory grow with
+every partition left after pruning, each session that touches a partition
+loads its metadata into its own memory, and OLTP wants fewer partitions than a
+warehouse. Count them per parent:
+
+```bash
+pg-debug --access-mode restricted execute \
+  "SELECT inhparent::regclass AS parent, count(*) AS partitions FROM pg_inherits GROUP BY inhparent ORDER BY 2 DESC"
+```
+
+Then read the plan, with the value written into the query. Pruning happens in
+three places, and pg-debug's text output shows each differently:
+
+- **At planning**, from constants: the pruned partitions are simply not in the
+  plan.
+- **When execution starts**, from values the planner did not have, such as
+  `now()` or a prepared statement's parameters: the pruned partitions are not
+  listed either, and their count is "Subplans Removed", which pg-debug prints
+  only with `--json`.
+- **During execution**, from a subquery's result or a value a nested loop
+  passes to its inner side: the partitions stay in the plan, and under
+  `explain --analyze` the ones never scanned show `Loops: 0` (PostgreSQL's own
+  text says `(never executed)`), or fewer loops than the others.
+
+An Append that lists every partition, with nothing removed, for a query that
+restricts the partition key, pruned nothing. On PostgreSQL 16, with a
+timestamp key `ts`, that was the outcome when the comparison was on an
+expression of the key (`ts::date = ...`, `date_trunc('day', ts) = ...`) and
+when it called a volatile function (`clock_timestamp()`); comparing the bare
+key, with a constant or with `now()`, pruned. Rewrite the predicate to compare
+the key itself.
+
+A generic plan is a different matter. It is planned with no values, so the
+planner prunes nothing, and the pruning moves to execution start: a prepared
+statement run with a generic plan on PostgreSQL 16 still removed every
+partition but one. What it costs is planning for every partition and, as the
+PostgreSQL documentation says, a lock on every partition at the start of each
+execution, the pruned ones included: the same statement locked all four
+partitions with a generic plan and one with a custom plan. That feeds the lock
+slot problem below. `plan_cache_mode = force_custom_plan`, set for the role or
+the transaction that runs the statement, has every execution planned with its
+own values; the server consults it when a cached plan is executed, not when it
+is prepared. A prepared statement is planned custom for its first five
+executions and may switch to a generic plan after that.
+
+Do not read pg-debug's own generic plan as the application's. Given a query
+with `$1` placeholders, `explain` plans it generically on PostgreSQL 16 and
+later (unless the query has a `LIKE`), with no value at all, so it lists every
+partition even where the application's executions prune at execution start.
+To see whether the comparison can prune, write a value in.
+[slow-queries.md](slow-queries.md) has the rest on generic plans.
+
+### Lock slots
+
+Before PostgreSQL 18 each backend has 16 fast-path lock slots. A query that
+touches more relations than that, counting partitions and their indexes, takes
+the rest of its locks through the shared lock manager, and at concurrency above
+the vCPU count that shows as `LWLock:LockManager` waits. AWS puts it
+plainly: the wait follows the number of locks that miss the fast path, not the
+number of partitions or indexes in the schema. PostgreSQL 18 sizes the fast
+path from `max_locks_per_transaction` (default 64); benchmarks on 18 found
+LockManager contention with it set to 16 and none at 64 or 128. Changing it
+needs a restart.
+
+One `activity` snapshot with `LWLock:LockManager` waits is an anecdote;
+several in a row are a pattern. Count the locks that missed the fast path:
+
+```bash
+pg-debug activity
+pg-debug --access-mode restricted execute \
+  "SELECT pid, count(*) FILTER (WHERE NOT fastpath) AS slow_path_locks, count(*) AS locks FROM pg_locks WHERE locktype = 'relation' GROUP BY pid ORDER BY 2 DESC"
+```
+
+The remedies, in order: make the query prune; drop indexes nothing uses
+(`health --type index`, read with its counting window in mind); before 18,
+keep each hot query under 16 relations; pool connections. On PostgreSQL 18,
+raising `max_locks_per_transaction` is the remaining lever.
+
+### Changing partitions without long locks
+
+- **ATTACH PARTITION** takes only SHARE UPDATE EXCLUSIVE on the parent, where
+  `CREATE TABLE ... PARTITION OF` takes ACCESS EXCLUSIVE. It scans the new
+  partition to validate its bounds while holding ACCESS EXCLUSIVE on that
+  partition, and with a DEFAULT partition it also scans the default under
+  ACCESS EXCLUSIVE. A matching CHECK constraint added beforehand lets it skip
+  the scan: on the new table, one matching its bounds; on the default, one
+  that excludes the new range. The recipe is to build and load the table, add
+  the CHECK, ATTACH, then drop the CHECK. Measured on PostgreSQL 16: a CHECK
+  added `NOT VALID` did not count, and ATTACH scanned until the constraint was
+  validated; and on a nullable key column the CHECK had to include
+  `key IS NOT NULL` before ATTACH would skip the scan.
+- **DETACH PARTITION** takes ACCESS EXCLUSIVE on the parent. `DETACH
+  PARTITION ... CONCURRENTLY`, since PostgreSQL 14, takes SHARE UPDATE
+  EXCLUSIVE instead.
+- **Indexes.** `CREATE INDEX` on a partitioned table cannot be CONCURRENTLY.
+  Create it `ON ONLY` the parent, build each partition's index with `CREATE
+  INDEX CONCURRENTLY`, and attach each with `ALTER INDEX ... ATTACH PARTITION`.
+- **Unique constraints and primary keys** must include every partition-key
+  column, with no expressions. `partitions` lists the ones that would have to
+  change as `blockers`.
+
+Put each step through `check-migration`, knowing which of them it reviews:
+
+- `ADD CONSTRAINT ... CHECK` it reports as a scan under ACCESS EXCLUSIVE, and
+  offers the `NOT VALID` form with a `VALIDATE CONSTRAINT`. On a table nothing
+  reads yet, that lock blocks nobody. If you take the `NOT VALID` form, keep its
+  `VALIDATE CONSTRAINT` before the ATTACH, or the ATTACH scans anyway.
+- `CREATE INDEX CONCURRENTLY` on a partition and `DROP CONSTRAINT` it reviews
+  correctly.
+- `CREATE INDEX ... ON ONLY` it reviews as an ordinary index build and offers a
+  `CONCURRENTLY` rewrite, which a partitioned table does not accept. Do not
+  relay that rewrite.
+- `ATTACH PARTITION`, `DETACH PARTITION`, `CREATE TABLE ... PARTITION OF` and
+  `ALTER INDEX ... ATTACH PARTITION` it does not review at all: they are missing
+  from its output and from its statement count. Its silence on them is not a
+  verdict, so relay their locks from the list above.
+
+### pg_partman
+
+pg_partman 5 uses native partitioning only, having dropped trigger-based
+partitioning in 5.0.1, and needs PostgreSQL 14 or later. Its defaults decide
+what goes wrong:
+
+- `premake` is 4: it creates four partitions ahead.
+- `infinite_time_partitions` is false, so no new time partitions are made
+  while no new data arrives.
+- Its background worker, `pg_partman_bgw`, needs `shared_preload_libraries`
+  and runs maintenance every 3600 seconds by default.
+- `retention_keep_table` is true, so expired partitions are detached, not
+  dropped.
+
+Rows with no partition to go to land in the default partition.
+`check_default()` reports them, and `partition_data_time()`,
+`partition_data_id()` and `partition_data_proc()` (in batches) move them out.
+Its documentation warns that "excessive rows in the default or any unbounded
+table can greatly affect the partition maintenance performance". pg-debug
+reads nothing of pg_partman's, so run `check_default()` before advising on a
+pg_partman set.
+
+The documentation adds three cautions: run it in UTC; unique indexes from the
+template table apply per partition, so duplicates across the set are possible
+(`check_unique_constraints.py` looks for them); and sub-partitioning gives
+little benefit for most workloads, can exhaust `max_locks_per_transaction` and
+does not support logical replication publications.
+
+### What partitioning cannot fix
+
+Partitioning "does not remove a single-primary write bottleneck", and it
+cannot let the data outgrow one instance. When the primary is limited by
+writes, the question is a different one; see [scale-out.md](scale-out.md).
