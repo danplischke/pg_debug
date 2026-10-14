@@ -278,9 +278,10 @@ class IndexTuningBase(ABC):
         )
 
         try:
-            # Every hypothetical index in this analysis has to live in one
-            # connection: HypoPG state is session-scoped, and without a pin
-            # the pool is free to hand the next statement a different one.
+            # One connection for the whole analysis, which saves borrowing one
+            # from the pool for each of its many statements. Nothing relies on
+            # it reaching one backend: each batch that creates hypothetical
+            # indexes plans with them and resets them in one transaction.
             async with self.sql_driver.session():
                 await self._run_prechecks()
 
@@ -340,9 +341,6 @@ class IndexTuningBase(ABC):
                     # Generate and evaluate index recommendations
                     recommendations: tuple[set[IndexRecommendation], float] = await self._generate_recommendations(query_weights)
                     session.recommendations = await self._format_recommendations(query_weights, recommendations)
-
-                    # Reset HypoPG only once at the end
-                    await self.sql_driver.execute_query("SELECT hypopg_reset();")
 
         except PgDebugError:
             raise

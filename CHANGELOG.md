@@ -50,8 +50,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the share of the table the predicate is expected to match. When another
   index serves the query either way, that index is named rather than the
   verdict left unexplained. Each finding is marked proven or candidate and
-  carries the statement or rewrite that addresses it. Nothing is executed;
-  in `restricted` mode the forced plan is skipped and the verdict says so.
+  carries the statement or rewrite that addresses it. Nothing is executed.
+  Sequential scans are turned off for the forced plan's own transaction, not
+  with a `SET` and a `RESET` around it, so the verdict holds behind a
+  transaction pooler, which could send the three to three backends, and
+  `restricted` mode takes the forced plan too.
 
 - `pg-debug diagnose --plan` and `PgDebug.diagnose_plan()`: diagnose a plan
   that already exists. `diagnose` had to run the query itself with
@@ -119,6 +122,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `--timeout`, restricted mode's default timeout and `--search-path` are set
+  inside each statement's transaction, with `set_config(..., true)`, instead
+  of with `SET` on each pooled connection; see the fix below for why.
+  `DbConnPool` no longer runs anything on the connections it opens, so code
+  that borrowed one from its `pool` directly gets the server's defaults;
+  `SqlDriver` applies the pool's `statement_timeout` and `search_path` to
+  every statement it runs. `SqlDriver.execute_query()` takes a `cleanup`
+  statement, run after the query in the same transaction even when the query
+  fails, for state a rollback does not undo, such as hypothetical indexes;
+  `with_context()` on either driver gives one with another query context; and
+  `session()` no longer claims that the statements it pins share a session,
+  which behind a transaction pooler they need not.
+
 - Index tuning raises instead of returning an `error` key. A failed
   `analyze_workload_indexes()` or `analyze_query_indexes()` returned
   `{"error": "..."}`, the one place the library did not raise, so
@@ -157,6 +173,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `pg_debug.index.llm_settings`, and `pg_debug.index.llm` still has them.
 
 ### Fixed
+
+- Behind a pooler that does not support prepared statements, `health`,
+  `model`, `tune-queries` and `tune-workload` failed with `prepared statement
+  "_pg3_0" already exists`, and so did a restricted-mode command that ran six
+  statements or more. psycopg prepares a statement on the server once it has
+  run five times on a connection, and behind a transaction pooler a connection
+  is not one session: the next execution, or another client's preparation of
+  the same name, reaches a different backend. Supabase documents prepared
+  statements as unsupported on Supavisor's transaction port, and the PgBouncer
+  poolers Cloud SQL, AlloyDB and Azure offer set `max_prepared_statements` to
+  0 by default. pg-debug's pool now prepares nothing.
+
+- `--timeout`, restricted mode's 30-second default and `--search-path` were
+  set with `SET` on each pooled connection. Behind a transaction pooler
+  (PgBouncer in transaction mode, Supavisor, the pooled endpoints of Neon and
+  Supabase) that reached whichever backends those statements ran on, missed
+  the ones pg-debug's later statements ran on, and stayed after pg-debug
+  exited, for the pooler's next client of the same database and role: a
+  read-only diagnostic run gave the application's sessions a 30-second
+  statement timeout. They are now set inside each statement's own
+  transaction, as the query context is, and end with it.
+
+- Hypothetical indexes outlived the command that made them. `explain
+  --hypothetical-index` never dropped its own, and the index advisor dropped
+  its own in a transaction of their own, which behind a transaction pooler may
+  reach another backend. HypoPG keeps them in the backend's memory, where the
+  next client given that backend planned with them: its plain `EXPLAIN` chose
+  `<13605>btree_orders_amount`, an index that does not exist. Every batch now
+  drops its hypothetical indexes in the transaction that created them, after
+  the plan, and when the plan fails.
 
 - The skill's Python reference ran a query with a setting by issuing
   `SET LOCAL` in a pinned session. Every statement commits on its own, so the

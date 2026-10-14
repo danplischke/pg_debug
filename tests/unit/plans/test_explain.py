@@ -493,11 +493,12 @@ async def test_the_query_is_planned_in_the_query_context(mock_sql_driver):
 
 
 @pytest.mark.asyncio
-async def test_a_plan_with_hypothetical_indexes_is_taken_in_the_query_context(mock_sql_driver):
-    """The index advisor compares these plans, so they have to be the application's."""
+async def test_a_plan_with_hypothetical_indexes_is_taken_in_the_query_context_and_resets_them(mock_sql_driver):
+    """The index advisor compares these plans, so they have to be the application's. The
+    indexes outlive the transaction, in the backend, so the same transaction resets them."""
     plan = {"Plan": {"Node Type": "Seq Scan", "Startup Cost": 0.0, "Total Cost": 1.0, "Plan Rows": 1, "Plan Width": 4}}
     mock_sql_driver.execute_query.return_value = [MockCell({"QUERY PLAN": [plan]})]
 
     await ExplainPlanTool(sql_driver=mock_sql_driver).generate_explain_plan_with_hypothetical_indexes("SELECT 1", frozenset())
 
-    assert mock_sql_driver.execute_query.await_args.kwargs == {"in_context": True}
+    assert mock_sql_driver.execute_query.await_args.kwargs == {"in_context": True, "cleanup": "SELECT hypopg_reset()"}

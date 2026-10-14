@@ -113,8 +113,8 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | --- | --- |
 | `-d, --database-url URL` | Connection URL. Defaults to `$DATABASE_URI`, then `$DATABASE_URL`. |
 | `--access-mode {unrestricted,restricted}` | `unrestricted` (default) runs any statement; `restricted` allows read-only statements only. |
-| `--timeout SECONDS` | Statement timeout. Defaults to none in unrestricted mode and 30 in restricted mode. |
-| `--search-path SCHEMAS` | Schema search path for the connection, e.g. `reporting,public`. |
+| `--timeout SECONDS` | Statement timeout for every statement. Defaults to none in unrestricted mode and 30 in restricted mode. |
+| `--search-path SCHEMAS` | Schema search path for every statement, e.g. `reporting,public`. |
 | `--llm-model MODEL` | Model for the `llm` tuning method. Defaults to `$PG_DEBUG_LLM_MODEL`, then `gpt-4o`. |
 | `--json` | Emit raw JSON instead of formatted text. |
 | `-v, --verbose` | Log at INFO, or DEBUG when repeated. |
@@ -286,9 +286,9 @@ index is used then, nothing stopped it, and the finding reports both costs and
 the share of the table the planner expects the predicate to match, which is
 the number the choice turns on. If another index serves the query either way,
 that index is named: the planner cannot be made to prefer one index over
-another. Nothing is executed; the query is planned, not run. The forced plan
-needs a `SET` for the session, which `restricted` mode does not allow, and the
-verdict says it was skipped rather than guessing.
+another. Nothing is executed; the query is planned, not run. Sequential scans
+are turned off for the forced plan's own transaction, which writes nothing, so
+`restricted` mode takes it too.
 
 `check-migration` answers a different question from the rest: not what the
 database is, but what a change will do to everyone using it while it runs. The
@@ -449,6 +449,32 @@ fails once, with PostgreSQL's reason. `--config FILE` reads another file and
   recorded query as the context's role, so queries that role may not run are
   skipped, with PostgreSQL's reason for the first.
 
+### Behind a connection pooler
+
+pg-debug works through a transaction pooler: PgBouncer in transaction mode,
+Supavisor, the pooled endpoints of Neon and Supabase, and the poolers Cloud
+SQL, AlloyDB and Azure offer. Through one, each transaction may reach a
+different server backend, and whatever a session-level command leaves in a
+backend stays there for the pooler's next client of the same database and
+role. So pg-debug keeps each piece of state in the transaction that needs it:
+
+- `--timeout`, `--search-path` and the query context are set with
+  `set_config(..., true)` inside each statement's transaction, and end with
+  it. Nothing is set for the session.
+- `index-use` turns sequential scans off for the forced plan's transaction
+  alone, rather than with a `SET` before it and a `RESET` after, which could
+  reach three backends.
+- Hypothetical indexes are created, planned with and reset in one
+  transaction, the reset running even when the plan fails, so another client's
+  plain `EXPLAIN` never plans with them.
+- pg-debug prepares no statement on the server. psycopg would otherwise
+  prepare one it had run five times, which fails behind a pooler that does not
+  support prepared statements (`prepared statement "_pg3_0" already exists`).
+
+The tests run every command that keeps state through PgBouncer in transaction
+mode with prepared statements off and round robin on, which sends each
+transaction to the next backend.
+
 SQL arguments accept `-` to read the statement from stdin:
 
 ```bash
@@ -598,19 +624,27 @@ driver = SqlDriver(engine_url="postgresql://localhost/mydb")
 checks = await DatabaseHealthTool(driver).run_checks("buffer")
 ```
 
-The driver borrows a pooled connection per statement, so session state —
-hypothetical indexes, `SET`, temp tables, advisory locks — does not survive
-from one `execute_query` to the next. `session()` pins one connection for as
-long as you need it:
+The driver borrows a pooled connection per statement and commits each
+statement on its own, so session state — hypothetical indexes, `SET`, temp
+tables, advisory locks — does not survive from one `execute_query` to the
+next. The statements in one call share a transaction, which is the only unit
+that reaches a single backend behind a transaction pooler, and a `cleanup`
+runs after them in it, even when they fail:
 
 ```python
-async with driver.session():
-    await driver.execute_query("SELECT hypopg_create_index('CREATE INDEX ON orders (user_id)')")
-    sizes = await driver.execute_query("SELECT indexname, hypopg_relation_size(indexrelid) FROM hypopg()")
+sizes = await driver.execute_query(
+    "SELECT hypopg_create_index('CREATE INDEX ON orders (user_id)');"
+    "SELECT indexname, hypopg_relation_size(indexrelid) FROM hypopg()",
+    cleanup="SELECT hypopg_reset()",
+)
 ```
 
-A pinned driver holds a single connection, so do not share it across
-concurrent tasks. Index tuning already wraps each analysis in one.
+A setting a statement needs goes in a query context, `driver.with_context(...)`,
+which applies it inside that statement's transaction. `session()` pins one
+connection to the pool for a block of statements, which saves borrowing one
+for each; on a direct connection that is also one session, but behind a
+transaction pooler it is not. A pinned driver holds a single connection, so do
+not share it across concurrent tasks.
 
 ## The LLM tuning method
 
@@ -671,8 +705,8 @@ runs on pganalyze's
 ### Known limitations
 
 - Index tuning resolves schema-qualified table names directly. Unqualified
-  names resolve through the connection's `search_path`, which `--search-path` /
-  the `search_path` option sets.
+  names resolve through the `search_path`, which `--search-path` / the
+  `search_path` option sets for every statement.
 - Index sizes come from `hypopg_relation_size()`, the planner's own estimate
   for the candidate. Where HypoPG produced no measurement, the advisor falls
   back to a formula over `pg_stats` and `pg_class.reltuples`, which is a rough

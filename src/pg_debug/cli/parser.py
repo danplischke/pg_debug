@@ -274,11 +274,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout",
         type=int,
-        help="Statement timeout in seconds. Defaults to no timeout in unrestricted mode and 30 in restricted mode.",
+        help="Statement timeout in seconds, for every statement. Defaults to no timeout in unrestricted mode and 30 in restricted mode.",
     )
     parser.add_argument(
         "--search-path",
-        help="Schema search path to set on the connection, e.g. 'reporting,public'. Index tuning resolves table names through it.",
+        help="Schema search path for every statement, e.g. 'reporting,public'. Index tuning resolves table names through it.",
     )
     parser.add_argument(
         "--llm-model",

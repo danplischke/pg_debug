@@ -82,19 +82,32 @@ async with PgDebug("postgresql://localhost/mydb", context=context) as pg:
 context = QueryContext.from_file("pg-debug.toml")   # the [context] the CLI reads
 ```
 
-Each `execute_sql` call may land on a different pooled connection, so session
-state does not carry over: a `SET`, a temp table, an advisory lock or a
-hypothetical index created in one call is not guaranteed to exist in the next,
-and a `BEGIN` will not hold. When you need several statements in one session,
-drop to the driver and pin it:
+Each `execute_sql` call may land on a different pooled connection, and behind
+a transaction pooler (PgBouncer in transaction mode, Supavisor, a `-pooler`
+host) on a different server backend, so session state does not carry over: a
+`SET`, a temp table, an advisory lock or a hypothetical index created in one
+call is not guaranteed to exist in the next, and a `BEGIN` will not hold. What
+has to share a backend has to share a transaction: put the statements in one
+`execute_query` call on the driver, and undo backend state with a `cleanup`,
+which runs in the same transaction even when the statements fail:
 
 ```python
 driver = await pg.sql_driver()
-async with driver.session():
-    await driver.execute_query("SELECT hypopg_create_index('CREATE INDEX ON orders (user_id)')")
-    rows = await driver.execute_query("EXPLAIN SELECT * FROM orders WHERE user_id = 42")
+rows = await driver.execute_query(
+    "SELECT hypopg_create_index('CREATE INDEX ON orders (user_id)');"
+    "EXPLAIN SELECT * FROM orders WHERE user_id = 42",
+    cleanup="SELECT hypopg_reset()",
+)
 ```
 
-Each statement still commits on its own, so a `SET LOCAL` ends with the
-statement that made it even in a pinned session; a `QueryContext` is the way to
-run a query with a setting.
+A setting is not a `SET` either, nor a `SET LOCAL`, which ends with the
+statement that made it: a `QueryContext` is the way to run a query with a
+setting, and `driver.with_context(context)` gives a driver that applies one.
+`driver.session()` pins one pooled connection for a block of statements; that
+is one session on a direct connection, but not behind a transaction pooler.
+
+If you build your own psycopg connection or pool for `SqlDriver(conn=...)` and
+it may go through a transaction pooler, pass `prepare_threshold=None`, as
+pg-debug's own pool does: psycopg prepares a statement it has run five times,
+and a pooler without prepared-statement support fails it with
+`prepared statement "_pg3_0" already exists`.

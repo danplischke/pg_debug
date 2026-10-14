@@ -35,7 +35,7 @@ async def test_select_statement(safe_driver, mock_sql_driver):
     """Test that simple SELECT statements are allowed"""
     query = "SELECT * FROM users WHERE age > 18"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -56,7 +56,7 @@ async def test_select_with_join(safe_driver, mock_sql_driver):
     WHERE orders.status = 'pending'
     """
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -64,7 +64,7 @@ async def test_show_variable(safe_driver, mock_sql_driver):
     """Test that SHOW statements are allowed"""
     query = "SHOW search_path"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -80,7 +80,7 @@ async def test_select_with_arithmetic(safe_driver, mock_sql_driver):
     """Test that SELECT with arithmetic expressions is allowed"""
     query = "SELECT id, price * quantity as total FROM orders"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -88,7 +88,7 @@ async def test_select_current_user(safe_driver, mock_sql_driver):
     """Test that SELECT current_user is allowed"""
     query = "SELECT current_user"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -115,7 +115,7 @@ async def test_select_with_subquery(safe_driver, mock_sql_driver):
     WHERE id IN (SELECT user_id FROM orders WHERE total > 1000)
     """
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -137,7 +137,7 @@ async def test_select_with_union(safe_driver, mock_sql_driver):
     SELECT NULL, concat(table_name) FROM information_schema.tables
     """
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -198,7 +198,7 @@ async def test_explain_plan(safe_driver, mock_sql_driver):
     WHERE age > $1 AND status = $2
     """
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -316,7 +316,7 @@ async def test_complex_index_metadata_select(safe_driver, mock_sql_driver):
     GROUP BY indexrelid, indisunique, indisprimary
     HAVING COUNT(array_agg(attname)) > 1"""
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -347,7 +347,7 @@ async def test_session_info_functions(safe_driver, mock_sql_driver):
     """Test that session info functions are allowed"""
     query = "SELECT current_user, current_database(), version()"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -355,7 +355,7 @@ async def test_blocking_pids_functions(safe_driver, mock_sql_driver):
     """Test that blocking pids functions are allowed"""
     query = "SELECT pg_blocking_pids(1234)"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -363,7 +363,7 @@ async def test_logfile_functions(safe_driver, mock_sql_driver):
     """Test that logfile functions are allowed"""
     query = "SELECT pg_current_logfile()"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -374,7 +374,7 @@ async def test_complex_session_info_queries(safe_driver, mock_sql_driver):
            pg_backend_pid(), pg_blocking_pids(pg_backend_pid())
     """
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -382,7 +382,7 @@ async def test_security_privilege_functions(safe_driver, mock_sql_driver):
     """Test that security privilege functions are allowed"""
     query = "SELECT has_table_privilege('user', 'table', 'SELECT')"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -417,7 +417,7 @@ async def test_complex_security_privilege_queries(safe_driver, mock_sql_driver):
 
     for query in queries:
         await safe_driver.execute_query(query)
-        mock_sql_driver.execute_query.assert_awaited_with(query, params=None, force_readonly=True, in_context=False)
+        mock_sql_driver.execute_query.assert_awaited_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -446,7 +446,7 @@ async def test_security_privilege_functions_with_subqueries(safe_driver, mock_sq
 
     for query in queries:
         await safe_driver.execute_query(query)
-        mock_sql_driver.execute_query.assert_awaited_with(query, params=None, force_readonly=True, in_context=False)
+        mock_sql_driver.execute_query.assert_awaited_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.parametrize("operator", ["LIKE", "ILIKE"])
@@ -463,7 +463,7 @@ async def test_like_patterns(safe_driver, mock_sql_driver, operator):
 
     for query in queries:
         await safe_driver.execute_query(query)
-        mock_sql_driver.execute_query.assert_awaited_with(query, params=None, force_readonly=True, in_context=False)
+        mock_sql_driver.execute_query.assert_awaited_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -497,7 +497,7 @@ async def test_datetime_functions(safe_driver, mock_sql_driver):
 
     for query in queries:
         await safe_driver.execute_query(query)
-        mock_sql_driver.execute_query.assert_awaited_with(query, params=None, force_readonly=True, in_context=False)
+        mock_sql_driver.execute_query.assert_awaited_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -524,7 +524,7 @@ async def test_type_conversion_functions(safe_driver, mock_sql_driver):
 
     for query in queries:
         await safe_driver.execute_query(query)
-        mock_sql_driver.execute_query.assert_awaited_with(query, params=None, force_readonly=True, in_context=False)
+        mock_sql_driver.execute_query.assert_awaited_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -532,7 +532,7 @@ async def test_regexp_functions(safe_driver, mock_sql_driver):
     """Test that regexp functions are allowed"""
     query = "SELECT regexp_replace('Hello World', 'World', 'PostgreSQL')"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -545,7 +545,7 @@ async def test_complex_type_conversion_queries(safe_driver, mock_sql_driver):
            to_number('123.45', '999.99')
     """
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -553,7 +553,7 @@ async def test_network_functions(safe_driver, mock_sql_driver):
     """Test that network functions are allowed"""
     query = "SELECT inet_client_addr(), inet_client_port()"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -566,7 +566,7 @@ async def test_network_functions_in_complex_queries(safe_driver, mock_sql_driver
            inet_server_port() as server_port
     """
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -574,7 +574,7 @@ async def test_notification_and_server_functions(safe_driver, mock_sql_driver):
     """Test that notification and server functions are allowed"""
     query = "SELECT pg_listening_channels(), pg_postmaster_start_time()"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -582,7 +582,7 @@ async def test_minmax_expressions(safe_driver, mock_sql_driver):
     """Test that minmax expressions are allowed"""
     query = "SELECT GREATEST(1, 2, 3), LEAST(1, 2, 3)"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -590,7 +590,7 @@ async def test_row_expressions(safe_driver, mock_sql_driver):
     """Test that row expressions are allowed"""
     query = "SELECT ROW(1, 2, 3) = ROW(1, 2, 3)"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -598,7 +598,7 @@ async def test_extension_check_query(safe_driver, mock_sql_driver):
     """Test that extension check queries are allowed"""
     query = "SELECT extname, extversion FROM pg_extension WHERE extname = 'hypopg'"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -606,7 +606,7 @@ async def test_create_extension_query(safe_driver, mock_sql_driver):
     """Test that CREATE EXTENSION queries are allowed"""
     query = "CREATE EXTENSION IF NOT EXISTS hypopg"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -614,7 +614,7 @@ async def test_hypopg_create_index_query(safe_driver, mock_sql_driver):
     """Test that hypopg create index queries are allowed"""
     query = "SELECT * FROM hypopg_create_index('CREATE INDEX idx ON users(id)')"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -622,7 +622,7 @@ async def test_hypopg_reset_query(safe_driver, mock_sql_driver):
     """Test that hypopg reset queries are allowed"""
     query = "SELECT * FROM hypopg_reset()"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -630,7 +630,7 @@ async def test_hypopg_list_indexes_query(safe_driver, mock_sql_driver):
     """Test that hypopg list indexes queries are allowed"""
     query = "SELECT * FROM hypopg_list_indexes()"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -638,7 +638,7 @@ async def test_pg_stat_statements_query(safe_driver, mock_sql_driver):
     """Test that pg_stat_statements queries are allowed"""
     query = "SELECT * FROM pg_stat_statements ORDER BY calls DESC LIMIT 10"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -646,7 +646,7 @@ async def test_pg_indexes_query(safe_driver, mock_sql_driver):
     """Test that pg_indexes queries are allowed"""
     query = "SELECT * FROM pg_indexes WHERE schemaname = 'public'"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -654,7 +654,7 @@ async def test_pg_stats_query(safe_driver, mock_sql_driver):
     """Test that pg_stats queries are allowed"""
     query = "SELECT * FROM pg_stats WHERE schemaname = 'public'"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -662,7 +662,7 @@ async def test_explain_query(safe_driver, mock_sql_driver):
     """Test that explain queries are allowed"""
     query = "EXPLAIN SELECT * FROM users"
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -684,7 +684,7 @@ async def test_sql_driver_parameter_format(safe_driver, mock_sql_driver):
     formatted_query = SQL(query_template).format(Literal(min_calls), Literal(min_avg_time), Literal(limit)).as_string()
 
     await safe_driver.execute_query(formatted_query)
-    mock_sql_driver.execute_query.assert_awaited_with(formatted_query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_with(formatted_query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -696,8 +696,8 @@ async def test_multiple_queries(safe_driver, mock_sql_driver):
     await safe_driver.execute_query(query2)
     mock_sql_driver.execute_query.assert_has_awaits(
         [
-            call(query1, params=None, force_readonly=True, in_context=False),
-            call(query2, params=None, force_readonly=True, in_context=False),
+            call(query1, params=None, force_readonly=True, in_context=False, cleanup=None),
+            call(query2, params=None, force_readonly=True, in_context=False, cleanup=None),
         ]
     )
 
@@ -713,7 +713,7 @@ async def test_query_with_comments(safe_driver, mock_sql_driver):
     -- Only get active users
     """
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio
@@ -728,7 +728,7 @@ async def test_query_with_whitespace(safe_driver, mock_sql_driver):
     ORDER BY  name
     """
     await safe_driver.execute_query(query)
-    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False)
+    mock_sql_driver.execute_query.assert_awaited_once_with(query, params=None, force_readonly=True, in_context=False, cleanup=None)
 
 
 @pytest.mark.asyncio

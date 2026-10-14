@@ -66,11 +66,10 @@ ORDER BY n.nspname, c.relname, a.attnum
 #: The collation text is compared under unless a column says otherwise.
 DATABASE_COLLATION_SQL = "SELECT datcollate AS collation FROM pg_database WHERE datname = current_database()"
 
-#: Take sequential scans off the table for the pinned session, and put them
-#: back. What the planner does when it cannot read the table whole is the one
-#: experiment that separates "cannot use the index" from "chose not to".
-DISABLE_SEQSCAN_SQL = "SET enable_seqscan = off"
-RESET_SEQSCAN_SQL = "RESET enable_seqscan"
+#: Sequential scans taken off the table, for one plan. What the planner does
+#: when it cannot read the table whole is the one experiment that separates
+#: "cannot use the index" from "chose not to".
+WITHOUT_SEQUENTIAL_SCANS = {"enable_seqscan": "off"}
 
 
 def predicate_as_statement(table: str, predicate: str) -> str:
@@ -85,8 +84,7 @@ def predicate_as_statement(table: str, predicate: str) -> str:
 __all__ = [
     "COLUMNS_FOR_TABLES_SQL",
     "DATABASE_COLLATION_SQL",
-    "DISABLE_SEQSCAN_SQL",
     "INDEXES_FOR_TABLES_SQL",
-    "RESET_SEQSCAN_SQL",
+    "WITHOUT_SEQUENTIAL_SCANS",
     "predicate_as_statement",
 ]

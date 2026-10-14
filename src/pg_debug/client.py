@@ -138,9 +138,11 @@ class PgDebug:
             timeout: Statement timeout in seconds, applied in both access
                 modes. Defaults to none in unrestricted mode and to
                 ``DEFAULT_RESTRICTED_TIMEOUT`` in restricted mode.
-            search_path: Schema search path to set on every connection, e.g.
+            search_path: Schema search path for every statement, e.g.
                 ``"reporting, public"``. Index tuning resolves table names
-                through it.
+                through it. It and the timeout are set inside each statement's
+                transaction, never for the session, so that behind a
+                transaction pooler neither reaches another client.
             llm_model: Model for the ``llm`` index tuning method. Defaults to
                 the ``PG_DEBUG_LLM_MODEL`` environment variable, then to
                 :data:`~pg_debug.index.llm_settings.DEFAULT_LLM_MODEL`.
@@ -416,9 +418,9 @@ class PgDebug:
         disabled: if the index is used then, nothing stopped it, and the
         finding reports both costs and the row estimate the choice rests on.
 
-        Nothing is executed; the query is planned, not run. The forced plan
-        needs a ``SET`` for the session, which restricted mode does not allow,
-        and the verdict notes that it was skipped.
+        Nothing is executed; the query is planned, not run, in restricted mode
+        too: sequential scans are disabled for the forced plan's transaction
+        alone.
 
         Args:
             sql: One SELECT, UPDATE or DELETE.

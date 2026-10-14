@@ -22,6 +22,7 @@ nothing. Three groups do talk to PostgreSQL:
 | Tests | Requirement | Skipped when |
 | --- | --- | --- |
 | `tests/integration/`, `tests/unit/plans/test_explain_real_db.py`, `tests/unit/health/test_health_tool.py` | Docker — a `postgres:12`, `postgres:15` and `postgres:16` container per test class | Docker is unavailable |
+| `tests/integration/test_pooler_integration.py` | Docker — one `postgres:16` container with PgBouncer started inside it, in transaction mode, without prepared statements and with round robin, as `PGBOUNCER_INI` in `utils.py` configures it | Docker is unavailable |
 | `tests/integration/test_client_integration.py` | `PG_DEBUG_TEST_DATABASE_URI` pointing at any server you already have | The variable is unset |
 
 The end-to-end client/CLI tests are the ones that do not need Docker:

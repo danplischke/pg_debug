@@ -83,8 +83,9 @@ the plan it chose against the plan with sequential scans disabled and the
 share of the table the predicate is expected to match — above a few percent a
 sequential scan is cheaper and no index on that column will be chosen. When
 another index is used either way, it names that index. Each finding carries
-the statement or rewrite that addresses it. It works in restricted mode, where
-the forced-plan step is skipped and the verdict says so.
+the statement or rewrite that addresses it. It works in restricted mode too:
+sequential scans are turned off for the forced plan's own transaction, which
+writes nothing.
 
 An index only helps a predicate it matches: to speed up `WHERE lower(email) =
 ...` the index has to be on `lower(email)`, not on `email`. PostgreSQL will

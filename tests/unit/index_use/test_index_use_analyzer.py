@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from pg_debug import QueryContext
 from pg_debug.db import SafeSqlDriver
 from pg_debug.db import SqlDriver
 from pg_debug.errors import InvalidArgumentError
@@ -57,47 +58,66 @@ def scan(node_type="Seq Scan", relation="orders", index=None, plan_rows=1000, co
     return [{"Plan": node}]
 
 
-def driver(indexes, columns, plan, forced_plan=None, stale=(), collation="en_US.UTF-8", restricted=False):
-    """A driver answering each query the analysis makes by what it contains."""
-    inner = MagicMock(spec=SqlDriver)
-    state = {"seqscan": True}
+def driver(indexes, columns, plan, forced_plan=None, stale=(), collation="en_US.UTF-8", restricted=False, context=None):
+    """A driver answering each query the analysis makes by what it contains.
 
-    async def execute(query, *args, **kwargs):
-        if "pg_index i" in query:
-            return [SqlDriver.RowResult(cells=row) for row in indexes]
-        if "pg_attribute a" in query:
-            return [SqlDriver.RowResult(cells=row) for row in columns]
-        if query.startswith("EXPLAIN"):
-            chosen = plan if state["seqscan"] or forced_plan is None else forced_plan
-            return [SqlDriver.RowResult(cells={"QUERY PLAN": chosen})]
-        if "enable_seqscan = off" in query:
-            state["seqscan"] = False
+    An EXPLAIN run in a context that turns sequential scans off gets the
+    forced plan; the context is the only way a setting reaches a plan. Every
+    driver ``with_context`` makes records into the same log.
+    """
+    log: list[tuple[str, bool, QueryContext | None]] = []
+
+    def make(context: QueryContext | None) -> Any:
+        inner = MagicMock(spec=SqlDriver)
+        inner.context = context
+
+        async def execute(query, *args, in_context=False, **kwargs):
+            applied = context if in_context else None
+            log.append((query, in_context, applied))
+            if "pg_index i" in query:
+                return [SqlDriver.RowResult(cells=row) for row in indexes]
+            if "pg_attribute a" in query:
+                return [SqlDriver.RowResult(cells=row) for row in columns]
+            if query.startswith("EXPLAIN"):
+                forced = applied is not None and applied.settings.get("enable_seqscan") == "off"
+                chosen = forced_plan if forced and forced_plan is not None else plan
+                return [SqlDriver.RowResult(cells={"QUERY PLAN": chosen})]
+            if "datcollate" in query:
+                return [SqlDriver.RowResult(cells={"collation": collation})]
+            if "pg_stat_user_tables" in query:
+                return [SqlDriver.RowResult(cells=row) for row in stale]
             return []
-        if "RESET enable_seqscan" in query:
-            state["seqscan"] = True
-            return []
-        if "datcollate" in query:
-            return [SqlDriver.RowResult(cells={"collation": collation})]
-        if "pg_stat_user_tables" in query:
-            return [SqlDriver.RowResult(cells=row) for row in stale]
-        return []
 
-    inner.execute_query = AsyncMock(side_effect=execute)
+        inner.execute_query = AsyncMock(side_effect=execute)
+        inner.with_context = make
+        inner.log = log
 
-    @asynccontextmanager
-    async def session():
-        yield inner
+        @asynccontextmanager
+        async def session():
+            yield inner
 
-    inner.session = session
-    inner.queries = inner.execute_query
+        inner.session = session
+        return inner
+
+    inner = make(context)
     if restricted:
         return SafeSqlDriver(inner)
     return inner
 
 
-def asked(d):
+def log(d) -> list[tuple[str, bool, QueryContext | None]]:
+    """Each query, whether it was asked to run in context, and the context it ran in."""
     inner: Any = d.sql_driver if isinstance(d, SafeSqlDriver) else d
-    return [call.args[0] for call in inner.execute_query.await_args_list]
+    return inner.log
+
+
+def asked(d) -> list[str]:
+    return [query for query, _, _ in log(d)]
+
+
+def forced_explains(d) -> list[QueryContext]:
+    """The contexts the EXPLAINs with sequential scans off ran in."""
+    return [c for query, _, c in log(d) if query.startswith("EXPLAIN") and c is not None and c.settings.get("enable_seqscan") == "off"]
 
 
 async def analyze(d, sql, index=None):
@@ -116,7 +136,7 @@ async def test_an_index_the_plan_reads_is_reported_used_with_its_node():
     assert verdict.used is True
     assert verdict.node_type == "Index Scan"
     assert verdict.findings == []
-    assert not any("enable_seqscan" in q for q in asked(d)), "nothing to force when every index is used"
+    assert forced_explains(d) == [], "nothing to force when every index is used"
 
 
 # -- Structural reasons -----------------------------------------------------
@@ -396,24 +416,40 @@ async def test_another_index_the_planner_prefers_is_named():
 
 
 @pytest.mark.asyncio
-async def test_restricted_mode_skips_the_forced_plan_and_says_so():
-    d = driver([index_row("orders_status", ["status"])], column_rows("id", "status"), scan(), restricted=True)
+async def test_restricted_mode_takes_the_forced_plan_too():
+    """Sequential scans go off for the EXPLAIN's transaction alone, which writes nothing."""
+    forced = scan("Index Scan", index="orders_status", plan_rows=60_000, cost=4_200.0)
+    d = driver([index_row("orders_status", ["status"])], column_rows("id", "status"), scan(), forced_plan=forced, restricted=True)
 
     (verdict,) = await analyze(d, "SELECT * FROM orders WHERE status = 'open'")
 
-    assert verdict.findings == []
-    assert len(verdict.notes) == 1 and "restricted mode" in verdict.notes[0]
-    assert not any("enable_seqscan" in q for q in asked(d))
+    (finding,) = verdict.findings
+    assert finding.reason is IndexUseReason.PLANNER_PREFERRED_OTHER
+    assert verdict.notes == []
 
 
 @pytest.mark.asyncio
-async def test_the_forced_plan_always_resets_the_setting():
+async def test_the_forced_plan_turns_sequential_scans_off_in_its_own_transaction():
+    """Not with a SET before it and a RESET after: three transactions, which a
+    transaction pooler may send to three backends."""
     d = driver([index_row("orders_status", ["status"])], column_rows("id", "status"), scan(), forced_plan=scan())
 
     await analyze(d, "SELECT * FROM orders WHERE status = 'open'")
 
-    queries = asked(d)
-    assert queries.index("SET enable_seqscan = off") < queries.index("RESET enable_seqscan")
+    assert len(forced_explains(d)) == 1
+    assert not any(query.lstrip().upper().startswith(("SET", "RESET")) for query in asked(d))
+
+
+@pytest.mark.asyncio
+async def test_the_forced_plan_keeps_the_query_context():
+    """Planned as the application, with sequential scans off as well."""
+    app = QueryContext(role="app_user", settings={"app.tenant_id": "t7"})
+    d = driver([index_row("orders_status", ["status"])], column_rows("id", "status"), scan(), forced_plan=scan(), context=app)
+
+    await analyze(d, "SELECT * FROM orders WHERE status = 'open'")
+
+    (context,) = forced_explains(d)
+    assert context == app.with_overrides(settings={"enable_seqscan": "off"})
 
 
 # -- Selecting and refusing -------------------------------------------------
@@ -469,10 +505,8 @@ async def test_the_plans_are_taken_in_the_query_context_and_the_catalog_is_read_
 
     await analyze(d, "SELECT * FROM orders WHERE status = 'open'")
 
-    inner: Any = d
-    calls = inner.execute_query.await_args_list
-    in_context = [call.args[0] for call in calls if call.kwargs.get("in_context")]
-    outside = [call.args[0] for call in calls if not call.kwargs.get("in_context")]
+    in_context = [query for query, asked_for, _ in log(d) if asked_for]
+    outside = [query for query, asked_for, _ in log(d) if not asked_for]
     assert len(in_context) == 2, "the plan and the plan with sequential scans disabled"
     assert all(query.startswith("EXPLAIN") for query in in_context)
     assert not any(query.startswith("EXPLAIN") for query in outside)

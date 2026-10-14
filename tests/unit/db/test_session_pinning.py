@@ -48,7 +48,7 @@ class RecordingDriver(SqlDriver):
         self.connections_used = []
         self.executed = []
 
-    async def _execute_with_connection(self, connection, query, params, force_readonly, in_context=False):
+    async def _execute_with_connection(self, connection, query, params, force_readonly, in_context=False, cleanup=None):
         self.connections_used.append(connection)
         self.executed.append(query)
         return None
@@ -171,7 +171,7 @@ class FailingDriver(SqlDriver):
         self.failing_query = failing_query
         self.rollbacks = 0
 
-    async def _execute_with_connection(self, connection, query, params, force_readonly, in_context=False):
+    async def _execute_with_connection(self, connection, query, params, force_readonly, in_context=False, cleanup=None):
         # The statement arrives tagged, so match on what the caller asked for.
         if self.failing_query in query:
             raise RuntimeError("operator does not exist: information_schema.character_data = integer")

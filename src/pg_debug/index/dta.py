@@ -19,6 +19,7 @@ from ..errors import IndexTuningError
 from ..parsing import ColumnCollector
 from ..parsing import TableAliasVisitor
 from ..parsing import resolve_table_reference
+from ..queries.hypopg import HYPOPG_RESET_SQL
 from .base import DEFAULT_WRITE_WEIGHT
 from .base import IndexRecommendation
 from .base import IndexTuningBase
@@ -191,13 +192,14 @@ class DatabaseTuningAdvisor(IndexTuningBase):
         self.dta_trace(f"Filtered to {len(condition_filtered)} after removing long text columns.")
         # Batch create all hypothetical indexes and store their size estimates.
         #
-        # The creates and the measurement go in one round trip on purpose.
-        # Hypothetical indexes live in the session that created them, and the
-        # connection pool does not promise the next statement the same session
-        # — measuring in a second call can land on another connection and see
-        # no indexes at all, which would silently make every candidate look
-        # free. Only the last statement's results come back, so the size query
-        # goes last.
+        # The creates and the measurement go in one transaction on purpose.
+        # Hypothetical indexes live in the backend that created them, and
+        # neither the connection pool nor a transaction pooler in front of the
+        # server promises the next statement the same backend — measuring in a
+        # second call can land on another and see no indexes at all, which
+        # would silently make every candidate look free. Only the last
+        # statement's results come back, so the size query goes last, and the
+        # reset runs after it in the same transaction.
         if len(condition_filtered) > 0:
             create_and_measure = (
                 SafeSqlDriver.param_sql_to_query(
@@ -206,7 +208,7 @@ class DatabaseTuningAdvisor(IndexTuningBase):
                 )
                 + HYPOTHETICAL_INDEX_SIZES_SQL
             )
-            result = await self.sql_driver.execute_query(cast(LiteralString, create_and_measure))
+            result = await self.sql_driver.execute_query(cast(LiteralString, create_and_measure), cleanup=HYPOPG_RESET_SQL)
             if result is not None:
                 index_map = {r.cells["index_name"]: r.cells["index_size"] for r in result}
                 for idx in condition_filtered:
@@ -216,11 +218,6 @@ class DatabaseTuningAdvisor(IndexTuningBase):
                         # the size budget and the reported size all use it
                         # instead of the pg_stats guess.
                         self.record_measured_index_size(idx.table, idx.columns, idx.estimated_size_bytes)
-
-            # Best effort: this may run on a different connection, but every
-            # explain issues its own hypopg_reset() first, so stale hypothetical
-            # indexes cannot leak into a plan.
-            await self.sql_driver.execute_query("SELECT hypopg_reset();")
         return condition_filtered
 
     async def _enumerate_greedy(

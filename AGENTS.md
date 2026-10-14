@@ -70,6 +70,18 @@ above need nothing else.
   pg-debug's own catalog reads do not: the context's role may not be allowed
   them, and row-level security hides statistics from it. A new feature that
   runs the user's SQL marks it the same way.
+- **A transaction is the only session there is.** Behind a transaction
+  pooler (PgBouncer, Supavisor, Neon's and Supabase's pooled endpoints) each
+  transaction may reach a different backend, and whatever one leaves in its
+  backend stays for the pooler's next client. So nothing pg-debug needs may
+  outlive the statement that needs it: a setting goes in the query context
+  (`driver.with_context(...)`), never a `SET`; statements that share backend
+  state go in one `execute_query` call, and state a rollback does not undo,
+  such as hypothetical indexes, is undone by its `cleanup`. `session()` saves
+  borrowing connections; it does not make a session. Nothing is prepared on
+  the server. `tests/integration/test_pooler_integration.py` runs the commands
+  through PgBouncer with round robin, and a new command that keeps state
+  belongs there too.
 - **Restricted mode is a promise.** Anything that is not read-only is refused
   before it reaches the server, and runs in a read-only transaction with a
   statement timeout. A new feature that needs to write must refuse in

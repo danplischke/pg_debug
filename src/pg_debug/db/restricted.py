@@ -5,6 +5,7 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 from typing import Any
 from typing import ClassVar
 from typing import LiteralString
@@ -28,6 +29,9 @@ from ..errors import QueryError
 from . import allowlist
 from .driver import QUERY_MARKER
 from .driver import SqlDriver
+
+if TYPE_CHECKING:
+    from ..context import QueryContext
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +71,15 @@ class SafeSqlDriver(SqlDriver):
         """
         self.sql_driver = sql_driver
         self.timeout = timeout
+
+    @property
+    def context(self) -> QueryContext | None:
+        """The wrapped driver's query context, which is the one that is applied."""
+        return self.sql_driver.context
+
+    def with_context(self, context: QueryContext | None) -> SafeSqlDriver:
+        """The same restrictions over the wrapped driver with another query context."""
+        return SafeSqlDriver(self.sql_driver.with_context(context), timeout=self.timeout)
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[SqlDriver]:
@@ -178,15 +191,19 @@ class SafeSqlDriver(SqlDriver):
         force_readonly: bool = True,  # do not use value passed in
         *,
         in_context: bool = False,
+        cleanup: LiteralString | None = None,
     ) -> list[SqlDriver.RowResult] | None:  # noqa: UP007
         """Execute a query after validating it is safe.
 
         The query context, with ``in_context``, is applied by the wrapped
         driver after the query has passed: it is pg-debug's own statement,
         and it sets a role and settings, which writes nothing. The settings
-        restricted mode depends on are ones a context cannot hold.
+        restricted mode depends on are ones a context cannot hold. A
+        ``cleanup`` is validated like the query.
         """
         self._validate(query)
+        if cleanup is not None:
+            self._validate(cleanup)
 
         # NOTE: Always force readonly=True in SafeSqlDriver regardless of what was passed
         if self.timeout:
@@ -199,6 +216,7 @@ class SafeSqlDriver(SqlDriver):
                         params=params,
                         force_readonly=True,
                         in_context=in_context,
+                        cleanup=cleanup,
                     )
             except TimeoutError as e:
                 logger.warning("Query execution timed out after %s seconds: %s...", self.timeout, query[:100])
@@ -215,6 +233,7 @@ class SafeSqlDriver(SqlDriver):
                 params=params,
                 force_readonly=True,
                 in_context=in_context,
+                cleanup=cleanup,
             )
 
     async def execute_query_and_rollback(

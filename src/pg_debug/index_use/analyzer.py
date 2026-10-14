@@ -25,6 +25,7 @@ from typing import Any
 from typing import LiteralString
 from typing import cast
 
+from ..context import QueryContext
 from ..db import SafeSqlDriver
 from ..db import SqlDriver
 from ..errors import ExplainPlanError
@@ -38,9 +39,8 @@ from ..severity import Confidence
 from ..statistics import StatisticsInspector
 from .catalog import COLUMNS_FOR_TABLES_SQL
 from .catalog import DATABASE_COLLATION_SQL
-from .catalog import DISABLE_SEQSCAN_SQL
 from .catalog import INDEXES_FOR_TABLES_SQL
-from .catalog import RESET_SEQSCAN_SQL
+from .catalog import WITHOUT_SEQUENTIAL_SCANS
 from .catalog import predicate_as_statement
 from .predicates import Predicate
 from .predicates import QueryPredicates
@@ -179,19 +179,20 @@ class IndexUseAnalyzer:
             raise ExplainPlanError(f"Could not plan the query: {e}") from e
 
     async def _forced_plan(self, sql: str) -> tuple[ExplainPlanArtifact | None, str | None]:
-        """The plan with sequential scans disabled, or why there is none."""
-        if isinstance(self.sql_driver, SafeSqlDriver):
-            return None, (
-                "Whether the planner *could* have used the index was not tested: that takes a SET for the session, "
-                "which restricted mode does not allow. Run in unrestricted mode to see the plan with sequential scans disabled."
-            )
+        """The plan with sequential scans disabled, or why there is none.
+
+        The setting goes in the query context, which applies it inside the
+        EXPLAIN's own transaction. A SET before the EXPLAIN and a RESET after
+        it would be three transactions, which a transaction pooler may send to
+        three backends: the EXPLAIN would plan with sequential scans enabled,
+        and the SET would stay on a backend another client is given next. It
+        also lets restricted mode run it, since nothing but the setting
+        changes, and only for the transaction.
+        """
+        context = self.sql_driver.context or QueryContext()
+        forced = self.sql_driver.with_context(context.with_overrides(settings=WITHOUT_SEQUENTIAL_SCANS))
         try:
-            async with self.sql_driver.session() as pinned:
-                try:
-                    await pinned.execute_query(cast(LiteralString, DISABLE_SEQSCAN_SQL))
-                    return await self._plan(pinned, sql), None
-                finally:
-                    await pinned.execute_query(cast(LiteralString, RESET_SEQSCAN_SQL))
+            return await self._plan(forced, sql), None
         except Exception as e:
             logger.debug("Could not plan with sequential scans disabled: %s", e)
             return None, f"The plan with sequential scans disabled could not be taken: {e}"

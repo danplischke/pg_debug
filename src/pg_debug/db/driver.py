@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
 from collections.abc import AsyncIterator
@@ -17,7 +18,6 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.sql import SQL
 from psycopg.sql import Composed
-from psycopg.sql import Identifier
 from psycopg.sql import Literal
 from psycopg_pool import AsyncConnectionPool
 
@@ -113,52 +113,59 @@ def _rejected(error: psycopg.Error) -> QueryError:
     return QueryError(str(error))
 
 
-def build_session_setup(
-    search_path: str | None = None,
+#: The savepoint a statement with a cleanup runs after, so that the cleanup can
+#: run in the same transaction when the statement fails.
+CLEANUP_SAVEPOINT = "pg_debug_cleanup"
+
+
+def _quoted_identifier(name: str) -> str:
+    """A name as PostgreSQL writes it double-quoted, which is how a search path holds it."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def build_transaction_setup(
     statement_timeout: int | None = None,
-) -> list[Composed] | None:
-    """Build the SET statements to run on every pooled connection.
+    search_path: str | None = None,
+    context: QueryContext | None = None,
+) -> Composed | None:
+    """The statement that applies pg-debug's settings to the transaction it runs in.
+
+    Everything goes through ``set_config(name, value, true)``, and the role
+    through ``set_config('role', ...)``, which is ``SET LOCAL ROLE``, so all of
+    it ends with the transaction. A session-level ``SET`` would not: behind a
+    transaction pooler the session belongs to whichever client the pooler
+    gives the backend next, and the setting would reach only the backend that
+    ran it, and stay there.
+
+    The role comes last: PostgreSQL evaluates the select list in order, so a
+    setting only the connecting user may change is set before the switch to
+    a role that may not. Names and values go in as literals psycopg quotes,
+    never as text pasted into the statement.
 
     Args:
+        statement_timeout: In seconds. 0 disables it.
         search_path: Comma-separated schema names, e.g. ``"reporting, public"``.
-        statement_timeout: Statement timeout in seconds. 0 disables it.
+        context: The query context, for a statement that runs or plans the
+            user's query.
 
     Returns:
-        The statements to run, or None when there is nothing to configure.
+        The statement, or None when there is nothing to apply.
     """
-    statements: list[Composed] = []
-
-    if search_path:
-        schemas = [s.strip() for s in search_path.split(",") if s.strip()]
-        if schemas:
-            # Identifier quotes each schema, which is also correct for the
-            # special "$user" entry.
-            statements.append(SQL(QUERY_MARKER + " SET search_path TO {}").format(SQL(", ").join(Identifier(s) for s in schemas)))
-
+    settings: list[tuple[str, str]] = []
     if statement_timeout is not None:
-        statements.append(SQL(QUERY_MARKER + " SET statement_timeout = {}").format(Literal(f"{int(statement_timeout)}s")))
+        settings.append(("statement_timeout", f"{int(statement_timeout)}s"))
+    schemas = [schema.strip() for schema in (search_path or "").split(",") if schema.strip()]
+    if schemas:
+        # Each schema quoted, which is also correct for the special "$user".
+        settings.append(("search_path", ", ".join(_quoted_identifier(schema) for schema in schemas)))
+    if context:
+        settings.extend(context.settings.items())
 
-    return statements or None
-
-
-def build_context_statement(context: QueryContext | None) -> Composed | None:
-    """The statement that applies a query context to the transaction it runs in.
-
-    Every setting goes through ``set_config(name, value, true)`` and the role
-    through ``set_config('role', ...)``, which is ``SET LOCAL ROLE``, so all of
-    it ends with the transaction. The role comes last: PostgreSQL evaluates
-    the select list in order, so a setting only the connecting user may change
-    is set before the switch to a role that may not. Names and values go in as
-    literals psycopg quotes, never as text pasted into the statement.
-
-    Returns:
-        The statement, or None when the context has nothing to apply.
-    """
-    if not context:
-        return None
-    calls = [SQL("set_config({}, {}, true)").format(Literal(name), Literal(value)) for name, value in context.settings.items()]
-    if context.role is not None:
+    calls = [SQL("set_config({}, {}, true)").format(Literal(name), Literal(value)) for name, value in settings]
+    if context and context.role is not None:
         calls.append(SQL("set_config('role', {}, true)").format(Literal(context.role)))
+    if not calls:
+        return None
     return SQL(QUERY_MARKER + " SELECT ") + SQL(", ").join(calls)
 
 
@@ -174,9 +181,16 @@ class DbConnPool:
         """
         Args:
             connection_url: PostgreSQL connection URL.
-            search_path: Schema search path to set on every connection.
-            statement_timeout: Statement timeout in seconds to set on every
-                connection. None leaves the server default in place.
+            search_path: Schema search path for every statement a
+                :class:`SqlDriver` runs on this pool.
+            statement_timeout: Statement timeout in seconds for every
+                statement a :class:`SqlDriver` runs on this pool. None leaves
+                the server default in place.
+
+        The driver applies both inside each transaction, never to the
+        connection: behind a transaction pooler a connection is not one
+        session, and a setting made for the session would reach one backend
+        and stay there for the pooler's next client.
         """
         self.connection_url = connection_url
         self.search_path = search_path
@@ -184,15 +198,6 @@ class DbConnPool:
         self.pool: AsyncConnectionPool | None = None
         self._is_valid = False
         self._last_error = None
-
-    async def _configure_connection(self, conn: Any) -> None:
-        """Apply the session settings to a connection as the pool hands it out."""
-        statements = build_session_setup(self.search_path, self.statement_timeout)
-        if not statements:
-            return
-        for statement in statements:
-            await conn.execute(statement)
-        await conn.commit()
 
     async def pool_connect(self, connection_url: str | None = None) -> AsyncConnectionPool:
         """Initialize connection pool with retry logic."""
@@ -217,7 +222,15 @@ class DbConnPool:
                 min_size=1,
                 max_size=5,
                 open=False,  # Don't connect immediately, let's do it explicitly
-                configure=self._configure_connection,
+                # psycopg prepares a statement on the server once it has run
+                # five times on a connection. Behind a transaction pooler the
+                # connection is not one session: the next execution reaches a
+                # backend without the statement, or another client's
+                # preparation one that already has it, and Supavisor and the
+                # poolers Cloud SQL, AlloyDB and Azure offer do not support
+                # prepared statements at all. pg-debug runs few statements
+                # often enough for preparing them to save anything.
+                kwargs={"prepare_threshold": None},
             )
 
             # Open the pool explicitly
@@ -316,14 +329,33 @@ class SqlDriver:
         else:
             raise NotConnectedError("Connection not established. Either conn or engine_url must be provided")
 
+    def with_context(self, context: QueryContext | None) -> SqlDriver:
+        """The same driver, on the same connection or pool, with another query context.
+
+        For a statement that needs a setting of its own: the setting goes in
+        the context, which applies it inside that statement's transaction,
+        rather than in a ``SET`` that a transaction pooler would leave on
+        whichever backend ran it.
+        """
+        driver = copy.copy(self)
+        driver.context = context
+        return driver
+
     @asynccontextmanager
     async def session(self) -> AsyncIterator[SqlDriver]:
         """Pin one pooled connection for the duration of the block.
 
-        Session state — hypothetical indexes, ``SET``, temp tables, advisory
-        locks — lives in the connection that created it. Without a pin, the
-        pool is free to hand the next statement a different connection and the
-        state silently disappears.
+        The statements in the block share a connection to the server, which
+        saves borrowing one from the pool for each. They do not necessarily
+        share a session: behind a transaction pooler (PgBouncer in transaction
+        mode, Supavisor, the pooled endpoints of Neon and Supabase) each
+        transaction can reach a different backend, so session state — a
+        ``SET``, a hypothetical index, a temp table, an advisory lock — made in
+        one statement may be missing from the next, and left behind for
+        another client. Anything that has to live in the backend goes in the
+        same transaction as what reads it: settings through the query context
+        (:meth:`with_context`), hypothetical indexes in one batch with the
+        ``EXPLAIN`` and a ``cleanup`` that resets them.
 
         The pinned driver is the same object, so anything already holding a
         reference to it sees the pin too. That also means a pinned driver must
@@ -363,6 +395,7 @@ class SqlDriver:
         force_readonly: bool = False,
         *,
         in_context: bool = False,
+        cleanup: LiteralString | None = None,
     ) -> list[RowResult] | None:
         """
         Execute a query and return results.
@@ -375,6 +408,12 @@ class SqlDriver:
                 statements that run or plan the user's own SQL, and the reads
                 of settings that shaped them; never for pg-debug's reads of
                 the catalog, which the context's role may be barred from.
+            cleanup: A statement to run after the query, in the same
+                transaction, whether the query succeeded or failed: for
+                state that lives in the backend rather than the transaction,
+                such as hypothetical indexes, which a rollback does not undo
+                and a transaction pooler would leave for its next client. The
+                query's rows are returned, not the cleanup's.
 
         Returns:
             The rows of the last statement, or None when it returns none
@@ -396,7 +435,7 @@ class SqlDriver:
             if self._pinned_connection is not None:
                 try:
                     return await self._execute_with_connection(
-                        self._pinned_connection, query, params, force_readonly=force_readonly, in_context=in_context
+                        self._pinned_connection, query, params, force_readonly=force_readonly, in_context=in_context, cleanup=cleanup
                     )
                 except Exception:
                     # A failed statement leaves the connection's transaction
@@ -416,10 +455,14 @@ class SqlDriver:
                 # For pools, get a connection from the pool
                 pool = await self.conn.pool_connect()
                 async with pool.connection() as connection:
-                    return await self._execute_with_connection(connection, query, params, force_readonly=force_readonly, in_context=in_context)
+                    return await self._execute_with_connection(
+                        connection, query, params, force_readonly=force_readonly, in_context=in_context, cleanup=cleanup
+                    )
             else:
                 # Direct connection approach
-                return await self._execute_with_connection(self.conn, query, params, force_readonly=force_readonly, in_context=in_context)
+                return await self._execute_with_connection(
+                    self.conn, query, params, force_readonly=force_readonly, in_context=in_context, cleanup=cleanup
+                )
         except Exception as e:
             # Mark pool as invalid if there was a connection issue
             if self.conn and self.is_pool:
@@ -460,16 +503,32 @@ class SqlDriver:
         if self.context:
             await self.execute_query("SELECT 1", force_readonly=True, in_context=True)
 
-    async def _apply_context(self, cursor: Any) -> None:
-        """Apply the query context to the transaction the cursor is in."""
-        context = self.context
-        statement = build_context_statement(context)
-        if context is None or statement is None:
-            return
+    def _transaction_setup(self, in_context: bool) -> Composed | None:
+        """The statement that sets up a transaction: the pool's timeout and search path, and the context if asked for."""
+        pool = self.conn if self.is_pool else None
+        return build_transaction_setup(
+            statement_timeout=getattr(pool, "statement_timeout", None),
+            search_path=getattr(pool, "search_path", None),
+            context=self.context if in_context else None,
+        )
+
+    async def _apply_setup(self, cursor: Any, setup: Composed, in_context: bool) -> None:
+        """Apply the setup to the transaction the cursor is in."""
         try:
-            await cursor.execute(statement)
+            await cursor.execute(setup)
         except psycopg.Error as e:
-            raise InvalidArgumentError(f"Could not apply the query context ({context.describe()}): {e}") from e
+            if in_context and self.context:
+                raise InvalidArgumentError(f"Could not apply the query context ({self.context.describe()}): {e}") from e
+            raise
+
+    async def _clean_up_after_failure(self, cursor: Any, cleanup: LiteralString) -> None:
+        """Run the cleanup in the transaction the failed statement aborted, from the savepoint before it."""
+        try:
+            await cursor.execute(f"{QUERY_MARKER} ROLLBACK TO SAVEPOINT {CLEANUP_SAVEPOINT}")
+            await cursor.execute(cleanup)
+        except Exception as cleanup_error:
+            # Never let this replace the error that caused it.
+            logger.error("Error cleaning up after the failed statement: %s", cleanup_error)
 
     async def _reset_pinned_transaction(self) -> None:
         """Clear an aborted transaction so the pinned session stays usable."""
@@ -481,9 +540,20 @@ class SqlDriver:
             # Never let this replace the error that caused it.
             logger.error("Error clearing the session's aborted transaction: %s", rollback_error)
 
-    async def _execute_with_connection(self, connection, query, params, force_readonly, in_context=False) -> list[RowResult] | None:
+    async def _execute_with_connection(
+        self,
+        connection,
+        query,
+        params,
+        force_readonly,
+        in_context=False,
+        cleanup: LiteralString | None = None,
+    ) -> list[RowResult] | None:
         """Execute query with the given connection."""
         transaction_started = False
+        setup = self._transaction_setup(in_context)
+        if cleanup is not None:
+            cleanup = self.tagged(cleanup)
         try:
             async with connection.cursor(row_factory=dict_row) as cursor:
                 # Start read-only transaction
@@ -491,33 +561,38 @@ class SqlDriver:
                     await cursor.execute("BEGIN TRANSACTION READ ONLY")
                     transaction_started = True
 
-                if in_context and self.context:
-                    if not transaction_started and getattr(connection, "autocommit", False):
-                        # Outside a transaction block, a set_config(..., true)
-                        # lasts only as long as the statement that made it.
-                        await cursor.execute("BEGIN")
-                        transaction_started = True
-                    await self._apply_context(cursor)
+                if (setup is not None or cleanup is not None) and not transaction_started and getattr(connection, "autocommit", False):
+                    # Outside a transaction block, a set_config(..., true)
+                    # lasts only as long as the statement that made it, and
+                    # there is nothing to take a savepoint in.
+                    await cursor.execute("BEGIN")
+                    transaction_started = True
 
-                if params:
-                    await cursor.execute(query, params)
-                else:
-                    await cursor.execute(query)
+                if setup is not None:
+                    await self._apply_setup(cursor, setup, in_context)
 
-                # For multiple statements, move to the last statement's results
-                while cursor.nextset():
-                    pass
+                if cleanup is not None:
+                    await cursor.execute(f"{QUERY_MARKER} SAVEPOINT {CLEANUP_SAVEPOINT}")
 
-                if cursor.description is None:  # No results (like DDL statements)
-                    if not force_readonly:
-                        await cursor.execute("COMMIT")
-                    elif transaction_started:
-                        await cursor.execute("ROLLBACK")
-                        transaction_started = False
-                    return None
+                try:
+                    if params:
+                        await cursor.execute(query, params)
+                    else:
+                        await cursor.execute(query)
 
-                # Get results from the last statement only
-                rows = await cursor.fetchall()
+                    # For multiple statements, move to the last statement's results
+                    while cursor.nextset():
+                        pass
+
+                    # Results from the last statement only; none for DDL
+                    rows = await cursor.fetchall() if cursor.description is not None else None
+                except psycopg.Error:
+                    if cleanup is not None:
+                        await self._clean_up_after_failure(cursor, cleanup)
+                    raise
+
+                if cleanup is not None:
+                    await cursor.execute(cleanup)
 
                 # End the transaction appropriately
                 if not force_readonly:
@@ -526,6 +601,8 @@ class SqlDriver:
                     await cursor.execute("ROLLBACK")
                     transaction_started = False
 
+                if rows is None:
+                    return None
                 return [SqlDriver.RowResult(cells=dict(row)) for row in rows]
 
         except Exception as e:
@@ -590,8 +667,9 @@ class SqlDriver:
                 if getattr(connection, "autocommit", False):
                     await cursor.execute("BEGIN")
 
-                if in_context:
-                    await self._apply_context(cursor)
+                setup = self._transaction_setup(in_context)
+                if setup is not None:
+                    await self._apply_setup(cursor, setup, in_context)
 
                 if params:
                     await cursor.execute(query, params)

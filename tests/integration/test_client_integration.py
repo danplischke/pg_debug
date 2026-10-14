@@ -654,14 +654,17 @@ async def test_index_use_says_when_no_column_of_the_index_is_restricted(pg, inde
 
 
 @pytest.mark.asyncio
-async def test_index_use_in_restricted_mode_skips_the_forced_plan_and_says_so(indexed_users):
+async def test_index_use_in_restricted_mode_gives_the_unrestricted_verdict(pg, indexed_users):
+    """The forced plan turns sequential scans off for its own transaction, which writes nothing."""
+    query = f"SELECT * FROM {indexed_users} WHERE status = 'closed'"
     async with PgDebug(DATABASE_URI, access_mode=AccessMode.RESTRICTED) as restricted:
-        verdicts = await restricted.explain_index_use(f"SELECT * FROM {indexed_users} WHERE status = 'closed'", index="users_status")
+        (verdict,) = await restricted.explain_index_use(query, index="users_status")
+    (unrestricted,) = await pg.explain_index_use(query, index="users_status")
 
-    (verdict,) = verdicts
     assert verdict.used is False
-    assert verdict.findings == []
-    assert verdict.notes and "restricted mode" in verdict.notes[0]
+    assert [f.reason for f in verdict.findings] == [f.reason for f in unrestricted.findings]
+    assert verdict.findings, "the forced plan was not taken"
+    assert verdict.notes == []
 
 
 @pytest.mark.asyncio
