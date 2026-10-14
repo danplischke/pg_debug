@@ -64,6 +64,24 @@ The live-activity and statistics methods mirror the commands:
 `ModelFinding` has `rule`, `confidence`, `severity`, `summary`, `detail`,
 `evidence`, `remediation`, `verify` and `impact_bytes`, plus `to_dict()`.
 
+To run the user's queries as their application does, with its role and the
+session variables its row-level security policies read, give the client a
+`QueryContext` rather than issuing `SET` yourself. It applies to
+`execute_sql`, `explain_query`, `diagnose_query`, `explain_index_use` and index
+tuning, inside each statement's own transaction; the client's catalog reads
+stay with the connecting user. A context the server refuses raises
+`InvalidArgumentError` when the client connects.
+
+```python
+from pg_debug import PgDebug, QueryContext
+
+context = QueryContext(role="app_user", settings={"app.tenant_id": "7", "work_mem": "64MB"})
+async with PgDebug("postgresql://localhost/mydb", context=context) as pg:
+    plan = await pg.explain_query("SELECT * FROM orders WHERE total > 100")
+
+context = QueryContext.from_file("pg-debug.toml")   # the [context] the CLI reads
+```
+
 Each `execute_sql` call may land on a different pooled connection, so session
 state does not carry over: a `SET`, a temp table, an advisory lock or a
 hypothetical index created in one call is not guaranteed to exist in the next,
@@ -73,6 +91,10 @@ drop to the driver and pin it:
 ```python
 driver = await pg.sql_driver()
 async with driver.session():
-    await driver.execute_query("SET LOCAL work_mem = '256MB'")
-    rows = await driver.execute_query("SELECT ...")
+    await driver.execute_query("SELECT hypopg_create_index('CREATE INDEX ON orders (user_id)')")
+    rows = await driver.execute_query("EXPLAIN SELECT * FROM orders WHERE user_id = 42")
 ```
+
+Each statement still commits on its own, so a `SET LOCAL` ends with the
+statement that made it even in a pinned session; a `QueryContext` is the way to
+run a query with a setting.

@@ -30,6 +30,7 @@ from .client import PgDebug
 from .client import resolve_database_url
 from .configuration import ConfigFinding
 from .configuration import ConfigurationReviewer
+from .context import QueryContext
 from .db import DbConnPool
 from .db import SafeSqlDriver
 from .db import SqlDriver
@@ -134,6 +135,7 @@ __all__ = [
     "PlanFinding",
     "PlanIssue",
     "PlanNode",
+    "QueryContext",
     "QueryError",
     "RuleId",
     "SafeSqlDriver",

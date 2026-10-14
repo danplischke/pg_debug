@@ -108,7 +108,7 @@ async def test_explain_with_bind_variables(mock_sql_driver):
     }
 
     # Set up the mock to return different responses for different queries
-    def side_effect(query):
+    def side_effect(query, **kwargs):
         if query == "SHOW server_version":
             return version_response
         else:
@@ -163,7 +163,7 @@ async def test_explain_with_bind_variables_pg15(mock_sql_driver, monkeypatch):
     monkeypatch.setattr("pg_debug.plans.explain.SqlBindParams", MockSqlBindParams)
 
     # Set up the mock to return different responses for different queries
-    def side_effect(query):
+    def side_effect(query, **kwargs):
         if query == "SHOW server_version":
             return version_response
         elif "EXPLAIN" in query and "id = 42" in query:
@@ -231,7 +231,7 @@ async def test_explain_analyze_with_bind_variables(mock_sql_driver, monkeypatch)
     monkeypatch.setattr("pg_debug.plans.explain.SqlBindParams", MockSqlBindParams)
 
     # Set up the mock to return mock plan for the modified query
-    def side_effect(query):
+    def side_effect(query, **kwargs):
         if "EXPLAIN" in query and "id = 42" in query:
             return [MockCell({"QUERY PLAN": [plan_data]})]
         return None
@@ -362,7 +362,7 @@ async def test_explain_with_like_and_bind_variables_pg16(mock_sql_driver, monkey
     monkeypatch.setattr("pg_debug.plans.explain.SqlBindParams", MockSqlBindParams)
 
     # Set up the mock to return different responses for different queries
-    def side_effect(query):
+    def side_effect(query, **kwargs):
         if query == "SHOW server_version":
             return version_response
         elif "EXPLAIN" in query and "LIKE '%John%'" in query:
@@ -414,7 +414,7 @@ async def test_explain_with_functional_hypothetical_indexes(mock_sql_driver):
     }
 
     # Mock the hypopg_reset and hypopg_create_index calls
-    def side_effect(query):
+    def side_effect(query, **kwargs):
         if "hypopg_" in query or "EXPLAIN" in query:
             return [MockCell({"QUERY PLAN": [plan_data]})]
         return None
@@ -480,3 +480,24 @@ async def test_a_malformed_hypothetical_index_is_an_argument_error(mock_sql_driv
 def test_a_plan_without_a_plan_key_is_an_argument_error():
     with pytest.raises(InvalidArgumentError, match="an object with a 'Plan' key"):
         ExplainPlanArtifact.from_json_data({"Planning Time": 0.1})
+
+
+@pytest.mark.asyncio
+async def test_the_query_is_planned_in_the_query_context(mock_sql_driver):
+    plan = {"Plan": {"Node Type": "Seq Scan", "Startup Cost": 0.0, "Total Cost": 1.0, "Plan Rows": 1, "Plan Width": 4}}
+    mock_sql_driver.execute_query.return_value = [MockCell({"QUERY PLAN": [plan]})]
+
+    await ExplainPlanTool(sql_driver=mock_sql_driver).explain("SELECT 1")
+
+    assert mock_sql_driver.execute_query.await_args.kwargs == {"in_context": True}
+
+
+@pytest.mark.asyncio
+async def test_a_plan_with_hypothetical_indexes_is_taken_in_the_query_context(mock_sql_driver):
+    """The index advisor compares these plans, so they have to be the application's."""
+    plan = {"Plan": {"Node Type": "Seq Scan", "Startup Cost": 0.0, "Total Cost": 1.0, "Plan Rows": 1, "Plan Width": 4}}
+    mock_sql_driver.execute_query.return_value = [MockCell({"QUERY PLAN": [plan]})]
+
+    await ExplainPlanTool(sql_driver=mock_sql_driver).generate_explain_plan_with_hypothetical_indexes("SELECT 1", frozenset())
+
+    assert mock_sql_driver.execute_query.await_args.kwargs == {"in_context": True}

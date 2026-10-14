@@ -93,6 +93,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `plugins/pg-debug/skills/pg-debug/`, and `.claude/skills/pg-debug` links to
   it.
 
+- A query context: the role and settings to run a query with, so that
+  pg-debug sees the database the way the application does. pg-debug connects
+  as whoever the URL names, often the tables' owner, and the owner bypasses
+  row-level security: a query on a table with a policy saw every tenant's
+  rows and planned without the policy's predicate, a `Seq Scan` where the
+  application gets an index scan, and `diagnose` of a query whose policy reads
+  a session variable failed with `unrecognized configuration parameter`.
+  `execute`, `explain`, `diagnose`, `index-use`, `tune-queries` and
+  `tune-workload` take `--role ROLE` and `--set NAME=VALUE`, or read a
+  `[context]` table from a `pg-debug.toml` in the working directory or the
+  nearest parent that has one (`--config FILE` names another, `--no-config`
+  reads none), and say on stderr which context they ran in. It is applied
+  inside each statement's own transaction with `set_config(..., true)`, so it
+  never outlives the statement on a pooled connection, and only to the
+  statements that run or plan the query: pg-debug's catalog reads stay with
+  the connecting user, from whom row-level security hides no statistics. The
+  server checks it before anything runs; it works in `restricted` mode; and it
+  refuses the settings pg-debug sets itself (`statement_timeout`,
+  `search_path`, the role, the read-only settings), naming the option that
+  does. `--set` also tries a setting without changing the server:
+  `diagnose --set work_mem=64MB` reruns a query with the `work_mem` a spill
+  finding suggested. In the library it is `PgDebug(context=QueryContext(...))`,
+  and `QueryContext.from_file()` reads a `pg-debug.toml`.
+
 ### Changed
 
 - Index tuning raises instead of returning an `error` key. A failed
@@ -133,6 +157,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `pg_debug.index.llm_settings`, and `pg_debug.index.llm` still has them.
 
 ### Fixed
+
+- The skill's Python reference ran a query with a setting by issuing
+  `SET LOCAL` in a pinned session. Every statement commits on its own, so the
+  setting ended before the query ran, which then ran with the server's
+  default. It shows a `QueryContext` instead.
 
 - Index tuning that could not plan a query blamed `pg_stat_statements` and
   kept what PostgreSQL had said to itself. The run reported such queries as

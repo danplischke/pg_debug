@@ -12,6 +12,7 @@ from ..baseline import config_finding_key
 from ..baseline import model_finding_key
 from ..client import DATABASE_URL_ENV_VARS
 from ..client import AccessMode
+from ..context import CONFIG_FILE_NAME
 from ..health import HealthType
 from ..index.base import MAX_NUM_INDEX_TUNING_QUERIES
 from ..index.llm_settings import DEFAULT_LLM_MODEL
@@ -203,6 +204,41 @@ def parse_size(value: str) -> int:
     return int(float(number) * SIZE_UNITS.get(unit or "B", 1))
 
 
+def parse_setting(text: str) -> tuple[str, str]:
+    """Split ``--set NAME=VALUE`` at its first ``=``; the value may hold more.
+
+    Raises:
+        argparse.ArgumentTypeError: If there is no ``=``, or nothing before it.
+    """
+    name, separator, value = text.partition("=")
+    if not separator or not name.strip():
+        raise argparse.ArgumentTypeError(f"'{text}' is not a setting. Write it as NAME=VALUE, for example work_mem=256MB or app.tenant_id=7.")
+    return name.strip(), value
+
+
+def add_context_arguments(parser: argparse.ArgumentParser) -> None:
+    """``--role``, ``--set``, ``--config`` and ``--no-config``, for the commands that run or plan the user's query."""
+    group = parser.add_argument_group(
+        "query context",
+        f"The role and settings to run your query with, as your application's sessions would. They apply to the "
+        f"statements that run or plan your query, inside each one's transaction; pg-debug's own reads of the catalog "
+        f"run as the connecting user. Read from {CONFIG_FILE_NAME} in this directory or the nearest parent that has "
+        f"one; --role and --set override it.",
+    )
+    group.add_argument("--role", help="Run your query as this role, as SET ROLE does. The connecting user must be a member of it.")
+    group.add_argument(
+        "--set",
+        dest="settings",
+        metavar="NAME=VALUE",
+        action="append",
+        type=parse_setting,
+        help="Run your query with this setting, as set_config(NAME, VALUE, true) does: app.tenant_id=7, work_mem=256MB. Repeatable.",
+    )
+    source = group.add_mutually_exclusive_group()
+    source.add_argument("--config", metavar="FILE", help=f"Read the query context from FILE instead of {CONFIG_FILE_NAME}.")
+    source.add_argument("--no-config", action="store_true", help=f"Do not read {CONFIG_FILE_NAME}.")
+
+
 def add_baseline_arguments(parser: argparse.ArgumentParser) -> None:
     """``--baseline`` and ``--save-baseline``, for the commands that gate a build."""
     parser.add_argument(
@@ -289,6 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     execute = subparsers.add_parser("execute", help="Run a SQL statement")
     execute.add_argument("sql", help="SQL to run, or - to read it from stdin")
+    add_context_arguments(execute)
     execute.set_defaults(func=cmd_execute)
 
     explain = subparsers.add_parser("explain", help="Show the execution plan for a query")
@@ -303,6 +340,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=parse_index_spec,
         help="Simulate an index without creating it, e.g. 'users(email)' or 'orders(user_id, created_at):btree'. Repeatable; requires HypoPG.",
     )
+    add_context_arguments(explain)
     explain.set_defaults(func=cmd_explain, render=render_plan, json_payload=plan_document)
 
     diagnose = subparsers.add_parser("diagnose", help="Run a query, or read a plan, and report what is wrong with it")
@@ -321,11 +359,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MIN_RATIO,
         help=(f"How far a row estimate has to be from what the query found before it is reported, as a factor (default: {DEFAULT_MIN_RATIO:g})."),
     )
+    add_context_arguments(diagnose)
     diagnose.set_defaults(func=cmd_diagnose, render=render_plan_findings)
 
     index_use = subparsers.add_parser("index-use", help="Say whether a query uses each index on its tables, and if not, why")
     index_use.add_argument("sql", help="Query to plan, a file holding it, or - to read it from stdin")
     index_use.add_argument("-i", "--index", help="Report only this index.")
+    add_context_arguments(index_use)
     index_use.set_defaults(func=cmd_index_use, render=render_index_use)
 
     column_stats = subparsers.add_parser("column-stats", help="Show the planner's statistics for a table")
@@ -487,3 +527,4 @@ def _add_tuning_arguments(parser: argparse.ArgumentParser) -> None:
         default="dta",
         help="dta (default) searches index combinations against the planner; llm asks a language model and needs the llm extra.",
     )
+    add_context_arguments(parser)

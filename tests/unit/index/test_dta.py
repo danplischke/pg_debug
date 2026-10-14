@@ -120,7 +120,7 @@ async def test_extract_columns_from_join_query(create_dta):
 async def test_generate_candidates(async_sql_driver, create_dta):
     """Test index candidate generation."""
 
-    async def mock_execute_query(query):
+    async def mock_execute_query(query, **kwargs):
         logger.info("Query: %s", query)
         if "to_regclass" in query:
             return [MockCell({"name": "users"})]
@@ -156,7 +156,7 @@ async def test_generate_candidates(async_sql_driver, create_dta):
 
 @pytest.mark.asyncio
 async def test_analyze_workload(async_sql_driver, create_dta):
-    async def mock_execute_query(query):
+    async def mock_execute_query(query, **kwargs):
         logger.info("Query: %s", query)
         if "pg_stat_statements" in query:
             return [
@@ -433,7 +433,7 @@ async def test_filter_long_text_columns(async_sql_driver, create_dta):
         ),
     ]
 
-    async def mock_execute_query(query):
+    async def mock_execute_query(query, **kwargs):
         if "information_schema.columns" in query:
             return type_query_results
         return None
@@ -1205,7 +1205,7 @@ async def test_enumerate_greedy_pareto_cost_benefit(async_sql_driver):
         return base_relation_size
 
     # Mock SQL driver execute_query method to simulate getting table size
-    async def mock_execute_query(query):
+    async def mock_execute_query(query, **kwargs):
         logger.info("mock_execute_query: %s", query)
         if "pg_total_relation_size" in query:
             return [MockCell({"rel_size": base_relation_size})]

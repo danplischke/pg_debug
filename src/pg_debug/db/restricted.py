@@ -74,6 +74,10 @@ class SafeSqlDriver(SqlDriver):
         async with self.sql_driver.session():
             yield self
 
+    async def check_context(self) -> None:
+        """Check the wrapped driver's query context, which is the one that is applied."""
+        await self.sql_driver.check_context()
+
     def _validate_node(self, node: Node) -> None:
         """Recursively validate a node and all its children"""
         # Check if node type is allowed
@@ -172,8 +176,16 @@ class SafeSqlDriver(SqlDriver):
         query: LiteralString,
         params: list[Any] | None = None,
         force_readonly: bool = True,  # do not use value passed in
+        *,
+        in_context: bool = False,
     ) -> list[SqlDriver.RowResult] | None:  # noqa: UP007
-        """Execute a query after validating it is safe"""
+        """Execute a query after validating it is safe.
+
+        The query context, with ``in_context``, is applied by the wrapped
+        driver after the query has passed: it is pg-debug's own statement,
+        and it sets a role and settings, which writes nothing. The settings
+        restricted mode depends on are ones a context cannot hold.
+        """
         self._validate(query)
 
         # NOTE: Always force readonly=True in SafeSqlDriver regardless of what was passed
@@ -186,6 +198,7 @@ class SafeSqlDriver(SqlDriver):
                         query,
                         params=params,
                         force_readonly=True,
+                        in_context=in_context,
                     )
             except TimeoutError as e:
                 logger.warning("Query execution timed out after %s seconds: %s...", self.timeout, query[:100])
@@ -201,9 +214,16 @@ class SafeSqlDriver(SqlDriver):
                 query,
                 params=params,
                 force_readonly=True,
+                in_context=in_context,
             )
 
-    async def execute_query_and_rollback(self, query: LiteralString, params: list[Any] | None = None) -> list[SqlDriver.RowResult] | None:
+    async def execute_query_and_rollback(
+        self,
+        query: LiteralString,
+        params: list[Any] | None = None,
+        *,
+        in_context: bool = False,
+    ) -> list[SqlDriver.RowResult] | None:
         """Always refuses. Restricted mode does not run statements to see what they do.
 
         Inherited unchanged this would be a hole rather than a feature: the base

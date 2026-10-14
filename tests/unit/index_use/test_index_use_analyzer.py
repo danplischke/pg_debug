@@ -453,3 +453,27 @@ def test_bare_table_references_resolve_through_what_the_catalog_returned():
     rows = [{"schema": "shop", "table": "orders", "column": "id"}, {"schema": "public", "table": "customers", "column": "id"}]
 
     assert _resolve_tables({"orders", "public.customers", "missing"}, rows) == {"orders": "shop.orders", "public.customers": "public.customers"}
+
+
+# -- The query context ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_plans_are_taken_in_the_query_context_and_the_catalog_is_read_outside_it():
+    d = driver(
+        [index_row("orders_status", ["status"])],
+        column_rows("id", "status"),
+        scan(),
+        forced_plan=scan("Index Scan", index="orders_status", cost=900.0),
+    )
+
+    await analyze(d, "SELECT * FROM orders WHERE status = 'open'")
+
+    inner: Any = d
+    calls = inner.execute_query.await_args_list
+    in_context = [call.args[0] for call in calls if call.kwargs.get("in_context")]
+    outside = [call.args[0] for call in calls if not call.kwargs.get("in_context")]
+    assert len(in_context) == 2, "the plan and the plan with sequential scans disabled"
+    assert all(query.startswith("EXPLAIN") for query in in_context)
+    assert not any(query.startswith("EXPLAIN") for query in outside)
+    assert any("pg_index i" in query for query in outside)

@@ -25,8 +25,8 @@ above need nothing else.
 
 | Path | Holds |
 | --- | --- |
-| `src/pg_debug/client.py`, `sync.py`, `errors.py`, `severity.py` | The public surface: `PgDebug`, `SyncPgDebug`, the exceptions, and how findings are graded (`Severity`, `Confidence`). |
-| `src/pg_debug/cli/` | The command. `parser.py` names each subcommand's handler (in `commands.py`) and renderer (in `render.py`) in one place; `streams.py` reads and writes UTF-8. |
+| `src/pg_debug/client.py`, `sync.py`, `errors.py`, `severity.py`, `context.py` | The public surface: `PgDebug`, `SyncPgDebug`, the exceptions, how findings are graded (`Severity`, `Confidence`), and the role and settings the user's queries run with (`QueryContext`, read from `pg-debug.toml`). |
+| `src/pg_debug/cli/` | The command. `parser.py` names each subcommand's handler (in `commands.py`) and renderer (in `render.py`) in one place; `streams.py` reads and writes UTF-8; `config_file.py` finds `pg-debug.toml`. |
 | `src/pg_debug/db/` | Driver and pool, restricted mode and its allowlist, extension and version checks. |
 | `src/pg_debug/parsing/` | pglast visitors and bind-parameter substitution for SQL we are *given*. |
 | `src/pg_debug/queries/` | SQL that more than one module runs. A module's own SQL stays beside the code that reads its rows. |
@@ -64,6 +64,12 @@ above need nothing else.
 - **Every statement the tool runs is marked** `/* pg_debug */` by `SqlDriver`,
   so `top-queries` and the advisors can exclude it from the workload. Do not
   add the marker yourself, and do not bypass the driver.
+- **The query context is for the user's query.** A statement that runs or
+  plans SQL the user handed over, or reads a setting that shaped it, passes
+  `in_context=True`, so it runs with the role and settings the user declared.
+  pg-debug's own catalog reads do not: the context's role may not be allowed
+  them, and row-level security hides statistics from it. A new feature that
+  runs the user's SQL marks it the same way.
 - **Restricted mode is a promise.** Anything that is not read-only is refused
   before it reaches the server, and runs in a read-only transaction with a
   statement timeout. A new feature that needs to write must refuse in

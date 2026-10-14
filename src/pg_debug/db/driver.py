@@ -1,10 +1,13 @@
 """SQL driver adapter for PostgreSQL connections."""
 
+from __future__ import annotations
+
 import logging
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from typing import Any
 from typing import LiteralString
 from urllib.parse import urlparse
@@ -22,6 +25,9 @@ from ..errors import ConnectionFailedError
 from ..errors import InvalidArgumentError
 from ..errors import NotConnectedError
 from ..errors import QueryError
+
+if TYPE_CHECKING:
+    from ..context import QueryContext
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +139,27 @@ def build_session_setup(
         statements.append(SQL(QUERY_MARKER + " SET statement_timeout = {}").format(Literal(f"{int(statement_timeout)}s")))
 
     return statements or None
+
+
+def build_context_statement(context: QueryContext | None) -> Composed | None:
+    """The statement that applies a query context to the transaction it runs in.
+
+    Every setting goes through ``set_config(name, value, true)`` and the role
+    through ``set_config('role', ...)``, which is ``SET LOCAL ROLE``, so all of
+    it ends with the transaction. The role comes last: PostgreSQL evaluates
+    the select list in order, so a setting only the connecting user may change
+    is set before the switch to a role that may not. Names and values go in as
+    literals psycopg quotes, never as text pasted into the statement.
+
+    Returns:
+        The statement, or None when the context has nothing to apply.
+    """
+    if not context:
+        return None
+    calls = [SQL("set_config({}, {}, true)").format(Literal(name), Literal(value)) for name, value in context.settings.items()]
+    if context.role is not None:
+        calls.append(SQL("set_config('role', {}, true)").format(Literal(context.role)))
+    return SQL(QUERY_MARKER + " SELECT ") + SQL(", ").join(calls)
 
 
 class DbConnPool:
@@ -253,6 +280,7 @@ class SqlDriver:
         self,
         conn: Any = None,
         engine_url: str | None = None,
+        context: QueryContext | None = None,
     ):
         """
         Initialize with a PostgreSQL connection or pool.
@@ -260,7 +288,12 @@ class SqlDriver:
         Args:
             conn: PostgreSQL connection object or pool
             engine_url: Connection URL string as an alternative to providing a connection
+            context: The role and settings for the statements that run or
+                plan the user's query, the ones executed with
+                ``in_context=True``. Every other statement runs as the
+                connecting user, with its settings.
         """
+        self.context = context
         if conn:
             self.conn = conn
             # Check if this is a connection pool
@@ -284,7 +317,7 @@ class SqlDriver:
             raise NotConnectedError("Connection not established. Either conn or engine_url must be provided")
 
     @asynccontextmanager
-    async def session(self) -> AsyncIterator["SqlDriver"]:
+    async def session(self) -> AsyncIterator[SqlDriver]:
         """Pin one pooled connection for the duration of the block.
 
         Session state — hypothetical indexes, ``SET``, temp tables, advisory
@@ -328,6 +361,8 @@ class SqlDriver:
         query: LiteralString,
         params: list[Any] | None = None,
         force_readonly: bool = False,
+        *,
+        in_context: bool = False,
     ) -> list[RowResult] | None:
         """
         Execute a query and return results.
@@ -336,6 +371,10 @@ class SqlDriver:
             query: SQL query to execute
             params: Query parameters
             force_readonly: Whether to enforce read-only mode
+            in_context: Run it with the driver's query context. For the
+                statements that run or plan the user's own SQL, and the reads
+                of settings that shaped them; never for pg-debug's reads of
+                the catalog, which the context's role may be barred from.
 
         Returns:
             The rows of the last statement, or None when it returns none
@@ -356,7 +395,9 @@ class SqlDriver:
             # Inside session(), every statement goes to the pinned connection.
             if self._pinned_connection is not None:
                 try:
-                    return await self._execute_with_connection(self._pinned_connection, query, params, force_readonly=force_readonly)
+                    return await self._execute_with_connection(
+                        self._pinned_connection, query, params, force_readonly=force_readonly, in_context=in_context
+                    )
                 except Exception:
                     # A failed statement leaves the connection's transaction
                     # aborted, and outside a session that connection would go
@@ -375,10 +416,10 @@ class SqlDriver:
                 # For pools, get a connection from the pool
                 pool = await self.conn.pool_connect()
                 async with pool.connection() as connection:
-                    return await self._execute_with_connection(connection, query, params, force_readonly=force_readonly)
+                    return await self._execute_with_connection(connection, query, params, force_readonly=force_readonly, in_context=in_context)
             else:
                 # Direct connection approach
-                return await self._execute_with_connection(self.conn, query, params, force_readonly=force_readonly)
+                return await self._execute_with_connection(self.conn, query, params, force_readonly=force_readonly, in_context=in_context)
         except Exception as e:
             # Mark pool as invalid if there was a connection issue
             if self.conn and self.is_pool:
@@ -404,6 +445,32 @@ class SqlDriver:
             return query
         return f"{QUERY_MARKER} {query}"
 
+    async def check_context(self) -> None:
+        """Apply the query context once, in a read-only transaction that is rolled back.
+
+        A role the connecting user cannot switch to, or a setting the server
+        does not know or will not take, fails here, once, with the reason.
+        Left to the first statement that needed it, the failure would be
+        reported as that statement's: the index advisor, for one, would count
+        every query it planned as a query it could not plan.
+
+        Raises:
+            InvalidArgumentError: If PostgreSQL refused the context.
+        """
+        if self.context:
+            await self.execute_query("SELECT 1", force_readonly=True, in_context=True)
+
+    async def _apply_context(self, cursor: Any) -> None:
+        """Apply the query context to the transaction the cursor is in."""
+        context = self.context
+        statement = build_context_statement(context)
+        if context is None or statement is None:
+            return
+        try:
+            await cursor.execute(statement)
+        except psycopg.Error as e:
+            raise InvalidArgumentError(f"Could not apply the query context ({context.describe()}): {e}") from e
+
     async def _reset_pinned_transaction(self) -> None:
         """Clear an aborted transaction so the pinned session stays usable."""
         if self._pinned_connection is None:
@@ -414,7 +481,7 @@ class SqlDriver:
             # Never let this replace the error that caused it.
             logger.error("Error clearing the session's aborted transaction: %s", rollback_error)
 
-    async def _execute_with_connection(self, connection, query, params, force_readonly) -> list[RowResult] | None:
+    async def _execute_with_connection(self, connection, query, params, force_readonly, in_context=False) -> list[RowResult] | None:
         """Execute query with the given connection."""
         transaction_started = False
         try:
@@ -423,6 +490,14 @@ class SqlDriver:
                 if force_readonly:
                     await cursor.execute("BEGIN TRANSACTION READ ONLY")
                     transaction_started = True
+
+                if in_context and self.context:
+                    if not transaction_started and getattr(connection, "autocommit", False):
+                        # Outside a transaction block, a set_config(..., true)
+                        # lasts only as long as the statement that made it.
+                        await cursor.execute("BEGIN")
+                        transaction_started = True
+                    await self._apply_context(cursor)
 
                 if params:
                     await cursor.execute(query, params)
@@ -464,7 +539,13 @@ class SqlDriver:
             logger.error("Error executing query (%s): %s", query, e)
             raise e
 
-    async def execute_query_and_rollback(self, query: LiteralString, params: list[Any] | None = None) -> list[RowResult] | None:
+    async def execute_query_and_rollback(
+        self,
+        query: LiteralString,
+        params: list[Any] | None = None,
+        *,
+        in_context: bool = False,
+    ) -> list[RowResult] | None:
         """Run a statement and undo it, keeping only what it returned.
 
         This exists for ``EXPLAIN ANALYZE``, which is the only way to learn what
@@ -477,6 +558,9 @@ class SqlDriver:
         transaction: a sequence consumed by ``nextval`` stays consumed, and a
         trigger that wrote to another system has already written. Callers that
         offer this to a user should say so.
+
+        ``in_context`` runs it with the query context, as for
+        :meth:`execute_query`.
         """
         if self.conn is None:
             self.connect()
@@ -487,16 +571,16 @@ class SqlDriver:
 
         try:
             if self._pinned_connection is not None:
-                return await self._execute_rolled_back(self._pinned_connection, query, params)
+                return await self._execute_rolled_back(self._pinned_connection, query, params, in_context=in_context)
             if self.is_pool:
                 pool = await self.conn.pool_connect()
                 async with pool.connection() as connection:
-                    return await self._execute_rolled_back(connection, query, params)
-            return await self._execute_rolled_back(self.conn, query, params)
+                    return await self._execute_rolled_back(connection, query, params, in_context=in_context)
+            return await self._execute_rolled_back(self.conn, query, params, in_context=in_context)
         except psycopg.Error as e:
             raise _rejected(e) from e
 
-    async def _execute_rolled_back(self, connection, query, params) -> list[RowResult] | None:
+    async def _execute_rolled_back(self, connection, query, params, in_context=False) -> list[RowResult] | None:
         """Execute on a connection inside a transaction that is always undone."""
         try:
             async with connection.cursor(row_factory=dict_row) as cursor:
@@ -505,6 +589,9 @@ class SqlDriver:
                 # to roll back.
                 if getattr(connection, "autocommit", False):
                     await cursor.execute("BEGIN")
+
+                if in_context:
+                    await self._apply_context(cursor)
 
                 if params:
                     await cursor.execute(query, params)

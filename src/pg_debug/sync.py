@@ -22,6 +22,7 @@ from .client import PgDebug
 from .client import SortBy
 from .client import TuningMethod
 from .configuration import ConfigFinding
+from .context import QueryContext
 from .db import DbConnPool
 from .health import HealthCheckResult
 from .health import HealthType
@@ -100,6 +101,7 @@ class SyncPgDebug:
         search_path: str | None = None,
         llm_model: str | None = None,
         pool: DbConnPool | None = None,
+        context: QueryContext | None = None,
     ):
         """Takes the same arguments as :class:`~pg_debug.client.PgDebug`."""
         self._closed = False
@@ -111,6 +113,7 @@ class SyncPgDebug:
             search_path=search_path,
             llm_model=llm_model,
             pool=pool,
+            context=context,
         )
 
     @property
