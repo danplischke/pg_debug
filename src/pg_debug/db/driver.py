@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 import re
@@ -117,6 +118,24 @@ def _rejected(error: psycopg.Error) -> QueryError:
 #: run in the same transaction when the statement fails.
 CLEANUP_SAVEPOINT = "pg_debug_cleanup"
 
+#: The longest statement timeout PostgreSQL takes, in whole seconds: it counts
+#: in milliseconds, up to the largest 32-bit integer.
+MAX_STATEMENT_TIMEOUT = 2_147_483
+
+
+def check_statement_timeout(seconds: int | None) -> None:
+    """Refuse a timeout PostgreSQL would refuse, before any statement depends on it.
+
+    Left to the server, it would fail in the setup of every transaction, and be
+    reported as the failure of whatever that transaction was for: the query
+    context, when there is one.
+
+    Raises:
+        InvalidArgumentError: If it is negative or more than PostgreSQL allows.
+    """
+    if seconds is not None and not 0 <= seconds <= MAX_STATEMENT_TIMEOUT:
+        raise InvalidArgumentError(f"The statement timeout must be between 0 and {MAX_STATEMENT_TIMEOUT} seconds, PostgreSQL's limit, not {seconds}.")
+
 
 def _quoted_identifier(name: str) -> str:
     """A name as PostgreSQL writes it double-quoted, which is how a search path holds it."""
@@ -192,6 +211,7 @@ class DbConnPool:
         session, and a setting made for the session would reach one backend
         and stay there for the pooler's next client.
         """
+        check_statement_timeout(statement_timeout)
         self.connection_url = connection_url
         self.search_path = search_path
         self.statement_timeout = statement_timeout
@@ -333,12 +353,19 @@ class SqlDriver:
         """The same driver, on the same connection or pool, with another query context.
 
         For a statement that needs a setting of its own: the setting goes in
-        the context, which applies it inside that statement's transaction,
-        rather than in a ``SET`` that a transaction pooler would leave on
-        whichever backend ran it.
+        the context, which applies it inside the transaction of each statement
+        run with ``in_context=True``, rather than in a ``SET`` that a
+        transaction pooler would leave on whichever backend ran it.
+
+        The new driver does not share a pin made by :meth:`session`: it
+        borrows its own connection, so it stays usable after the session ends.
         """
+        if self.conn is None:
+            # Connect first, so the two share one pool rather than each opening its own.
+            self.connect()
         driver = copy.copy(self)
         driver.context = context
+        driver._pinned_connection = None
         return driver
 
     @asynccontextmanager
@@ -409,7 +436,7 @@ class SqlDriver:
                 of settings that shaped them; never for pg-debug's reads of
                 the catalog, which the context's role may be barred from.
             cleanup: A statement to run after the query, in the same
-                transaction, whether the query succeeded or failed: for
+                transaction, whether the query succeeded, failed or was cancelled: for
                 state that lives in the backend rather than the transaction,
                 such as hypothetical indexes, which a rollback does not undo
                 and a transaction pooler would leave for its next client. The
@@ -522,7 +549,12 @@ class SqlDriver:
             raise
 
     async def _clean_up_after_failure(self, cursor: Any, cleanup: LiteralString) -> None:
-        """Run the cleanup in the transaction the failed statement aborted, from the savepoint before it."""
+        """Run the cleanup in the transaction the failed statement aborted, from the savepoint before it.
+
+        Also after a cancellation, such as restricted mode's own timeout or
+        Ctrl-C: psycopg has cancelled the statement on the server by then, and
+        the connection is waiting in the aborted transaction.
+        """
         try:
             await cursor.execute(f"{QUERY_MARKER} ROLLBACK TO SAVEPOINT {CLEANUP_SAVEPOINT}")
             await cursor.execute(cleanup)
@@ -586,13 +618,15 @@ class SqlDriver:
 
                     # Results from the last statement only; none for DDL
                     rows = await cursor.fetchall() if cursor.description is not None else None
-                except psycopg.Error:
+
+                    if cleanup is not None:
+                        await cursor.execute(cleanup)
+                except (psycopg.Error, asyncio.CancelledError):
+                    # A cancellation is not a psycopg.Error, and is how a
+                    # timeout on this side arrives.
                     if cleanup is not None:
                         await self._clean_up_after_failure(cursor, cleanup)
                     raise
-
-                if cleanup is not None:
-                    await cursor.execute(cleanup)
 
                 # End the transaction appropriately
                 if not force_readonly:
@@ -605,16 +639,20 @@ class SqlDriver:
                     return None
                 return [SqlDriver.RowResult(cells=dict(row)) for row in rows]
 
-        except Exception as e:
-            # Try to roll back the transaction if it's still active
-            if transaction_started:
+        except (Exception, asyncio.CancelledError) as e:
+            # Roll back the transaction this call began, or psycopg began for
+            # it: left open, the context's role and settings would carry over
+            # to the connection's next statement, which on a connection the
+            # caller owns is the caller's.
+            if transaction_started or not getattr(connection, "autocommit", False):
                 try:
                     await connection.rollback()
                 except Exception as rollback_error:
                     logger.error("Error rolling back transaction: %s", rollback_error)
 
-            logger.error("Error executing query (%s): %s", query, e)
-            raise e
+            if not isinstance(e, asyncio.CancelledError):
+                logger.error("Error executing query (%s): %s", query, e)
+            raise
 
     async def execute_query_and_rollback(
         self,

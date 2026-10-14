@@ -128,9 +128,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `DbConnPool` no longer runs anything on the connections it opens, so code
   that borrowed one from its `pool` directly gets the server's defaults;
   `SqlDriver` applies the pool's `statement_timeout` and `search_path` to
-  every statement it runs. `SqlDriver.execute_query()` takes a `cleanup`
-  statement, run after the query in the same transaction even when the query
-  fails, for state a rollback does not undo, such as hypothetical indexes;
+  every statement it runs. A timeout PostgreSQL would refuse, below 0 or
+  above 2147483 seconds, is refused when the client or the pool is built,
+  where it used to fail every transaction. `SqlDriver.execute_query()` takes a
+  `cleanup` statement, run after the query in the same transaction even when
+  the query fails or is cancelled, for state a rollback does not undo, such as
+  hypothetical indexes;
   `with_context()` on either driver gives one with another query context; and
   `session()` no longer claims that the statements it pins share a session,
   which behind a transaction pooler they need not.
@@ -202,7 +205,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   next client given that backend planned with them: its plain `EXPLAIN` chose
   `<13605>btree_orders_amount`, an index that does not exist. Every batch now
   drops its hypothetical indexes in the transaction that created them, after
-  the plan, and when the plan fails.
+  the plan, and when the plan fails or is cancelled, as restricted mode's
+  timeout and Ctrl-C cancel it.
 
 - The skill's Python reference ran a query with a setting by issuing
   `SET LOCAL` in a pinned session. Every statement commits on its own, so the

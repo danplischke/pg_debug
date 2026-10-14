@@ -5,8 +5,6 @@ context is needed: run as the owner, a query sees every tenant's rows and
 plans without the policy's predicate, which is not what the application gets.
 """
 
-import contextlib
-import io
 import time
 from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
@@ -189,14 +187,15 @@ class TestQueryContext:
             with pytest.raises(IndexTuningError, match=r"could not be planned \(the first: permission denied for table context_orders\)"):
                 await app.analyze_query_indexes([BY_AMOUNT])
 
-    def test_the_command_line_runs_the_query_in_the_context_it_announces(self, tenants, monkeypatch, tmp_path):
+    def test_the_command_line_runs_the_query_in_the_context_it_announces(self, tenants, monkeypatch, tmp_path, capsys):
         monkeypatch.chdir(tmp_path)
         (tmp_path / "pg-debug.toml").write_text(f'[context]\nrole = "{APP_ROLE}"\n[context.settings]\napp.tenant_id = "t3"\n', encoding="utf-8")
 
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cli.main(["--json", "-d", tenants, "execute", COUNT])
+        # Read through capsys: under pytest's live logging, as CI runs it, a
+        # log record undoes a redirect of sys.stderr.
+        code = cli.main(["--json", "-d", tenants, "execute", COUNT])
+        out, err = capsys.readouterr()
 
-        assert code == 0, err.getvalue()
-        assert f"query context: role {APP_ROLE}, app.tenant_id=t3" in err.getvalue()
-        assert '"n": 1000' in out.getvalue()
+        assert code == 0, err
+        assert f"query context: role {APP_ROLE}, app.tenant_id=t3" in err
+        assert '"n": 1000' in out

@@ -1,6 +1,7 @@
 """How the driver sets up a transaction: the query context inside the statement's own transaction, and only when
 asked; the pool's timeout and search path in every transaction; a cleanup after the statement, even a failed one."""
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -31,6 +32,9 @@ class FakeCursor:
         if self.connection.refuse and "set_config" in text:
             raise psycopg.errors.InsufficientPrivilege('permission denied to set role "app_user"')
         if self.connection.fail_on and self.connection.fail_on in text:
+            if self.connection.cancel:
+                # As psycopg raises it once it has cancelled the statement on the server.
+                raise asyncio.CancelledError
             raise psycopg.errors.UndefinedColumn('column "no_such_column" does not exist')
 
     def nextset(self) -> None:
@@ -43,10 +47,11 @@ class FakeCursor:
 class FakeConnection:
     """A direct connection that records the statements run on it."""
 
-    def __init__(self, autocommit: bool = False, refuse: bool = False, fail_on: str | None = None):
+    def __init__(self, autocommit: bool = False, refuse: bool = False, fail_on: str | None = None, cancel: bool = False):
         self.autocommit = autocommit
         self.refuse = refuse
         self.fail_on = fail_on
+        self.cancel = cancel
         self.executed: list[str] = []
         self.rollbacks = 0
 
@@ -278,6 +283,32 @@ async def test_the_cleanup_runs_when_the_statement_fails_and_the_error_is_kept()
 
 
 @pytest.mark.asyncio
+async def test_the_cleanup_runs_when_the_statement_is_cancelled():
+    """Restricted mode's own timeout, and Ctrl-C, arrive as a cancellation, not as a psycopg.Error."""
+    connection = FakeConnection(fail_on="pg_sleep", cancel=True)
+
+    with pytest.raises(asyncio.CancelledError):
+        await SqlDriver(conn=connection).execute_query("SELECT pg_sleep(60)", cleanup="SELECT hypopg_reset()")
+
+    assert connection.executed[-2:] == [f"{QUERY_MARKER} ROLLBACK TO SAVEPOINT pg_debug_cleanup", RESET]
+    assert connection.rollbacks == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failure_on_a_callers_connection_leaves_nothing_of_pg_debugs_transaction():
+    """psycopg began the transaction, and the context switched its role; the
+    caller's next statement must not run in it, as that role."""
+    connection = FakeConnection(fail_on="no_such_column")
+
+    with pytest.raises(QueryError):
+        await SqlDriver(conn=connection, context=CONTEXT).execute_query(
+            "EXPLAIN SELECT no_such_column", in_context=True, cleanup="SELECT hypopg_reset()"
+        )
+
+    assert connection.rollbacks == 1
+
+
+@pytest.mark.asyncio
 async def test_an_autocommit_connection_gets_a_transaction_for_the_cleanup():
     connection = FakeConnection(autocommit=True)
 
@@ -309,6 +340,28 @@ def test_with_context_keeps_the_connection_and_changes_only_the_context():
 
     assert other is not driver and other.conn is connection
     assert other.context == forced and driver.context == CONTEXT
+
+
+@pytest.mark.asyncio
+async def test_with_context_does_not_keep_a_sessions_pin():
+    """A pinned connection goes back to the pool when the session ends; a copy that kept it
+    would run its statements on a connection another task has borrowed since."""
+    connection = FakeConnection()
+    driver = pooled(connection)
+
+    async with driver.session():
+        other = driver.with_context(None)
+
+    assert other._pinned_connection is None
+    await other.execute_query("SELECT 1")
+
+
+def test_with_context_shares_the_pool_of_a_driver_not_yet_connected():
+    driver = SqlDriver(engine_url="postgresql://localhost/db")
+
+    other = driver.with_context(CONTEXT)
+
+    assert other.conn is driver.conn and isinstance(driver.conn, DbConnPool)
 
 
 def test_restricted_mode_keeps_its_restrictions_with_another_context():

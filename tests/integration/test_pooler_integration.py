@@ -14,8 +14,6 @@ one of the pooler's backends at once, which is the only way to be sure of
 reaching each of them.
 """
 
-import contextlib
-import io
 from typing import Any
 from typing import LiteralString
 from typing import NamedTuple
@@ -24,14 +22,19 @@ import psycopg
 import pytest
 from utils import PGBOUNCER_POOL_SIZE
 
+from pg_debug import AccessMode
 from pg_debug import IndexUseReason
 from pg_debug import PgDebug
 from pg_debug import cli
+from pg_debug.errors import ExplainPlanError
 
 #: Matches nearly every row, so the planner reads the table rather than the
 #: index on amount, and uses the index only with sequential scans disabled.
 MOST_ROWS = "SELECT * FROM pooled_orders WHERE amount > 100"
 ONE_CUSTOMER = "SELECT * FROM pooled_orders WHERE customer_id = 7"
+#: Planning it waits for a lock on pooled_customers, after the hypothetical
+#: index on pooled_orders has been created.
+WITH_CUSTOMER = "SELECT * FROM pooled_orders o JOIN pooled_customers c ON c.id = o.customer_id WHERE o.customer_id = 7"
 
 
 class Server(NamedTuple):
@@ -39,12 +42,22 @@ class Server(NamedTuple):
     pooled: str
 
 
-def run(url: str, *args: str) -> tuple[int, str, str]:
-    """Run the command line against a database, returning the exit code, the output and the errors."""
-    out, err = io.StringIO(), io.StringIO()
-    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+@pytest.fixture
+def run(capsys):
+    """Run the command line against a database, returning the exit code, the output and the errors.
+
+    Read through capsys rather than a redirect: with pytest's live logging on,
+    as CI runs it, each log record puts pytest's own stream back on
+    sys.stderr, and a redirect loses whatever is written after it.
+    """
+
+    def run(url: str, *args: str) -> tuple[int, str, str]:
+        capsys.readouterr()
         code = cli.main(["--json", "-d", url, *args])
-    return code, out.getvalue(), err.getvalue()
+        captured = capsys.readouterr()
+        return code, captured.out, captured.err
+
+    return run
 
 
 def on_every_backend(pooled: str, query: LiteralString) -> list[Any]:
@@ -80,7 +93,8 @@ def server(test_pooled_postgres, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     with psycopg.connect(direct, autocommit=True) as conn:
         conn.execute("CREATE EXTENSION IF NOT EXISTS hypopg")
-        conn.execute("DROP TABLE IF EXISTS pooled_orders")
+        conn.execute("DROP TABLE IF EXISTS pooled_orders, pooled_customers")
+        conn.execute("CREATE TABLE pooled_customers (id int PRIMARY KEY)")
         conn.execute("CREATE TABLE pooled_orders (id bigserial PRIMARY KEY, customer_id int NOT NULL, amount int NOT NULL)")
         conn.execute("INSERT INTO pooled_orders (customer_id, amount) SELECT i % 1000, (i * 7919) % 50000 FROM generate_series(1, 20000) i")
         conn.execute("CREATE INDEX pooled_orders_amount ON pooled_orders (amount)")
@@ -96,7 +110,7 @@ def server(test_pooled_postgres, monkeypatch, tmp_path):
         yield Server(direct, pooled)
     finally:
         with psycopg.connect(direct, autocommit=True) as conn:
-            conn.execute("DROP TABLE IF EXISTS pooled_orders")
+            conn.execute("DROP TABLE IF EXISTS pooled_orders, pooled_customers")
 
 
 def verdicts(uses) -> list[tuple[str, bool, list[str]]]:
@@ -118,7 +132,7 @@ class TestBehindATransactionPooler:
         ],
         ids=["health", "restricted-health", "model", "tune-queries"],
     )
-    def test_a_command_that_runs_many_statements_works_twice_in_a_row(self, server, args):
+    def test_a_command_that_runs_many_statements_works_twice_in_a_row(self, server, run, args):
         """psycopg prepares a statement it has run five times on one connection,
         and the pooler sends the next execution to a backend that has not got it,
         or the next preparation to one that has."""
@@ -134,7 +148,7 @@ class TestBehindATransactionPooler:
         ],
         ids=["unrestricted", "restricted"],
     )
-    def test_settings_end_with_the_transaction_they_were_made_for(self, server, args):
+    def test_settings_end_with_the_transaction_they_were_made_for(self, server, run, args):
         """A session SET stays with the backend, for the next client of the same database and role."""
         defaults = on_every_backend(server.pooled, "SELECT current_setting('statement_timeout') || ' ' || current_setting('search_path')")
 
@@ -145,10 +159,28 @@ class TestBehindATransactionPooler:
         assert on_every_backend(server.pooled, "SELECT current_setting('work_mem')") == ["4MB"] * PGBOUNCER_POOL_SIZE
         assert on_every_backend(server.pooled, "SELECT current_user") == ["postgres"] * PGBOUNCER_POOL_SIZE
 
-    def test_the_timeout_holds_whichever_backend_the_statement_reaches(self, server):
-        for attempt in range(1, PGBOUNCER_POOL_SIZE + 1):
-            code, _, err = run(server.pooled, "--timeout", "1", "execute", "SELECT pg_sleep(3)")
-            assert code == 1 and "canceling statement due to statement timeout" in err, f"attempt {attempt}: {err or 'the query ran to the end'}"
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("access_mode", [AccessMode.UNRESTRICTED, AccessMode.RESTRICTED])
+    async def test_every_statement_runs_with_the_timeout_and_the_search_path(self, server, access_mode):
+        """Read back by each statement, over more statements than the pooler has
+        backends: a SET reaches only the backend it ran on, and with round robin
+        the next statement goes to another."""
+        statements = 2 * PGBOUNCER_POOL_SIZE
+        async with PgDebug(server.pooled, access_mode=access_mode, timeout=7, search_path="public") as pg:
+            seen = [
+                await pg.execute_sql("SELECT current_setting('statement_timeout') AS timeout, current_setting('search_path') AS path")
+                for _ in range(statements)
+            ]
+
+        assert seen == [[{"timeout": "7s", "path": '"public"'}]] * statements
+
+    def test_the_timeout_cancels_a_statement_behind_the_pooler(self, server, run):
+        """A smoke test. It passes with session SETs too, which the driver ran
+        again whenever a timed-out statement made it rebuild its pool: the
+        test above, which reads the setting back, is the one that tells."""
+        code, _, err = run(server.pooled, "--timeout", "1", "execute", "SELECT pg_sleep(3)")
+
+        assert code == 1 and "canceling statement due to statement timeout" in err, err or "the query ran to the end"
 
     @pytest.mark.asyncio
     async def test_index_use_gives_the_direct_verdict_and_leaves_sequential_scans_enabled(self, server):
@@ -170,7 +202,7 @@ class TestBehindATransactionPooler:
         ],
         ids=["explain", "tune-queries"],
     )
-    def test_hypothetical_indexes_do_not_outlive_the_command(self, server, args):
+    def test_hypothetical_indexes_do_not_outlive_the_command(self, server, run, args):
         """HypoPG keeps them in the backend's memory, where another client's EXPLAIN would use them."""
         code, out, err = run(server.pooled, *args)
 
@@ -178,10 +210,24 @@ class TestBehindATransactionPooler:
         assert "pooled_orders" in out
         assert on_every_backend(server.pooled, "SELECT count(*) FROM hypopg()") == [0] * PGBOUNCER_POOL_SIZE
 
-    def test_a_hypothetical_index_does_not_outlive_a_query_that_failed(self, server):
+    def test_a_hypothetical_index_does_not_outlive_a_query_that_failed(self, server, run):
         code, _, err = run(
             server.pooled, "explain", "--hypothetical-index", "pooled_orders(customer_id)", "SELECT * FROM pooled_orders WHERE no_such_column = 1"
         )
 
         assert code == 1 and "no_such_column" in err
+        assert on_every_backend(server.pooled, "SELECT count(*) FROM hypopg()") == [0] * PGBOUNCER_POOL_SIZE
+
+    @pytest.mark.asyncio
+    async def test_a_hypothetical_index_does_not_outlive_a_cancelled_plan(self, server):
+        """Restricted mode's own timeout cancels the statement from this side,
+        which reaches the driver as a cancellation, not as an error PostgreSQL
+        raised. The plan waits for a lock another session holds, after the
+        hypothetical index has been created."""
+        with psycopg.connect(server.direct) as locker:
+            locker.execute("LOCK TABLE pooled_customers IN ACCESS EXCLUSIVE MODE")
+            async with PgDebug(server.pooled, access_mode=AccessMode.RESTRICTED, timeout=1) as pg:
+                with pytest.raises(ExplainPlanError, match=r"timed out|statement timeout"):
+                    await pg.explain_query(WITH_CUSTOMER, hypothetical_indexes=[{"table": "pooled_orders", "columns": ["customer_id"]}])
+
         assert on_every_backend(server.pooled, "SELECT count(*) FROM hypopg()") == [0] * PGBOUNCER_POOL_SIZE

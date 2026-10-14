@@ -10,6 +10,7 @@ from pg_debug import QueryContext
 from pg_debug.db import QUERY_MARKER
 from pg_debug.db.driver import DbConnPool
 from pg_debug.db.driver import build_transaction_setup
+from pg_debug.errors import InvalidArgumentError
 
 
 def rendered(statement) -> str | None:
@@ -86,6 +87,21 @@ async def test_the_pool_sets_nothing_on_its_connections_and_prepares_nothing():
     options = built.call_args.kwargs
     assert "configure" not in options
     assert options["kwargs"] == {"prepare_threshold": None}
+
+
+@pytest.mark.parametrize("seconds", [-1, 2_147_484])
+def test_a_timeout_postgresql_would_refuse_is_refused_up_front(seconds):
+    """Left to the server it would fail every transaction's setup, and be
+    reported as the failure of a query context that is fine."""
+    with pytest.raises(InvalidArgumentError, match="between 0 and 2147483 seconds"):
+        PgDebug("postgresql://localhost/db", timeout=seconds)
+    with pytest.raises(InvalidArgumentError, match="between 0 and 2147483 seconds"):
+        DbConnPool("postgresql://localhost/db", statement_timeout=seconds)
+
+
+@pytest.mark.parametrize("seconds", [0, 2_147_483])
+def test_the_timeouts_postgresql_takes_are_taken(seconds):
+    assert PgDebug("postgresql://localhost/db", timeout=seconds).pool.statement_timeout == seconds
 
 
 def test_unrestricted_mode_has_no_timeout_by_default():

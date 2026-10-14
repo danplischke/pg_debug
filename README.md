@@ -465,8 +465,8 @@ role. So pg-debug keeps each piece of state in the transaction that needs it:
   alone, rather than with a `SET` before it and a `RESET` after, which could
   reach three backends.
 - Hypothetical indexes are created, planned with and reset in one
-  transaction, the reset running even when the plan fails, so another client's
-  plain `EXPLAIN` never plans with them.
+  transaction, the reset running even when the plan fails or is cancelled, so
+  another client's plain `EXPLAIN` never plans with them.
 - pg-debug prepares no statement on the server. psycopg would otherwise
   prepare one it had run five times, which fails behind a pooler that does not
   support prepared statements (`prepared statement "_pg3_0" already exists`).
@@ -616,7 +616,7 @@ If you already manage your own connection, the underlying tools take a `SqlDrive
 can be used without `PgDebug`:
 
 ```python
-from pg_debug import DatabaseHealthTool, SchemaInspector, SqlDriver, TopQueriesCalc
+from pg_debug import DatabaseHealthTool, QueryContext, SchemaInspector, SqlDriver, TopQueriesCalc
 from pg_debug.plans import ExplainPlanTool
 from pg_debug.index import DatabaseTuningAdvisor, TextPresentation
 
@@ -629,7 +629,7 @@ statement on its own, so session state — hypothetical indexes, `SET`, temp
 tables, advisory locks — does not survive from one `execute_query` to the
 next. The statements in one call share a transaction, which is the only unit
 that reaches a single backend behind a transaction pooler, and a `cleanup`
-runs after them in it, even when they fail:
+runs after them in it, even when they fail or are cancelled:
 
 ```python
 sizes = await driver.execute_query(
@@ -639,8 +639,16 @@ sizes = await driver.execute_query(
 )
 ```
 
-A setting a statement needs goes in a query context, `driver.with_context(...)`,
-which applies it inside that statement's transaction. `session()` pins one
+A setting a statement needs goes in a query context, which the driver applies
+inside the transaction of each statement run with `in_context=True`:
+
+```python
+tuned = driver.with_context(QueryContext(settings={"enable_seqscan": "off"}))
+plan = await tuned.execute_query("EXPLAIN SELECT * FROM orders WHERE user_id = 42", in_context=True)
+```
+
+Statements without it run as the connecting user, with no context, as
+pg-debug's own reads of the catalog do. `session()` pins one
 connection to the pool for a block of statements, which saves borrowing one
 for each; on a direct connection that is also one session, but behind a
 transaction pooler it is not. A pinned driver holds a single connection, so do

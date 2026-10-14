@@ -18,6 +18,7 @@ from .db import SafeSqlDriver
 from .db import SqlDriver
 from .db import check_hypopg_installation_status
 from .db import obfuscate_password
+from .db.driver import check_statement_timeout
 from .errors import ConnectionFailedError
 from .errors import ExtensionRequiredError
 from .errors import InvalidArgumentError
@@ -136,7 +137,8 @@ class PgDebug:
             access_mode: ``unrestricted`` (default) allows any statement;
                 ``restricted`` allows only read-only statements.
             timeout: Statement timeout in seconds, applied in both access
-                modes. Defaults to none in unrestricted mode and to
+                modes, from 0 (none) to 2147483, PostgreSQL's limit. Defaults
+                to none in unrestricted mode and to
                 ``DEFAULT_RESTRICTED_TIMEOUT`` in restricted mode.
             search_path: Schema search path for every statement, e.g.
                 ``"reporting, public"``. Index tuning resolves table names
@@ -160,6 +162,7 @@ class PgDebug:
                 connecting user. Checked against the server when the client
                 connects. Applies in restricted mode too.
         """
+        check_statement_timeout(timeout)
         self._database_url = database_url
         self.access_mode = AccessMode(access_mode)
         self.timeout = timeout

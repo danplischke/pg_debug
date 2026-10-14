@@ -102,12 +102,22 @@ rows = await driver.execute_query(
 
 A setting is not a `SET` either, nor a `SET LOCAL`, which ends with the
 statement that made it: a `QueryContext` is the way to run a query with a
-setting, and `driver.with_context(context)` gives a driver that applies one.
+setting. `driver.with_context(context)` gives a driver that applies one to
+the statements it runs with `in_context=True`, and to no others:
+
+```python
+tuned = driver.with_context(QueryContext(settings={"work_mem": "256MB"}))
+rows = await tuned.execute_query("EXPLAIN ANALYZE SELECT ...", in_context=True)
+```
+
 `driver.session()` pins one pooled connection for a block of statements; that
 is one session on a direct connection, but not behind a transaction pooler.
 
-If you build your own psycopg connection or pool for `SqlDriver(conn=...)` and
-it may go through a transaction pooler, pass `prepare_threshold=None`, as
-pg-debug's own pool does: psycopg prepares a statement it has run five times,
-and a pooler without prepared-statement support fails it with
+`SqlDriver(conn=...)` takes a `DbConnPool`, which already prepares nothing on
+the server, or a single psycopg connection. If you open that connection
+yourself and it may go through a transaction pooler, open it with
+`psycopg.AsyncConnection.connect(url, prepare_threshold=None)` (or build the
+psycopg pool you borrow it from with `kwargs={"prepare_threshold": None}`):
+psycopg prepares a statement it has run five times, and a pooler without
+prepared-statement support fails it with
 `prepared statement "_pg3_0" already exists`.

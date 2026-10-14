@@ -12,8 +12,9 @@ reason is structural, and the first half has usually already named it.
 
 Everything here is read from the statement, the catalog and plans. Nothing is
 executed: ``EXPLAIN`` without ``ANALYZE`` plans a query and does not run it.
-The one thing restricted mode cannot do is the forced plan, which needs a
-``SET`` for the session, and the verdict says so rather than guessing.
+Sequential scans are disabled through the query context, inside the forced
+plan's own transaction, so it writes nothing, leaves nothing on the backend,
+and runs in restricted mode too.
 """
 
 from __future__ import annotations
