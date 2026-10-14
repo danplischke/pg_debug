@@ -293,9 +293,9 @@ class PlanDiagnoser:
 
         try:
             if read_only:
-                rows = await self._driver.execute_query(query)
+                rows = await self._driver.execute_query(query, in_context=True)
             else:
-                rows = await self._driver.execute_query_and_rollback(query)
+                rows = await self._driver.execute_query_and_rollback(query, in_context=True)
         except Exception as e:
             raise ExplainPlanError(f"Could not run the statement to diagnose it: {e}") from e
 
@@ -359,9 +359,12 @@ class PlanDiagnoser:
         return [row.cells for row in rows] if rows else []
 
     async def _work_mem(self) -> str | None:
-        """The session's ``work_mem``, quoted back in any spill finding."""
+        """The ``work_mem`` the query ran with, quoted back in any spill finding.
+
+        Read in the query context, which may be what set it.
+        """
         try:
-            rows = await self._driver.execute_query("SELECT current_setting('work_mem') AS work_mem")
+            rows = await self._driver.execute_query("SELECT current_setting('work_mem') AS work_mem", in_context=True)
         except Exception as e:
             logger.debug("Could not read work_mem: %s", e)
             return None

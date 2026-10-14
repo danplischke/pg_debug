@@ -1,6 +1,6 @@
 ---
 name: pg-debug
-description: Diagnose and tune a live PostgreSQL database with the pg-debug CLI or its pg_debug Python library: why a query is slow, spilled to disk or misestimated its rows, whether an index would help (simulated with HypoPG, never created) and which to add, what is blocking a stuck database, health (bloat, unused indexes, vacuum and wraparound, stale statistics), the most expensive queries, server settings, data model defects, whether a migration will lock or rewrite a table, whether a table is worth partitioning, and what tables, columns and indexes exist. Use it whenever the user asks why Postgres is slow, stuck or blocked, about EXPLAIN plans, indexes, schema design, migration safety, partitioning or database health, even without naming pg-debug, and when writing code against pg_debug.
+description: Diagnose and tune a live PostgreSQL database with the pg-debug CLI or its pg_debug Python library: why a query is slow, spilled to disk or misestimated its rows, whether an index would help (simulated with HypoPG, never created) and which to add, what is blocking a stuck database, health (bloat, unused indexes, vacuum and wraparound, stale statistics), the most expensive queries, server settings, data model defects, whether a migration will lock or rewrite a table, whether a table is worth partitioning, and what tables, columns and indexes exist. Use it whenever the user asks why Postgres is slow, stuck or blocked, about EXPLAIN plans, indexes, row-level security, schema design, migration safety, partitioning or database health, even without naming pg-debug, and when writing code against pg_debug.
 ---
 
 # pg_debug
@@ -67,6 +67,7 @@ and answering the question.
 | Would an index help? Which indexes should I add? | `pg-debug explain "<query>" -i 'table(column)'`, `tune-queries`, `tune-workload` | [slow-queries.md](references/slow-queries.md) |
 | Why is my index not used? | `pg-debug index-use "<query>"` | [slow-queries.md](references/slow-queries.md) |
 | Why are the row estimates wrong? | `pg-debug column-stats <table>`, `health --type statistics` | [slow-queries.md](references/slow-queries.md) |
+| Why does the application see other rows or plans? (row-level security, a role, session variables) | `pg-debug explain --role ROLE --set NAME=VALUE "<query>"`, or the project's `pg-debug.toml` | [slow-queries.md](references/slow-queries.md) |
 | The database is stuck. Who is blocking whom? | `pg-debug activity --blocked`, `locks`, `vacuum-progress` | [incidents.md](references/incidents.md) |
 | Is the database healthy? | `pg-debug health` | [health.md](references/health.md) |
 | What is the database spending its time on? | `pg-debug top-queries --interval 10` | [health.md](references/health.md) |

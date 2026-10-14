@@ -12,6 +12,7 @@ from typing import Literal
 from .activity import ActivityInspector
 from .configuration import ConfigFinding
 from .configuration import ConfigurationReviewer
+from .context import QueryContext
 from .db import DbConnPool
 from .db import SafeSqlDriver
 from .db import SqlDriver
@@ -126,6 +127,7 @@ class PgDebug:
         search_path: str | None = None,
         llm_model: str | None = None,
         pool: DbConnPool | None = None,
+        context: QueryContext | None = None,
     ):
         """
         Args:
@@ -146,12 +148,23 @@ class PgDebug:
                 does not close it on exit and does not reconfigure it, so
                 ``search_path`` and the server-side timeout are its owner's
                 responsibility.
+            context: The role and settings to run your queries with, as your
+                application's sessions would: a role that row-level security
+                applies to, and the variables its policies read. Applied by
+                :meth:`execute_sql`, :meth:`explain_query`,
+                :meth:`diagnose_query`, :meth:`explain_index_use` and the
+                plans index tuning compares, to each statement's transaction
+                alone; pg-debug's own reads of the catalog run as the
+                connecting user. Checked against the server when the client
+                connects. Applies in restricted mode too.
         """
         self._database_url = database_url
         self.access_mode = AccessMode(access_mode)
         self.timeout = timeout
         self.search_path = search_path
         self.llm_model = llm_model
+        self.context = context
+        self._context_checked = False
         self._pool = (
             pool
             if pool is not None
@@ -192,6 +205,9 @@ class PgDebug:
 
         Raises:
             ConnectionFailedError: If the database could not be reached.
+            InvalidArgumentError: If the server refused the query context: a
+                role the connecting user is not a member of, or a setting it
+                does not know or will not take.
         """
         try:
             await self._pool.pool_connect(self.database_url)
@@ -199,7 +215,15 @@ class PgDebug:
             raise
         except Exception as e:
             raise ConnectionFailedError(f"Could not connect to database: {obfuscate_password(str(e))}") from e
+        await self._check_context()
         return self
+
+    async def _check_context(self) -> None:
+        """Have the server refuse a bad context once, before any query depends on it."""
+        if not self.context or self._context_checked:
+            return
+        await SqlDriver(conn=self._pool, context=self.context).check_context()
+        self._context_checked = True
 
     async def close(self) -> None:
         """Close the connection pool, unless it was supplied by the caller."""
@@ -220,8 +244,11 @@ class PgDebug:
         """
         if not self._pool.is_valid:
             await self.connect()
+        else:
+            # A pool handed in already open skips connect().
+            await self._check_context()
 
-        base_driver = SqlDriver(conn=self._pool)
+        base_driver = SqlDriver(conn=self._pool, context=self.context)
         if self.access_mode == AccessMode.RESTRICTED:
             logger.debug("Using SafeSqlDriver with restrictions (RESTRICTED mode)")
             return SafeSqlDriver(sql_driver=base_driver, timeout=self.effective_timeout)
@@ -262,7 +289,7 @@ class PgDebug:
             example) return an empty list.
         """
         driver = await self.sql_driver()
-        rows = await driver.execute_query(sql)  # type: ignore[arg-type]
+        rows = await driver.execute_query(sql, in_context=True)  # type: ignore[arg-type]
         return [row.cells for row in rows] if rows else []
 
     async def explain_query(

@@ -10,6 +10,7 @@ import pytest
 
 from pg_debug import AccessMode
 from pg_debug import PgDebug
+from pg_debug import QueryContext
 from pg_debug import SyncPgDebug
 from pg_debug.db import DbConnPool
 from pg_debug.errors import ExtensionRequiredError
@@ -35,11 +36,13 @@ def pg(pool):
 
 
 def test_configuration_is_passed_through():
-    pg = SyncPgDebug("postgresql://localhost/db", access_mode="restricted", timeout=7, search_path="reporting")
+    context = QueryContext(role="app_user", settings={"app.tenant_id": "t7"})
+    pg = SyncPgDebug("postgresql://localhost/db", access_mode="restricted", timeout=7, search_path="reporting", context=context)
     try:
         assert pg.client.access_mode is AccessMode.RESTRICTED
         assert pg.client.effective_timeout == 7
         assert pg.client.search_path == "reporting"
+        assert pg.client.context is context
     finally:
         pg.close()
 

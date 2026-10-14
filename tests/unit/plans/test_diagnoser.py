@@ -248,3 +248,41 @@ async def test_running_a_query_needs_a_driver_and_says_what_does_not():
 async def test_restricted_mode_points_at_the_plan_route():
     with pytest.raises(InvalidArgumentError, match="--plan"):
         await PlanDiagnoser(SafeSqlDriver(driver_returning_a_plan())).diagnose("SELECT 1")
+
+
+# -- The query context ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_statement_and_the_work_mem_it_ran_with_are_read_in_the_query_context():
+    """The context is the application's role and settings: the statement runs
+    under them, and a spill finding quotes the work_mem it ran with. The
+    catalog is read as the connecting user, from whom row-level security hides
+    no statistics."""
+    driver = MagicMock(spec=SqlDriver)
+
+    async def execute(query, *args, **kwargs):
+        if "EXPLAIN" in query:
+            return [SqlDriver.RowResult(cells={"QUERY PLAN": [MISESTIMATE]})]
+        return []
+
+    driver.execute_query = AsyncMock(side_effect=execute)
+
+    await PlanDiagnoser(driver).diagnose("SELECT * FROM visits WHERE a = 1 AND b = 2")
+
+    calls = driver.execute_query.await_args_list
+    in_context = [call.args[0] for call in calls if call.kwargs.get("in_context")]
+    outside = [call.args[0] for call in calls if not call.kwargs.get("in_context")]
+    assert len(in_context) == 2
+    assert in_context[0].startswith("EXPLAIN")
+    assert "work_mem" in in_context[1]
+    assert any("pg_statistic_ext" in query for query in outside)
+
+
+@pytest.mark.asyncio
+async def test_a_write_rolled_back_after_runs_in_the_query_context_too():
+    driver = driver_returning_a_plan()
+
+    await PlanDiagnoser(driver).diagnose("DELETE FROM visits WHERE id = 1")
+
+    assert driver.execute_query_and_rollback.await_args.kwargs == {"in_context": True}

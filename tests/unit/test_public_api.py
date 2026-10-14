@@ -64,6 +64,7 @@ PUBLIC_NAMES = [
     "PlanFinding",
     "PlanIssue",
     "PlanNode",
+    "QueryContext",
     "QueryError",
     "RuleId",
     "SafeSqlDriver",

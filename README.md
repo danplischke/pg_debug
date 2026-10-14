@@ -72,6 +72,9 @@ pg-debug diagnose --plan - < auto_explain.json   # and no database needed
 pg-debug index-use "SELECT * FROM orders WHERE lower(email) = 'a@b.c'"   # why is my index not used?
 pg-debug index-use -i orders_email_idx ./query.sql
 
+pg-debug explain --role app_user --set app.tenant_id=7 "SELECT * FROM orders WHERE total > 100"   # as the app sees it
+pg-debug diagnose --set work_mem=64MB ./slow.sql   # try the work_mem diagnose suggested
+
 pg-debug activity                       # what is running right now
 pg-debug activity --blocked              # only backends waiting on a lock
 pg-debug activity --min-duration 30      # queries running longer than 30s
@@ -140,6 +143,11 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10, ignored for cumulative `resources`), `-i, --interval SECONDS` |
 | `tune-workload` | `--max-index-size-mb MB` (default 10000), `--method {dta,llm}` (default `dta`) |
 | `tune-queries QUERY...` | up to 10 queries, same options as `tune-workload` |
+
+`execute`, `explain`, `diagnose`, `index-use`, `tune-workload` and
+`tune-queries` also take the [query context](#running-a-query-as-your-application-does)
+options: `--role ROLE`, `--set NAME=VALUE` (repeatable), `--config FILE` and
+`--no-config`.
 
 Health checks are `index`, `connection`, `vacuum`, `sequence`, `replication`,
 `buffer`, `constraint`, `statistics`, `table`, `scan` and `all`.
@@ -369,6 +377,78 @@ A hypothetical index `SPEC` is `table(column, ...)` with an optional method —
 `users((first_name || ' ' || last_name))`. Commas inside a function call or a
 quoted string belong to that expression, not to the column list.
 
+### Running a query as your application does
+
+pg-debug connects as whoever the URL names, often the owner of the tables, and
+your application probably does not. It connects as a role of its own and sets
+variables for its session, and the planner sees all of that. Run as the owner,
+a query on a table with row-level security sees every tenant's rows, because
+owners bypass the policies, and plans without the policy's predicate: a
+`Seq Scan` where the application gets an index scan on `tenant_id`.
+`EXPLAIN ANALYZE` of a query whose policy reads a variable nobody set fails
+outright.
+
+A query context declares the role and settings your application runs with.
+Put it in a `pg-debug.toml`, which a command reads from the directory it runs
+in or the nearest parent that has one:
+
+```toml
+[context]
+role = "app_user"
+
+[context.settings]
+app.tenant_id = "7"
+work_mem = "64MB"
+```
+
+or give it on the command line, where `--role` and `--set` override the file:
+
+```bash
+pg-debug explain --role app_user --set app.tenant_id=7 "SELECT * FROM orders WHERE total > 100"
+pg-debug diagnose --set work_mem=256MB ./slow.sql    # the setting diagnose suggested, tried before it is set
+```
+
+The context applies to the statements that run or plan your query (`execute`,
+`explain`, `diagnose`, `index-use` and the plans the tuners compare) and to
+nothing else. It is applied inside each statement's own transaction, with
+`set_config(name, value, true)` and the role last, as `SET LOCAL ROLE` would:
+it ends with the transaction, so it never outlives the statement on a pooled
+connection. pg-debug's own reads of the catalog run as the connecting user, who
+sees statistics that row-level security hides from the application's role.
+Commands that only read the catalog (`health`, `config`, `top-queries` and the
+rest) do not take a context and do not read the file.
+
+Each command that applies one says so on stderr, with where it came from:
+
+```text
+pg-debug: query context: role app_user, app.tenant_id=7, work_mem=64MB (from /work/shop/pg-debug.toml)
+```
+
+pg-debug checks the context against the server before running anything: a role
+the connecting user is not a member of, or a setting the server does not know,
+fails once, with PostgreSQL's reason. `--config FILE` reads another file and
+`--no-config` reads none.
+
+- A setting's name may be quoted, `"app.tenant_id" = "7"`, or written as a
+  dotted key, as above. Values are text, as `set_config` takes them; a number
+  or a boolean is turned into text, `true` into `"true"`. A JSON value, such as
+  PostgREST's `request.jwt.claims`, is a string.
+- `statement_timeout`, `search_path`, the role and the read-only settings are
+  refused, each with the option that owns it (`--timeout`, `--search-path`,
+  `role`, `--access-mode`). A context cannot loosen restricted mode, and it
+  works there: setting a role or a variable writes nothing.
+- The file holds the context and nothing else. The connection URL, and with it
+  the password, never goes in it.
+- Switching to a role does not apply that role's own defaults, the ones
+  `ALTER ROLE ... SET` gives it at login. If your application's role has any,
+  declare them under `[context.settings]` too.
+- The index advisor takes its candidate columns from the query's text. Under a
+  context it costs every candidate with the policy's predicate in the plan, but
+  it does not propose an index on a column only the policy restricts;
+  `explain -i 'orders(tenant_id, total)'` tests one. `tune-workload` plans every
+  recorded query as the context's role, so queries that role may not run are
+  skipped, with PostgreSQL's reason for the first.
+
 SQL arguments accept `-` to read the statement from stdin:
 
 ```bash
@@ -423,6 +503,21 @@ asyncio.run(main())
 The client connects lazily on first use; `await pg.connect()` up front fails fast on a
 bad URL instead.
 
+A [query context](#running-a-query-as-your-application-does) is a
+`QueryContext`, applied by `execute_sql`, `explain_query`, `diagnose_query`,
+`explain_index_use` and index tuning:
+
+```python
+from pg_debug import PgDebug, QueryContext
+
+context = QueryContext(role="app_user", settings={"app.tenant_id": "7"})
+async with PgDebug("postgresql://localhost/mydb", context=context) as pg:
+    plan = await pg.explain_query("SELECT * FROM orders WHERE total > 100")
+
+# or the one the command line uses
+context = QueryContext.from_file("pg-debug.toml")
+```
+
 ### Return values
 
 | Method | Returns |
@@ -471,6 +566,9 @@ Failures raise instead of returning error strings. All exceptions derive from
 A statement PostgreSQL rejects, or restricted mode refuses, raises
 `QueryError`; when PostgreSQL rejected it, psycopg's exception, SQLSTATE and
 all, is its `__cause__`.
+A query context the server refuses, a role the connecting user is not a
+member of or a setting it does not know, raises `InvalidArgumentError` when the
+client connects, before any query depends on it.
 
 ### Without async
 
@@ -640,8 +738,8 @@ is the same for coding agents.
 
 | Under `src/pg_debug/` | What it holds |
 | --- | --- |
-| `client.py`, `sync.py`, `errors.py`, `severity.py` | The public surface: `PgDebug`, `SyncPgDebug`, the exceptions, and how findings are graded (`Severity`, `Confidence`). |
-| `cli/` | The `pg-debug` command: `parser.py` defines its arguments and which handler and renderer each subcommand uses, `commands.py` holds the handlers, `render.py` formats the results, and `streams.py` reads input and writes output as UTF-8. |
+| `client.py`, `sync.py`, `errors.py`, `severity.py`, `context.py` | The public surface: `PgDebug`, `SyncPgDebug`, the exceptions, how findings are graded (`Severity`, `Confidence`), and the role and settings queries run with (`QueryContext`, `pg-debug.toml`). |
+| `cli/` | The `pg-debug` command: `parser.py` defines its arguments and which handler and renderer each subcommand uses, `commands.py` holds the handlers, `render.py` formats the results, `streams.py` reads input and writes output as UTF-8, and `config_file.py` finds `pg-debug.toml`. |
 | `db/` | Talking to PostgreSQL: the driver and pool, restricted mode and its allowlist, extension and version checks, identifiers. |
 | `parsing/` | Reading SQL pg_debug is given to analyse: the pglast visitors and bind-parameter substitution. |
 | `queries/` | SQL that more than one module runs. A feature's own queries live beside the code that reads their rows. |

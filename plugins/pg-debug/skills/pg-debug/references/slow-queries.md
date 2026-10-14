@@ -103,6 +103,57 @@ planner's cost with the index in place, without touching the database. Compare
 `Total Cost` before and after and say what changed rather than asserting an
 index is a good idea.
 
+## When the application runs as another role
+
+pg-debug sees the database as the user in the connection URL. When that is the
+tables' owner and the application connects as a role of its own, with session
+variables its row-level security policies read, the answers differ: the owner
+bypasses the policies, so its plan has no policy predicate and its counts
+include every tenant's rows. Suspect it when the user mentions row-level
+security, tenants, `SET ROLE` or `current_setting(...)`; when `diagnose` fails
+with `unrecognized configuration parameter "app.something"`; or when a plan the
+user pasted has a filter the one you got does not.
+
+Run the query the way the application does:
+
+```bash
+pg-debug explain --role app_user --set app.tenant_id=7 "<query>"
+pg-debug diagnose --role app_user --set app.tenant_id=7 "<query>"
+pg-debug explain --role app_user --set app.tenant_id=7 -i 'orders(tenant_id, total)' "<query>"
+```
+
+A project can declare it once in a `pg-debug.toml`, which the commands that
+run or plan a query read from the working directory up; look for one before
+asking the user for the role:
+
+```toml
+[context]
+role = "app_user"
+
+[context.settings]
+app.tenant_id = "7"
+```
+
+`--role` and `--set` override the file, and `--no-config` ignores it. Every run
+that applies a context prints `pg-debug: query context: ...` on stderr. Relay
+it with the answer: a plan is only true for the role and settings it was taken
+under.
+
+- The context covers only the statements that run or plan the query; the
+  catalog is still read as the connecting user, who has to be a member of the
+  role. A role or setting the server refuses fails before anything runs.
+- Switching to a role does not apply its `ALTER ROLE ... SET` defaults, which
+  only a login gets. If the application's role has any, add them with `--set`.
+- The index advisor costs its candidates with the policy in the plan but takes
+  candidate columns from the query's text, so it never proposes a column only
+  the policy restricts. Test that one yourself with `-i`, as above.
+- `statement_timeout`, `search_path` and the role cannot be `--set`; use
+  `--timeout`, `--search-path` and `--role`.
+
+`--set` also tries a setting before anyone changes the server. When `diagnose`
+suggests a `work_mem`, run it again with `--set work_mem=...` and report
+whether the spill went away.
+
 ## Why the planner got it wrong
 
 When `explain --analyze` shows estimated rows far from actual rows, no index

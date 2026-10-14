@@ -6,6 +6,7 @@ import pytest
 
 from pg_debug import AccessMode
 from pg_debug import PgDebug
+from pg_debug import QueryContext
 from pg_debug.client import resolve_database_url
 from pg_debug.db import DbConnPool
 from pg_debug.db import SafeSqlDriver
@@ -144,6 +145,78 @@ async def test_sql_driver_connects_when_pool_is_not_valid():
     await PgDebug("postgresql://localhost/db", pool=pool).sql_driver()
 
     pool.pool_connect.assert_awaited_once_with("postgresql://localhost/db")
+
+
+# -- The query context ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("access_mode", list(AccessMode))
+async def test_the_driver_that_runs_statements_carries_the_query_context(pool, access_mode):
+    context = QueryContext(role="app_user")
+
+    with patch.object(SqlDriver, "check_context", AsyncMock()):
+        driver = await PgDebug(access_mode=access_mode, pool=pool, context=context).sql_driver()
+
+    base = driver.sql_driver if isinstance(driver, SafeSqlDriver) else driver
+    assert base.context is context
+
+
+@pytest.mark.asyncio
+async def test_the_context_is_checked_once_rather_than_per_call(pool):
+    check = AsyncMock()
+
+    with patch.object(SqlDriver, "check_context", check):
+        pg = PgDebug(pool=pool, context=QueryContext(role="app_user"))
+        await pg.sql_driver()
+        await pg.sql_driver()
+
+    check.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_connecting_checks_the_context():
+    pool = MagicMock(spec=DbConnPool)
+    pool.is_valid = False
+    pool.pool_connect = AsyncMock()
+    check = AsyncMock()
+
+    with patch.object(SqlDriver, "check_context", check):
+        await PgDebug("postgresql://localhost/db", pool=pool, context=QueryContext(role="app_user")).connect()
+
+    check.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_context_the_server_refuses_fails_before_the_query_runs(pool):
+    refused = InvalidArgumentError('Could not apply the query context (role nobody): role "nobody" does not exist')
+
+    with patch.object(SqlDriver, "check_context", AsyncMock(side_effect=refused)), patch.object(SqlDriver, "execute_query", AsyncMock()) as execute:
+        with pytest.raises(InvalidArgumentError, match='role "nobody" does not exist'):
+            await PgDebug(pool=pool, context=QueryContext(role="nobody")).execute_sql("SELECT 1")
+
+    execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_without_a_context_nothing_is_checked(pool):
+    check = AsyncMock()
+
+    with patch.object(SqlDriver, "check_context", check):
+        await PgDebug(pool=pool).sql_driver()
+
+    check.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_sql_runs_the_statement_in_the_query_context(pg):
+    driver = MagicMock(spec=SqlDriver)
+    driver.execute_query = AsyncMock(return_value=[])
+
+    with patch.object(PgDebug, "sql_driver", AsyncMock(return_value=driver)):
+        await pg.execute_sql("SELECT 1")
+
+    assert driver.execute_query.await_args.kwargs == {"in_context": True}
 
 
 # -- Queries ----------------------------------------------------------------

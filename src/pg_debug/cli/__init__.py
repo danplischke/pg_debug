@@ -26,6 +26,7 @@ from ..errors import PgDebugError
 from ..migration import MigrationLinter
 from ..plans import diagnose_plan
 from ..severity import Severity
+from .config_file import resolve_context
 from .parser import PROG
 from .parser import UNHEALTHY_EXIT_CODE
 from .parser import build_parser
@@ -77,12 +78,19 @@ async def run(args: argparse.Namespace) -> int:
         print(format_result(args, diagnose_plan(read_sql_or_file(args.sql), min_ratio=args.min_ratio)))
         return 0
 
+    context, source = resolve_context(args)
+    if context is not None:
+        # A role or a variable changes what the query sees, and a file found
+        # in a parent directory is easy to forget, so every run says so.
+        print(f"{PROG}: query context: {context.describe()} (from {source})", file=sys.stderr)
+
     async with PgDebug(
         database_url=args.database_url,
         access_mode=AccessMode(args.access_mode),
         timeout=args.timeout,
         search_path=args.search_path,
         llm_model=args.llm_model,
+        context=context,
     ) as pg:
         result = await args.func(pg, args)
 

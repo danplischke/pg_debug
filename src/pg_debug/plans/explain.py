@@ -172,7 +172,7 @@ class ExplainPlanTool:
 
             explain_q = f"EXPLAIN ({', '.join(explain_options)}) {query}"
             logger.debug("RUNNING EXPLAIN QUERY: %s", explain_q)
-            rows = await self.sql_driver.execute_query(explain_q)  # type: ignore
+            rows = await self.sql_driver.execute_query(explain_q, in_context=True)  # type: ignore
             if rows is None:
                 raise ExplainPlanError("No results returned from EXPLAIN")
 
@@ -231,7 +231,9 @@ class ExplainPlanTool:
                 explain_options.append("COSTS TRUE")
 
             explain_plan_query = f"{create_indexes_query}EXPLAIN ({', '.join(explain_options)}) {query_text}"
-            plan_result = await self.sql_driver.execute_query(explain_plan_query)  # type: ignore
+            # The whole batch shares one transaction and so the context: the
+            # hypothetical indexes it creates live in the backend, not the role.
+            plan_result = await self.sql_driver.execute_query(explain_plan_query, in_context=True)  # type: ignore
 
             # Extract the plan
             if plan_result and plan_result[0].cells.get("QUERY PLAN"):
