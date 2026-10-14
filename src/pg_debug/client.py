@@ -238,7 +238,8 @@ class PgDebug:
         transaction's setup, as everywhere else, the timeout would make every
         statement fail before it ran, and restricted mode always has one. So
         on DSQL it is not set on the server. DSQL is recognised from the URL's
-        host, before anything runs: no statement could run to ask the server.
+        host or its ``amzn-cluster-id`` option, before anything runs: no
+        statement could run to ask the server.
 
         The pool keeps the same number of seconds on this side instead, which
         restricted mode does for every statement already. With ``timeout`` in
@@ -268,9 +269,9 @@ class PgDebug:
     async def _detect_platform(self) -> PlatformDetection:
         """Which managed platform the server runs on, detected once per client.
 
-        One statement, which restricted mode allows, and the host of the URL
-        the pool connected with; :func:`~pg_debug.platform.detect_platform`
-        lists the signals.
+        One statement, which restricted mode allows, and the host and options
+        of the URL the pool connected with;
+        :func:`~pg_debug.platform.detect_platform` lists the signals.
         """
         if self._platform is None:
             driver = await self.sql_driver()

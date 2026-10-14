@@ -18,7 +18,7 @@ from .restricted import SafeSqlDriver
 logger = logging.getLogger(__name__)
 
 #: Platforms whose documentation offers HypoPG for the user to create. Azure
-#: offers it too, once it is allowlisted, and gets a message of its own.
+#: offers it too, once it is allowlisted, and gets messages of its own.
 _OFFER_HYPOPG = frozenset(
     {
         Platform.NEON,
@@ -33,7 +33,7 @@ _OFFER_HYPOPG = frozenset(
 )
 
 #: Platforms whose documentation says they do not offer it.
-_LACK_HYPOPG = frozenset({Platform.CLOUD_SQL, Platform.TIGER_CLOUD, Platform.PRISMA_POSTGRES, Platform.AURORA_DSQL})
+_LACK_HYPOPG = frozenset({Platform.CLOUD_SQL, Platform.TIGER_CLOUD, Platform.PRISMA_POSTGRES, Platform.AURORA_DSQL, Platform.LAKEBASE})
 
 #: The statement that creates it.
 _CREATE_HYPOPG = "CREATE EXTENSION hypopg"
@@ -299,13 +299,13 @@ async def check_hypopg_installation_status(
 
     detection = await platform() if platform is not None else await detect_platform(sql_driver)
     text = _Text(markdown=message_type == "markdown")
+    allowlist = await _azure_allowlist(sql_driver) if detection.platform is Platform.AZURE else None
 
     if status.is_available:
-        allowlist = await _azure_allowlist(sql_driver) if detection.platform is Platform.AZURE else None
         return False, text.paragraphs(_create_hypopg(text, detection, status.default_version, allowlist))
 
     pg_version = await get_postgres_version(sql_driver)
-    return False, text.paragraphs(_hypopg_unavailable(text, detection, pg_version))
+    return False, text.paragraphs(_hypopg_unavailable(text, detection, pg_version, allowlist))
 
 
 class _Text:
@@ -359,18 +359,26 @@ def _create_hypopg(text: _Text, detection: PlatformDetection, version: str | Non
     parts = [f"The {text.name('hypopg')} extension is required to simulate indexes, but it has not been created in this database. {where}"]
     if platform is Platform.AZURE:
         parts.append(_azure_allowlisting(text, allowlist))
-        parts.append(
-            f"Then create it with {text.create()}, and not in {text.code('pg_catalog')}: Azure's autonomous tuning drops a copy installed there."
-        )
+        parts.append(_azure_create(text, "Then create it"))
     else:
         parts.append(f"Create it with {text.create()}.")
-    parts.append(
+    parts.append(_ask_first(text))
+    parts.append(_identified(detection))
+    return parts
+
+
+def _ask_first(text: _Text) -> str:
+    """Why creating HypoPG is the database owner's call, and what it does."""
+    return (
         "It is a write, so restricted mode refuses it, and it changes the database, so ask whoever owns the database before "
         "running it. HypoPG only simulates indexes, in the memory of the session that asks for them, and creates none; "
         f"{text.code('DROP EXTENSION hypopg')} removes it again."
     )
-    parts.append(_identified(detection))
-    return parts
+
+
+def _azure_create(text: _Text, lead: str) -> str:
+    """How to create HypoPG on Azure, and where not to."""
+    return f"{lead} with {text.create()}, and not in {text.code('pg_catalog')}: Azure's autonomous tuning drops a copy installed there."
 
 
 def _azure_allowlisting(text: _Text, allowlist: list[str] | None) -> str:
@@ -390,7 +398,7 @@ def _azure_allowlisting(text: _Text, allowlist: list[str] | None) -> str:
     )
 
 
-def _hypopg_unavailable(text: _Text, detection: PlatformDetection, pg_version: int) -> list[str]:
+def _hypopg_unavailable(text: _Text, detection: PlatformDetection, pg_version: int, allowlist: list[str] | None) -> list[str]:
     """Advice for a server that does not list HypoPG at all."""
     platform = detection.platform
     unlisted = f"this server does not list it in {text.code('pg_available_extensions')}"
@@ -402,13 +410,17 @@ def _hypopg_unavailable(text: _Text, detection: PlatformDetection, pg_version: i
         ]
     if platform in _OFFER_HYPOPG:
         version = f"; this server runs PostgreSQL {pg_version}" if pg_version > 0 else ""
-        return [
+        parts = [
             f"The {text.name('hypopg')} extension is required to simulate indexes, and {unlisted}, though {platform.label} "
             f"documents it as one it offers. {platform.label}'s list of supported extensions says which PostgreSQL versions "
             f"have it{version}.",
-            f"Until it can be created, pg-debug cannot simulate an index here. {text.without()}",
-            _identified(detection),
         ]
+        if platform is Platform.AZURE:
+            # Whether Azure lists an extension before it is allowlisted is not
+            # documented, so the allowlist may be why it is missing.
+            parts += [_azure_allowlisting(text, allowlist), _azure_create(text, "Once this server lists it, create it"), _ask_first(text)]
+        parts += [f"Until it can be created, pg-debug cannot simulate an index here. {text.without()}", _identified(detection)]
+        return parts
 
     major_version_str = f"{pg_version}" if pg_version > 0 else "XX"
     steps = [

@@ -19,12 +19,13 @@ from pg_debug.db import DbConnPool
 from pg_debug.db import SqlDriver
 from pg_debug.db.extensions import ExtensionStatus
 from pg_debug.errors import ExtensionRequiredError
+from pg_debug.platform import Basis
 from pg_debug.platform import Platform
 from pg_debug.platform import PlatformDetection
 
 DSQL_URL = "postgresql://admin@abcdefghijklmnopqrstuvwxyz.dsql.us-east-1.on.aws/postgres"
-NEON = PlatformDetection(Platform.NEON, "the server has the setting neon.timeline_id")
-CLOUD_SQL = PlatformDetection(Platform.CLOUD_SQL, "the role cloudsqlsuperuser exists")
+NEON = PlatformDetection(Platform.NEON, "the server has the setting neon.timeline_id", Basis.SERVER)
+CLOUD_SQL = PlatformDetection(Platform.CLOUD_SQL, "the role cloudsqlsuperuser exists", Basis.ROLE)
 
 
 @pytest.fixture
@@ -143,6 +144,41 @@ async def test_a_dsql_host_is_never_sent_a_timeout_even_a_zero_one(caplog):
 
     assert SqlDriver(conn=pg.pool)._transaction_setup(in_context=False) is None
     assert caplog.text == "", "there is no bound to warn about"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # PrivateLink with private DNS: the service's identifier in dsql's place.
+        "postgresql://admin@abcdefghij.dsql-fnh4.us-east-1.on.aws/postgres",
+        # PrivateLink without it: the endpoint's own name, and the cluster in the options.
+        "postgresql://admin@vpce-04037adb76c111221-d849uc2p.dsql-fnh4.us-east-1.vpce.amazonaws.com/postgres"
+        "?options=-c%20amzn-cluster-id%3Dabcdefghij",
+        # Or the endpoint's address.
+        "postgresql://admin@10.0.1.5/postgres?options=-c%20amzn-cluster-id%3Dabcdefghij",
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_dsql_cluster_reached_through_privatelink_keeps_the_timeout_on_this_side(url, caplog):
+    pg = PgDebug(url, access_mode=AccessMode.RESTRICTED)
+
+    with caplog.at_level(logging.WARNING, logger="pg_debug.client"):
+        await connect(pg)
+
+    assert pg.pool.server_side_timeout is False
+    assert SqlDriver(conn=pg.pool)._transaction_setup(in_context=False) is None
+    assert "Aurora DSQL refuses statement_timeout" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_dsql_cluster_named_in_pgoptions_keeps_the_timeout_on_this_side(monkeypatch):
+    """AWS's own example for PrivateLink without private DNS sets the cluster in PGOPTIONS."""
+    monkeypatch.setenv("PGOPTIONS", "-c amzn-cluster-id=abcdefghij")
+    pg = PgDebug("postgresql://admin@vpce-04037adb76c111221-d849uc2p.example.internal/postgres", timeout=5)
+
+    await connect(pg)
+
+    assert pg.pool.server_side_timeout is False
 
 
 @pytest.mark.asyncio

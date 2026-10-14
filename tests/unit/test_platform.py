@@ -15,6 +15,7 @@ from pg_debug.db import SqlDriver
 from pg_debug.errors import QueryError
 from pg_debug.platform import PLATFORM_ROLES
 from pg_debug.platform import PLATFORM_SQL
+from pg_debug.platform import Basis
 from pg_debug.platform import Platform
 from pg_debug.platform import detect_from_url
 from pg_debug.platform import detect_platform
@@ -52,6 +53,12 @@ def server(**signals) -> MagicMock:
         ("postgres://u:p@db.prisma.io:5432/postgres", Platform.PRISMA_POSTGRES),
         ("postgresql://tsdbadmin:p@abc123.def456.tsdb.cloud.timescale.com:33001/tsdb", Platform.TIGER_CLOUD),
         ("postgresql://admin@abcdefghijklmnopqrstuvwxyz.dsql.us-east-1.on.aws/postgres", Platform.AURORA_DSQL),
+        # Through PrivateLink with private DNS, the service's identifier takes dsql's place.
+        ("postgresql://admin@abcdefghijklmnopqrstuvwxyz.dsql-fnh4.us-east-1.on.aws/postgres", Platform.AURORA_DSQL),
+        # Through PrivateLink without it, the endpoint's own name.
+        ("postgresql://admin@vpce-04037adb76c111221-d849uc2p.dsql-fnh4.us-east-1.vpce.amazonaws.com/postgres", Platform.AURORA_DSQL),
+        ("postgresql://role_name:p@ep-abc-123.databricks.com/databricks_postgres?sslmode=require", Platform.LAKEBASE),
+        ("postgresql://role_name:p@instance-123abcdef456.database.cloud.databricks.com/databricks_postgres", Platform.LAKEBASE),
     ],
 )
 def test_a_host_under_a_platforms_domain_names_the_platform(url, platform):
@@ -59,7 +66,43 @@ def test_a_host_under_a_platforms_domain_names_the_platform(url, platform):
 
     assert detection is not None
     assert detection.platform is platform
+    assert detection.basis is Basis.URL
     assert hosts_in(url)[0] in detection.signal, "the signal names the host it read"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://admin@10.0.1.5/postgres?options=-c%20amzn-cluster-id%3Dabcdefghij",
+        "host=10.0.1.5 dbname=postgres user=admin options='-c amzn-cluster-id=abcdefghij'",
+        "host=10.0.1.5 dbname=postgres options='-camzn_cluster_id=abcdefghij'",
+        "postgresql://admin@vpce-0123.example.internal/postgres?options=--amzn-cluster-id%3Dabcdefghij",
+    ],
+)
+def test_the_amzn_cluster_id_option_names_aurora_dsql_whatever_the_host(url):
+    """Without private DNS the host can be the endpoint's address; DSQL takes the cluster from the option."""
+    detection = detect_from_url(url)
+
+    assert detection is not None
+    assert detection.platform is Platform.AURORA_DSQL
+    assert "amzn-cluster-id" in detection.signal
+
+
+def test_pgoptions_is_read_when_the_url_sets_no_options(monkeypatch):
+    """AWS's own example connects this way: PGOPTIONS, and the endpoint's name as the host."""
+    monkeypatch.setenv("PGOPTIONS", "-c amzn-cluster-id=abcdefghij")
+
+    detection = detect_from_url("postgresql://admin@10.0.1.5/postgres")
+
+    assert detection is not None
+    assert detection.platform is Platform.AURORA_DSQL
+
+
+def test_pgoptions_is_not_read_when_the_url_sets_options_of_its_own(monkeypatch):
+    """libpq sends the URL's options then, not PGOPTIONS."""
+    monkeypatch.setenv("PGOPTIONS", "-c amzn-cluster-id=abcdefghij")
+
+    assert detect_from_url("postgresql://admin@10.0.1.5/postgres?options=-c%20search_path%3Dapp") is None
 
 
 @pytest.mark.parametrize(
@@ -73,8 +116,20 @@ def test_a_host_under_a_platforms_domain_names_the_platform(url, platform):
         # RDS, Aurora, Cloud SQL, AlloyDB and Azure hosts are not recognised:
         # their names are not documented as under a domain of their own.
         "postgresql://mydb.abc123.us-east-1.rds.amazonaws.com/db",
-        # on.aws without .dsql. is some other AWS endpoint.
+        # on.aws or vpce.amazonaws.com without a dsql label is some other AWS endpoint.
         "postgresql://something.us-east-1.on.aws/db",
+        "postgresql://abc.lambda-url.us-east-1.on.aws/db",
+        "postgresql://vpce-0123-abcd.s3.us-east-1.vpce.amazonaws.com/db",
+        "postgresql://abc.dsqlx.us-east-1.on.aws/db",
+        # A dsql label with no cluster or endpoint name in front of it names no cluster.
+        "postgresql://dsql.us-east-1.on.aws/db",
+        # A dsql label elsewhere is not under DSQL's domains.
+        "postgresql://abc.dsql.us-east-1.example.com/db",
+        # Databricks hosts that are not Lakebase endpoints, and a name that merely contains one.
+        "postgresql://dbc-1234abcd-5678.cloud.databricks.com/db",
+        "postgresql://ep-abc-123.databricks.com.example.com/db",
+        # An option that merely mentions amzn-cluster-id sets something else.
+        "postgresql://u@10.0.1.5/db?options=-c%20application_name%3Damzn-cluster-id",
         None,
         "",
     ],
@@ -202,15 +257,84 @@ async def test_a_refused_probe_leaves_the_platform_to_the_host():
     assert by_host.platform is Platform.NEON
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://admin@abc.dsql.us-east-1.on.aws/postgres",
+        "postgresql://admin@abc.dsql-fnh4.us-east-1.on.aws/postgres",
+        "postgresql://admin@vpce-0123-abcd.dsql-fnh4.us-east-1.vpce.amazonaws.com/postgres?options=-c%20amzn-cluster-id%3Dabc",
+        "postgresql://admin@10.0.1.5/postgres?options=-c%20amzn-cluster-id%3Dabc",
+    ],
+)
 @pytest.mark.asyncio
-async def test_aurora_dsql_is_decided_from_the_host_without_running_anything():
+async def test_aurora_dsql_is_decided_from_the_url_without_running_anything(url):
     """DSQL is not PostgreSQL underneath, and the probe is not known to work there."""
     driver = server()
 
-    detection = await detect_platform(driver, "postgresql://admin@abc.dsql.us-east-1.on.aws/postgres")
+    detection = await detect_platform(driver, url)
 
     assert detection.platform is Platform.AURORA_DSQL
     driver.execute_query.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_lakebase_host_outranks_the_neon_settings_its_server_may_carry():
+    """Lakebase is built on Neon: asked first, the server would be taken for Neon."""
+    driver = server(neon_timeline_id=True, platform_roles=["neon_superuser"])
+
+    detection = await detect_platform(driver, "postgresql://u@ep-abc-123.databricks.com/databricks_postgres")
+
+    assert detection.platform is Platform.LAKEBASE
+    assert "ep-abc-123.databricks.com" in detection.signal
+    driver.execute_query.assert_not_awaited()
+
+
+# -- What a detection rests on ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_detection_says_what_kind_of_signal_it_rests_on():
+    by_setting = await detect_platform(server(neon_timeline_id=True))
+    by_host = await detect_platform(server(), "postgresql://u@ep-x.aws.neon.tech/db")
+    by_role = await detect_platform(server(platform_roles=["neon_superuser"]), "postgresql://u@db.internal.example.com/app")
+    by_nothing = await detect_platform(server(), "postgresql://u@db.internal.example.com/app")
+
+    assert [d.basis for d in (by_setting, by_host, by_role, by_nothing)] == [Basis.SERVER, Basis.URL, Basis.ROLE, Basis.NONE]
+    assert [d.firm for d in (by_setting, by_host, by_role, by_nothing)] == [True, True, False, False]
+
+
+# -- Saying why nothing matched ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_without_a_url_the_reason_says_no_host_was_read():
+    """The index advisor asks without one; the reason must not claim a host was checked."""
+    detection = await detect_platform(server())
+
+    assert detection.platform is Platform.UNKNOWN
+    assert "pg-debug had no connection URL to read a host from" in detection.signal
+    assert "not the host" not in detection.signal
+    assert "names no platform" not in detection.signal
+
+
+@pytest.mark.asyncio
+async def test_with_a_url_the_reason_says_it_named_no_platform():
+    detection = await detect_platform(server(), "postgresql://u@db.internal.example.com/app")
+
+    assert "the connection URL names no platform pg-debug knows" in detection.signal
+    assert "no connection URL" not in detection.signal
+
+
+@pytest.mark.asyncio
+async def test_a_refused_probe_without_a_url_says_no_host_was_read():
+    driver = MagicMock(spec=SqlDriver)
+    driver.execute_query = AsyncMock(side_effect=QueryError("permission denied"))
+
+    detection = await detect_platform(driver)
+
+    assert detection.platform is Platform.UNKNOWN
+    assert "permission denied" in detection.signal
+    assert "pg-debug had no connection URL to read a host from" in detection.signal
 
 
 @pytest.mark.asyncio

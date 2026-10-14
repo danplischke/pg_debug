@@ -229,30 +229,47 @@ def _durability(
     that the reader sees the setting and the signal the platform was
     recognised by, and can tell if the recognition was wrong. A full_page_writes
     that is off is still reported in its place, whatever the platform.
+
+    Only a firm signal excuses fsync: the server's ``neon.timeline_id``
+    setting or a host under neon.tech. A ``neon_superuser`` role alone does
+    not, because a role can be on any server, and the finding it would
+    downgrade is the most serious there is; the HIGH finding says why it did
+    not.
     """
     neon = platform if platform is not None and platform.platform is Platform.NEON else None
+    excused = neon is not None and neon.firm
     for name, consequence in (
         ("fsync", "a crash or power loss can leave the database unrecoverably corrupt, not merely missing recent commits"),
         ("full_page_writes", "a crash during a write can tear a page in half, and recovery has nothing to repair it from"),
     ):
         setting = settings.get(name)
-        if _off(setting) and not (neon is not None and name == "fsync"):
+        if _off(setting) and not (excused and name == "fsync"):
+            detail = (
+                f"With {name} off, {consequence}. This is only a defensible setting for a database whose "
+                f"contents can be thrown away and rebuilt — a test fixture, or a replica that would be "
+                f"recreated from scratch."
+            )
+            evidence: dict[str, Any] = {"source": setting.get("source") if setting else None}
+            if neon is not None and name == "fsync":
+                detail += (
+                    f" pg-debug took this server for Neon, which runs every compute with fsync off, because {neon.signal}. "
+                    "That is not enough to call fsync = off safe: a role can be on any server, created by a superuser or "
+                    "restored from a dump of a Neon project's roles. Only the setting neon.timeline_id or a host under "
+                    "neon.tech is taken as enough."
+                )
+                evidence |= {"platform": neon.platform.value, "platform_signal": neon.signal}
             return ConfigFinding(
                 setting=name,
                 current="off",
                 recommended="on",
                 severity=Severity.HIGH,
                 summary=f"{name} is off, so this server cannot be trusted to survive a crash.",
-                detail=(
-                    f"With {name} off, {consequence}. This is only a defensible setting for a database whose "
-                    f"contents can be thrown away and rebuilt — a test fixture, or a replica that would be "
-                    f"recreated from scratch."
-                ),
-                evidence={"source": setting.get("source") if setting else None},
+                detail=detail,
+                evidence=evidence,
             )
 
     fsync = settings.get("fsync")
-    if neon is not None and _off(fsync):
+    if neon is not None and excused and _off(fsync):
         return ConfigFinding(
             setting="fsync",
             current="off",

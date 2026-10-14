@@ -24,8 +24,10 @@ from pg_debug.configuration import _slow_query_log
 from pg_debug.configuration import _work_mem
 from pg_debug.db import SqlDriver
 from pg_debug.db import reset_postgres_version_cache
+from pg_debug.platform import Basis
 from pg_debug.platform import Platform
 from pg_debug.platform import PlatformDetection
+from pg_debug.platform import detect_platform
 from pg_debug.severity import Severity
 
 
@@ -66,7 +68,7 @@ def test_durability_left_alone_when_it_is_on():
     assert _durability(setting("fsync", "on"), healthy_measurements()) is None
 
 
-NEON = PlatformDetection(Platform.NEON, "the server has the setting neon.timeline_id")
+NEON = PlatformDetection(Platform.NEON, "the server has the setting neon.timeline_id", Basis.SERVER)
 
 
 def test_neons_fsync_off_is_a_note_not_a_failure():
@@ -84,11 +86,59 @@ def test_neons_fsync_off_is_a_note_not_a_failure():
 
 
 @pytest.mark.parametrize(
-    "platform", [None, PlatformDetection(Platform.UNKNOWN, "nothing matched"), PlatformDetection(Platform.SUPABASE, "a setting")]
+    "platform",
+    [None, PlatformDetection(Platform.UNKNOWN, "nothing matched", Basis.NONE), PlatformDetection(Platform.SUPABASE, "a setting", Basis.SERVER)],
 )
 def test_fsync_off_anywhere_else_is_still_high(platform):
     finding = _durability(setting("fsync", "off"), healthy_measurements(), platform)
 
+    assert finding is not None
+    assert finding.severity is Severity.HIGH
+
+
+def test_a_neon_host_excuses_fsync_as_the_setting_does():
+    host = PlatformDetection(Platform.NEON, "the host ep-x.aws.neon.tech is under neon.tech", Basis.URL)
+
+    finding = _durability(setting("fsync", "off"), healthy_measurements(), host)
+
+    assert finding is not None
+    assert finding.severity is Severity.LOW
+
+
+def test_a_neon_role_alone_does_not_excuse_fsync():
+    """A role can be on any server: a dump of a Neon project's roles restored on
+    one's own cluster carries neon_superuser, and that must not turn the most
+    serious finding there is into a note that passes --exit-code."""
+    role = PlatformDetection(Platform.NEON, "the role neon_superuser exists", Basis.ROLE)
+
+    finding = _durability(setting("fsync", "off"), healthy_measurements(), role)
+
+    assert finding is not None
+    assert finding.severity is Severity.HIGH
+    assert finding.recommended == "on"
+    assert "because the role neon_superuser exists" in finding.detail, "it says what it examined"
+    assert "That is not enough to call fsync = off safe" in finding.detail, "and why it refused"
+    assert finding.evidence["platform_signal"] == "the role neon_superuser exists"
+
+
+@pytest.mark.asyncio
+async def test_a_server_with_only_a_neon_role_keeps_fsync_high_end_to_end():
+    """The case review found: no setting, a host that names nothing, and the role."""
+    driver = MagicMock(spec=SqlDriver)
+    probe = {
+        "neon_timeline_id": False,
+        "supautils_privileged_role": False,
+        "aurora_version": False,
+        "rds_extensions": False,
+        "azure_extensions": False,
+        "platform_roles": ["neon_superuser"],
+    }
+    driver.execute_query = AsyncMock(return_value=[SqlDriver.RowResult(cells=probe)])
+
+    detection = await detect_platform(driver, "postgresql://postgres@db.internal.example.com/app")
+    finding = _durability(setting("fsync", "off"), healthy_measurements(), detection)
+
+    assert detection.platform is Platform.NEON
     assert finding is not None
     assert finding.severity is Severity.HIGH
 
