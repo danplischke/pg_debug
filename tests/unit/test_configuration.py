@@ -52,8 +52,14 @@ def healthy_measurements(**overrides):
 # -- Durability -------------------------------------------------------------
 
 
+def only(findings):
+    """The one durability finding a test expects, or None."""
+    assert len(findings) <= 1, findings
+    return findings[0] if findings else None
+
+
 def test_fsync_off_is_the_most_serious_thing_here():
-    finding = _durability(setting("fsync", "off"), healthy_measurements())
+    finding = only(_durability(setting("fsync", "off"), healthy_measurements()))
 
     assert finding is not None
     assert finding.severity is Severity.HIGH
@@ -61,11 +67,11 @@ def test_fsync_off_is_the_most_serious_thing_here():
 
 
 def test_full_page_writes_off_is_reported_too():
-    assert _durability(setting("full_page_writes", "off"), healthy_measurements()) is not None
+    assert only(_durability(setting("full_page_writes", "off"), healthy_measurements())) is not None
 
 
 def test_durability_left_alone_when_it_is_on():
-    assert _durability(setting("fsync", "on"), healthy_measurements()) is None
+    assert _durability(setting("fsync", "on"), healthy_measurements()) == []
 
 
 NEON = PlatformDetection(Platform.NEON, "the server has the setting neon.timeline_id", Basis.SERVER)
@@ -74,12 +80,12 @@ NEON = PlatformDetection(Platform.NEON, "the server has the setting neon.timelin
 def test_neons_fsync_off_is_a_note_not_a_failure():
     """Neon runs every compute with fsync off; a commit is durable once its
     safekeepers hold the WAL, which a HIGH finding on every Neon database hid."""
-    finding = _durability(setting("fsync", "off"), healthy_measurements(), NEON)
+    finding = only(_durability(setting("fsync", "off"), healthy_measurements(), NEON))
 
     assert finding is not None
     assert finding.severity is Severity.LOW, "low enough not to fail --exit-code"
     assert finding.recommended is None, "there is nothing to change"
-    assert "quorum of its safekeepers" in finding.detail
+    assert "quorum of safekeepers" in finding.detail
     assert "neon.timeline_id" in finding.detail, "it says what it took the platform from"
     assert finding.evidence["platform"] == "neon"
     assert finding.evidence["platform_signal"] == NEON.signal
@@ -90,7 +96,7 @@ def test_neons_fsync_off_is_a_note_not_a_failure():
     [None, PlatformDetection(Platform.UNKNOWN, "nothing matched", Basis.NONE), PlatformDetection(Platform.SUPABASE, "a setting", Basis.SERVER)],
 )
 def test_fsync_off_anywhere_else_is_still_high(platform):
-    finding = _durability(setting("fsync", "off"), healthy_measurements(), platform)
+    finding = only(_durability(setting("fsync", "off"), healthy_measurements(), platform))
 
     assert finding is not None
     assert finding.severity is Severity.HIGH
@@ -99,7 +105,7 @@ def test_fsync_off_anywhere_else_is_still_high(platform):
 def test_a_neon_host_excuses_fsync_as_the_setting_does():
     host = PlatformDetection(Platform.NEON, "the host ep-x.aws.neon.tech is under neon.tech", Basis.URL)
 
-    finding = _durability(setting("fsync", "off"), healthy_measurements(), host)
+    finding = only(_durability(setting("fsync", "off"), healthy_measurements(), host))
 
     assert finding is not None
     assert finding.severity is Severity.LOW
@@ -111,7 +117,7 @@ def test_a_neon_role_alone_does_not_excuse_fsync():
     serious finding there is into a note that passes --exit-code."""
     role = PlatformDetection(Platform.NEON, "the role neon_superuser exists", Basis.ROLE)
 
-    finding = _durability(setting("fsync", "off"), healthy_measurements(), role)
+    finding = only(_durability(setting("fsync", "off"), healthy_measurements(), role))
 
     assert finding is not None
     assert finding.severity is Severity.HIGH
@@ -136,22 +142,40 @@ async def test_a_server_with_only_a_neon_role_keeps_fsync_high_end_to_end():
     driver.execute_query = AsyncMock(return_value=[SqlDriver.RowResult(cells=probe)])
 
     detection = await detect_platform(driver, "postgresql://postgres@db.internal.example.com/app")
-    finding = _durability(setting("fsync", "off"), healthy_measurements(), detection)
+    finding = only(_durability(setting("fsync", "off"), healthy_measurements(), detection))
 
     assert detection.platform is Platform.NEON
     assert finding is not None
     assert finding.severity is Severity.HIGH
 
 
-def test_full_page_writes_off_on_neon_is_still_reported_high():
-    """The note about fsync must not take the place of a finding that is not about it."""
+def test_both_durability_settings_off_on_neon_are_each_a_note():
+    """Neon runs its computes with full_page_writes off too: its storage rebuilds
+    pages from the WAL. Reported HIGH, it failed --exit-code on every Neon
+    database as fsync did, and took the fsync note's place."""
     settings = {**setting("fsync", "off"), **setting("full_page_writes", "off")}
 
-    finding = _durability(settings, healthy_measurements(), NEON)
+    findings = _durability(settings, healthy_measurements(), NEON)
 
-    assert finding is not None
-    assert finding.setting == "full_page_writes"
-    assert finding.severity is Severity.HIGH
+    assert [(f.setting, f.severity) for f in findings] == [("fsync", Severity.LOW), ("full_page_writes", Severity.LOW)]
+    assert "rebuilt from the WAL" in findings[1].detail
+
+
+def test_lakebase_is_judged_as_neon_is():
+    lakebase = PlatformDetection(Platform.LAKEBASE, "the host ep-abc-123.databricks.com has the form of a Databricks Lakebase endpoint", Basis.URL)
+
+    finding = only(_durability(setting("fsync", "off"), healthy_measurements(), lakebase))
+
+    assert finding is not None and finding.severity is Severity.LOW
+    assert "Databricks Lakebase" in finding.summary
+
+
+def test_full_page_writes_off_on_a_neon_role_alone_stays_high():
+    role = PlatformDetection(Platform.NEON, "the role neon_superuser exists", Basis.ROLE)
+
+    finding = only(_durability(setting("full_page_writes", "off"), healthy_measurements(), role))
+
+    assert finding is not None and finding.severity is Severity.HIGH
 
 
 @pytest.mark.asyncio

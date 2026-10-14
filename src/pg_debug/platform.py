@@ -163,7 +163,7 @@ _DSQL_LABEL = re.compile(r"dsql(?:-[a-z0-9]+)?")
 #: The option DSQL reads the cluster from when the host is a PrivateLink
 #: endpoint's own name or address: ``-c amzn-cluster-id=<id>``. PostgreSQL
 #: reads dashes in an option's name as underscores, so either is the option.
-_DSQL_CLUSTER_OPTION = re.compile(r"(?:^|\s)(?:-c\s*|--)amzn[-_]cluster[-_]id=")
+_DSQL_CLUSTER_OPTION = re.compile(r"(?:^|\s)(?:-c\s*|--)amzn[-_]cluster[-_]id=", re.IGNORECASE)
 
 #: Roles a platform creates in every database cluster it runs. A role is a
 #: catalog row any superuser can create under any name, so these are the

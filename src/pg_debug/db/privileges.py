@@ -52,7 +52,6 @@ GRANT_INHERIT_OPTION_MIN_VERSION = 16
 IN_TRANSACTION = """(
     a.xact_start IS NOT NULL
     OR a.backend_xid IS NOT NULL
-    OR a.backend_xmin IS NOT NULL
     OR a.pid IN (SELECT pid FROM in_transaction)
 )"""
 

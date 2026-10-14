@@ -229,6 +229,22 @@ def _reporting_connection(on_failure: Callable[[Exception], None]) -> type[psyco
     return ReportingConnection
 
 
+#: SQLSTATEs of a refused connection that trying again will not change: a
+#: wrong password or an authorization refused, a database that does not
+#: exist, too many connections (for the server or for the role).
+_REFUSALS_THAT_STAY = frozenset({"28P01", "28000", "3D000", "53300"})
+
+
+def _will_not_clear(error: Exception) -> bool:
+    """Whether a failed attempt to connect will fail the same way if tried again."""
+    sqlstate = getattr(error, "sqlstate", None)
+    if sqlstate in _REFUSALS_THAT_STAY:
+        return True
+    # libpq reports some refusals before a SQLSTATE reaches psycopg.
+    text = str(error)
+    return any(phrase in text for phrase in ("password authentication failed", "too many connections", "does not exist", "no pg_hba.conf entry"))
+
+
 def check_statement_timeout(seconds: int | None) -> None:
     """Refuse a timeout PostgreSQL would refuse, before any statement depends on it.
 
@@ -341,13 +357,27 @@ class DbConnPool:
         self._refusal: tuple[float, Exception] | None = None
         # A pool being closed because no connection could come to its waiters.
         self._abandoning: asyncio.Task[None] | None = None
+        # Whether a connection to the server ever succeeded.
+        self._has_connected = False
+        # Held while a pool is being opened, by the first caller to need one.
+        self._opening = asyncio.Lock()
 
     async def pool_connect(self, connection_url: str | None = None) -> AsyncConnectionPool:
-        """Initialize connection pool with retry logic."""
+        """Initialize connection pool with retry logic.
+
+        Callers that start at once share the one pool the first of them
+        opens: without the lock, a second would close the pool the first was
+        still opening.
+        """
         # If we already have a valid pool, return it
         if self.pool and self._is_valid:
             return self.pool
+        async with self._opening:
+            if self.pool and self._is_valid:
+                return self.pool
+            return await self._pool_connect(connection_url)
 
+    async def _pool_connect(self, connection_url: str | None) -> AsyncConnectionPool:
         url = connection_url or self.connection_url
         self.connection_url = url
         if not url:
@@ -374,6 +404,7 @@ class DbConnPool:
                 pool, _ = await self._open(make_conninfo(url, client_encoding="UTF8"))
 
             self._is_valid = True
+            self._has_connected = True
             self._last_error = None
             return pool
         except Exception as e:
@@ -451,6 +482,13 @@ class DbConnPool:
         next call starts a new pool.
         """
         self._refusal = (time.monotonic(), error)
+        if self._has_connected and not _will_not_clear(error):
+            # Once this client has reached the server, a server starting up,
+            # a failover or a connection refused while one restarts may clear
+            # by the pool's next attempt, so the caller waits for it, up to
+            # the pool's timeout. Before it ever has, a refusal is most often
+            # a wrong host or port, and says so at once.
+            return
         pool = built[0] if built else None
         if pool is None or pool is not self.pool or self._borrowed:
             return
@@ -585,7 +623,9 @@ class SqlDriver:
     def connect(self):
         if self.conn is not None:
             return self.conn
-        if self.engine_url:
+        # A driver given a connection forgets it once a statement fails on it
+        # (the connection may be broken), and has no URL to make another.
+        if getattr(self, "engine_url", None):
             self.conn = DbConnPool(self.engine_url)
             self.is_pool = True
             return self.conn

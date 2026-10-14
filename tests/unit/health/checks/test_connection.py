@@ -12,7 +12,15 @@ from pg_debug.health.checks.connection import ConnectionHealthCalc
 NO_SESSION = {"pid": None, "usename": None, "datname": None, "application_name": None, "idle_in_transaction_seconds": None, "query": None}
 
 
-def session(pid: int, usename: str = "app", datname: str = "shop", application_name: str = "worker", seconds: int = 300, query: str = "SELECT 1"):
+def session(
+    pid: int,
+    usename: str = "app",
+    datname: str = "shop",
+    application_name: str = "worker",
+    seconds: int = 300,
+    query: str = "SELECT 1",
+    truncated: bool = False,
+):
     """A session idle in transaction past the limit, as the check's query returns it."""
     return {
         "pid": pid,
@@ -21,6 +29,7 @@ def session(pid: int, usename: str = "app", datname: str = "shop", application_n
         "application_name": application_name,
         "idle_in_transaction_seconds": seconds,
         "query": query,
+        "query_truncated": truncated,
     }
 
 
@@ -124,6 +133,7 @@ async def test_each_session_left_idle_in_transaction_is_a_finding_with_its_evide
             "application_name": "checkout",
             "idle_in_transaction_seconds": 300,
             "query": "SELECT *\n  FROM orders WHERE id = 7",
+            "query_truncated": False,
         },
         {
             "kind": "idle_in_transaction",
@@ -133,6 +143,7 @@ async def test_each_session_left_idle_in_transaction_is_a_finding_with_its_evide
             "application_name": "",
             "idle_in_transaction_seconds": 75,
             "query": "",
+            "query_truncated": False,
         },
     ]
     assert result.summary.splitlines() == [
@@ -148,9 +159,17 @@ async def test_each_session_left_idle_in_transaction_is_a_finding_with_its_evide
 
 @pytest.mark.asyncio
 async def test_a_last_statement_cut_short_says_so():
-    result = await check(FakeDriver(session(4242, query="SELECT " + "x" * 193)))
+    result = await check(FakeDriver(session(4242, query="SELECT " + "x" * 193, truncated=True)))
 
     assert result.summary.splitlines()[1].endswith("x…")
+
+
+@pytest.mark.asyncio
+async def test_a_whole_statement_of_exactly_the_length_kept_is_not_marked_cut_short():
+    """The server says whether it cut the text; its length alone cannot."""
+    result = await check(FakeDriver(session(4242, query="SELECT " + "x" * 193, truncated=False)))
+
+    assert result.summary.splitlines()[1].endswith("x")
 
 
 @pytest.mark.asyncio

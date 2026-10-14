@@ -73,13 +73,16 @@ grant it, rather than the application's login role or the platform's admin
 role; pg-debug needs no superuser. Planning a query also needs SELECT on its
 tables, and `--role` needs the connecting role to be a member of that role.
 Without `pg_read_all_stats`, which `pg_monitor` includes, other roles'
-sessions and query text are hidden, and mostly without a word.
+sessions and query text are hidden; `activity`, `locks`, `vacuum-progress`
+and `top-queries` say on stderr what was withheld and the grant that would
+show it. On PostgreSQL 15 and later a member of `pg_monitor` that does not
+inherit it is hidden from too.
 
 On a managed platform, identify it before relaying a finding. pg-debug
 recognises the platform from the URL's host and the server's own settings and
-roles, and uses it for three things only: the `fsync = off` Neon runs with (a
-low note there, when the `neon.timeline_id` setting or a `neon.tech` host says
-Neon), the advice on getting HypoPG, and keeping the timeout on its own side
+roles, and uses it for three things only: the `fsync = off` and
+`full_page_writes = off` Neon and Lakebase run with (low notes there, when the
+`neon.timeline_id` setting, a `neon.tech` host or a Lakebase host says so), the advice on getting HypoPG, and keeping the timeout on its own side
 on an Aurora DSQL host, which refuses `statement_timeout`. Most counter-based
 findings still do not say when their counters started, while a Neon suspend, a
 failover or a point-in-time restore starts them again from zero.

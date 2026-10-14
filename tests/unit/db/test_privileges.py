@@ -107,10 +107,13 @@ async def test_the_withheld_backends_are_read_as_the_server_shows_them():
 
 
 def test_whether_a_backend_is_in_a_transaction_is_read_from_what_every_role_is_shown():
-    """Its state is withheld; its transaction ID, its snapshot and the lock it
-    holds on its own virtual transaction are not."""
-    for evidence in ("a.backend_xid IS NOT NULL", "a.backend_xmin IS NOT NULL", "l.locktype = 'virtualxid'"):
+    """Its state is withheld; its transaction ID and the lock it holds on its
+    own virtual transaction are not. Its snapshot is no evidence: a walsender
+    serving a standby with hot_standby_feedback carries the standby's xmin and
+    is in no transaction."""
+    for evidence in ("a.backend_xid IS NOT NULL", "l.locktype = 'virtualxid'"):
         assert evidence in WITHHELD_BACKENDS_SQL
+    assert "a.backend_xmin IS NOT NULL" not in WITHHELD_BACKENDS_SQL
 
 
 @pytest.mark.parametrize(("query", "withheld"), [(HIDDEN_QUERY_TEXT, True), ("SELECT 1", False), (None, False)])

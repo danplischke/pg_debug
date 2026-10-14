@@ -69,14 +69,17 @@ def _server_of(sql_driver: SqlDriver) -> object | None:
 
     Restricted mode wraps the driver that holds the connection, and a driver
     made by ``with_context`` shares it, so all of them share one entry. None
-    while the driver's pool is not open yet; the query for the version opens
-    it, and the version is kept under the pool it opened.
+    while the driver's pool is not open yet, or no longer valid; the query for
+    the version opens a new one, and the version is kept under it.
     """
     while isinstance(sql_driver, SafeSqlDriver):
         sql_driver = sql_driver.sql_driver
     conn = getattr(sql_driver, "conn", None)
     if isinstance(conn, DbConnPool):
-        return conn.pool
+        # A pool a failed statement marked invalid is replaced on the next
+        # statement; what was kept for it may describe a server failed over
+        # since, so it is not trusted.
+        return conn.pool if conn.is_valid else None
     return conn
 
 

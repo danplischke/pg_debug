@@ -132,7 +132,7 @@ class ConfigurationReviewer:
         measurements = await self._measurements()
 
         # The durability rule is the one whose verdict depends on the platform.
-        verdicts = [_durability(settings, measurements, self.platform)]
+        verdicts: list[ConfigFinding | None] = list(_durability(settings, measurements, self.platform))
         verdicts += [rule(settings, measurements) for rule in _RULES]
         findings = [finding for finding in verdicts if finding is not None]
 
@@ -215,50 +215,87 @@ Rule = Callable[[dict[str, dict[str, Any]], dict[str, Any]], ConfigFinding | Non
 # -- Rules ------------------------------------------------------------------
 
 
+#: Platforms whose commits are made durable by a quorum of safekeepers holding
+#: the WAL, not by the compute's own disk, and whose computes therefore run
+#: with fsync and full_page_writes off. Neon's documentation says so for both;
+#: Databricks' says it of Lakebase's commits, and both companies wrote of
+#: turning full-page writes off together.
+_SAFEKEEPER_PLATFORMS = frozenset({Platform.NEON, Platform.LAKEBASE})
+
+#: Why each durability setting being off is safe on such a platform.
+_WHY_SAFE_THERE = {
+    "fsync": ("a commit is acknowledged once a quorum of safekeepers holds its WAL, so the compute's own fsync is not what makes a commit durable"),
+    "full_page_writes": (
+        "pages are rebuilt from the WAL by the storage layer, not read back from the compute's disk, so there is no "
+        "torn page on it for a full-page image to repair"
+    ),
+}
+
+
 def _durability(
     settings: dict[str, dict[str, Any]],
     _measurements: dict[str, Any],
     platform: PlatformDetection | None = None,
-) -> ConfigFinding | None:
+) -> list[ConfigFinding]:
     """fsync and full_page_writes exist to survive a crash.
 
-    Except fsync on Neon, which runs every compute with it off: a commit there
-    is acknowledged once a quorum of safekeepers holds its WAL, so the
-    compute's own fsync is not what makes it durable. That is reported as a
-    note, low enough not to fail ``--exit-code``, rather than left out, so
-    that the reader sees the setting and the signal the platform was
-    recognised by, and can tell if the recognition was wrong. A full_page_writes
-    that is off is still reported in its place, whatever the platform.
+    Except on Neon and Databricks Lakebase, whose computes run with both off:
+    a commit there is acknowledged once a quorum of safekeepers holds its WAL,
+    and pages are rebuilt from the WAL by the storage layer. Each setting off
+    there is reported as a note, low enough not to fail ``--exit-code``,
+    rather than left out, so that the reader sees the setting and the signal
+    the platform was recognised by, and can tell if the recognition was wrong.
 
-    Only a firm signal excuses fsync: the server's ``neon.timeline_id``
-    setting or a host under neon.tech. A ``neon_superuser`` role alone does
-    not, because a role can be on any server, and the finding it would
-    downgrade is the most serious there is; the HIGH finding says why it did
-    not.
+    Only a firm signal excuses them: for Neon the server's ``neon.timeline_id``
+    setting or a host under neon.tech, for Lakebase its host. A
+    ``neon_superuser`` role alone does not, because a role can be on any
+    server, and the findings it would downgrade are the most serious there
+    are; the HIGH finding says why it did not.
     """
-    neon = platform if platform is not None and platform.platform is Platform.NEON else None
-    excused = neon is not None and neon.firm
+    recognised = platform if platform is not None and platform.platform in _SAFEKEEPER_PLATFORMS else None
+    excused = recognised is not None and recognised.firm
+    findings: list[ConfigFinding] = []
     for name, consequence in (
         ("fsync", "a crash or power loss can leave the database unrecoverably corrupt, not merely missing recent commits"),
         ("full_page_writes", "a crash during a write can tear a page in half, and recovery has nothing to repair it from"),
     ):
         setting = settings.get(name)
-        if _off(setting) and not (excused and name == "fsync"):
-            detail = (
-                f"With {name} off, {consequence}. This is only a defensible setting for a database whose "
-                f"contents can be thrown away and rebuilt — a test fixture, or a replica that would be "
-                f"recreated from scratch."
-            )
-            evidence: dict[str, Any] = {"source": setting.get("source") if setting else None}
-            if neon is not None and name == "fsync":
-                detail += (
-                    f" pg-debug took this server for Neon, which runs every compute with fsync off, because {neon.signal}. "
-                    "That is not enough to call fsync = off safe: a role can be on any server, created by a superuser or "
-                    "restored from a dump of a Neon project's roles. Only the setting neon.timeline_id or a host under "
-                    "neon.tech is taken as enough."
+        if not _off(setting):
+            continue
+        evidence: dict[str, Any] = {"source": setting.get("source") if setting else None}
+        if recognised is not None:
+            evidence |= {"platform": recognised.platform.value, "platform_signal": recognised.signal}
+        if excused and recognised is not None:
+            label = recognised.platform.label
+            findings.append(
+                ConfigFinding(
+                    setting=name,
+                    current="off",
+                    severity=Severity.LOW,
+                    summary=f"{name} is off, as {label} runs every compute; that does not put commits at risk here.",
+                    detail=(
+                        f"On {label}, {_WHY_SAFE_THERE[name]}, and the platform fixes the setting: there is nothing to "
+                        f"change. pg-debug took this server for {label} because {recognised.signal}. If that is wrong, "
+                        f"this is among the most serious findings there are: with {name} off, {consequence}."
+                    ),
+                    evidence=evidence,
                 )
-                evidence |= {"platform": neon.platform.value, "platform_signal": neon.signal}
-            return ConfigFinding(
+            )
+            continue
+        detail = (
+            f"With {name} off, {consequence}. This is only a defensible setting for a database whose "
+            f"contents can be thrown away and rebuilt — a test fixture, or a replica that would be "
+            f"recreated from scratch."
+        )
+        if recognised is not None:
+            detail += (
+                f" pg-debug took this server for {recognised.platform.label}, which runs every compute with {name} off, "
+                f"because {recognised.signal}. That is not enough to call {name} = off safe: a role can be on any "
+                "server, created by a superuser or restored from a dump of a project's roles. Only the setting "
+                "neon.timeline_id or a host of the platform's is taken as enough."
+            )
+        findings.append(
+            ConfigFinding(
                 setting=name,
                 current="off",
                 recommended="on",
@@ -267,24 +304,8 @@ def _durability(
                 detail=detail,
                 evidence=evidence,
             )
-
-    fsync = settings.get("fsync")
-    if neon is not None and excused and _off(fsync):
-        return ConfigFinding(
-            setting="fsync",
-            current="off",
-            severity=Severity.LOW,
-            summary="fsync is off, as Neon runs every compute; that does not put commits at risk here.",
-            detail=(
-                "Neon acknowledges a commit once a quorum of its safekeepers holds the commit's WAL, so the compute's "
-                "own fsync is not what makes a commit durable, and Neon fixes the setting: there is nothing to change. "
-                f"pg-debug took this server for Neon because {neon.signal}. If that is wrong, this is the most "
-                "serious finding there is: with fsync off, a crash or power loss can leave the database unrecoverably "
-                "corrupt."
-            ),
-            evidence={"source": fsync.get("source") if fsync else None, "platform": neon.platform.value, "platform_signal": neon.signal},
         )
-    return None
+    return findings
 
 
 def _autovacuum_off(settings: dict[str, dict[str, Any]], _measurements: dict[str, Any]) -> ConfigFinding | None:

@@ -27,7 +27,7 @@ above need nothing else.
 | --- | --- |
 | `src/pg_debug/client.py`, `sync.py`, `errors.py`, `severity.py`, `context.py` | The public surface: `PgDebug`, `SyncPgDebug`, the exceptions, how findings are graded (`Severity`, `Confidence`), and the role and settings the user's queries run with (`QueryContext`, read from `pg-debug.toml`). |
 | `src/pg_debug/cli/` | The command. `parser.py` names each subcommand's handler (in `commands.py`) and renderer (in `render.py`) in one place; `streams.py` reads and writes UTF-8; `config_file.py` finds `pg-debug.toml`. |
-| `src/pg_debug/db/` | Driver and pool, restricted mode and its allowlist, extension and version checks. |
+| `src/pg_debug/db/` | Driver and pool, restricted mode and its allowlist, extension and version checks, and what the statistics views withhold from the connecting role (`privileges.py`). |
 | `src/pg_debug/parsing/` | pglast visitors and bind-parameter substitution for SQL we are *given*. |
 | `src/pg_debug/queries/` | SQL that more than one module runs. A module's own SQL stays beside the code that reads its rows. |
 | `src/pg_debug/plans/`, `health/`, `index/`, `index_use/`, `model/`, `migration/`, `partition/` | One package per feature that needed more than one file. |

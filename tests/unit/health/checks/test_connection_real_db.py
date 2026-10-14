@@ -75,6 +75,7 @@ class TestConnectionHealth:
         assert finding["datname"] == database
         assert finding["idle_in_transaction_seconds"] >= 0
         assert finding["query"] == "SELECT count(*) FROM pg_class"
+        assert finding["query_truncated"] is False
         assert f"Backend {pid} (role {user}, database {database}, application {IDLE_APPLICATION})" in result.summary
         # Known by the job, not the pid it happened to have this time.
         key = {
@@ -85,6 +86,20 @@ class TestConnectionHealth:
             "application_name": IDLE_APPLICATION,
         }
         assert key in health_keys({result.name: result})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("extra", "truncated"), [(0, False), (1, True)])
+    async def test_whether_the_last_statement_was_cut_short_is_the_server_s_word(self, url, extra, truncated):
+        """A statement exactly as long as the part kept is whole; one character more is not."""
+        statement = "SELECT '" + "x" * (QUERY_CHARS - len("SELECT ''") + extra) + "'"
+        async with await psycopg.AsyncConnection.connect(url, application_name=IDLE_APPLICATION) as idle:
+            await idle.execute(cast(LiteralString, statement))
+            result = await check(url)
+            await idle.rollback()
+
+        (finding,) = [f for f in result.findings if f.get("application_name") == IDLE_APPLICATION]
+        assert finding["query"] == statement[:QUERY_CHARS]
+        assert finding["query_truncated"] is truncated
 
     @pytest.mark.asyncio
     async def test_a_role_that_cannot_see_another_role_s_idle_session_does_not_claim_there_is_none(self, url, plain_url):
@@ -102,7 +117,7 @@ class TestConnectionHealth:
         """The logical replication launcher and a physical WAL sender have a
         role but no database, and are never client connections: counted as
         possible ones, every role without pg_read_all_stats read a range."""
-        query = cast(LiteralString, SafeSqlDriver.param_sql_to_query(CONNECTIONS_SQL, [QUERY_CHARS, 60]))
+        query = cast(LiteralString, SafeSqlDriver.param_sql_to_query(CONNECTIONS_SQL, [QUERY_CHARS, QUERY_CHARS, 60]))
         # One transaction, so both read the same snapshot of pg_stat_activity.
         with psycopg.connect(plain_url) as conn, conn.cursor(row_factory=dict_row) as cursor:
             hidden = cursor.execute(

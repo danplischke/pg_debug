@@ -58,7 +58,9 @@ keeps coming back is an autovacuum problem, not a one-off cleanup.
 vacuuming or autovacuum tuning reclaims anything, and the backlog is a
 consequence rather than the problem. The horizon check is deliberately narrower
 than the usual "find idle in transaction" advice — a READ COMMITTED transaction
-that has only read holds nothing and is not reported — so when it does report a
+that has only read holds nothing vacuum needs and is not reported there, though
+it keeps its locks, which the `connection` check flags after a minute — so when
+it does report a
 backend, that backend really is the cause. "Autovacuum backlog" separates three
 different problems that look alike: a table past its threshold and waiting, a
 table with autovacuum switched off, and a large table whose default scale
@@ -99,14 +101,16 @@ takes two snapshots and reports the difference — the live workload, with
 busy server; on a quiet one, sample longer or you will rank noise.
 
 Needs `pg_stat_statements`. Query text comes back normalized (`$1` for
-literals), which is what you feed to `tune-queries`.
+literals), which is what you feed to `tune-queries`. As a role without
+`pg_read_all_stats` only its own statements are ranked, since other roles'
+queryid is withheld; the command says on stderr how many ran.
 
 ## Reviewing the server's configuration
 
 ```bash
 pg-debug config              # settings judged against what this server is doing
 pg-debug --json config
-pg-debug config --exit-code  # exit 3 on a durability setting that is off; Neon's fsync is a note (platforms.md)
+pg-debug config --exit-code  # exit 3 on a durability setting that is off; on Neon and Lakebase a note (platforms.md)
 ```
 
 Every finding is argued from a counter, and the `evidence` field carries it —

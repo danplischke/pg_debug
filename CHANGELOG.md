@@ -139,6 +139,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   finding suggested. In the library it is `PgDebug(context=QueryContext(...))`,
   and `QueryContext.from_file()` reads a `pg-debug.toml`.
 
+- `PgDebug.statistics_access()`, `withheld_backends()` and
+  `sample_top_queries()`, with their `SyncPgDebug` twins. A role without
+  `pg_read_all_stats`, which `pg_monitor` includes, is shown other roles'
+  backends and statements with their details withheld, and nothing said which
+  rows those were or why. `statistics_access()` says whether the role is shown
+  everything, whether it is a member of `pg_read_all_stats` that does not
+  inherit it, and the statement that would show it everything.
+  `withheld_backends()` gives what PostgreSQL still shows of each withheld
+  backend: whether it is in a transaction, the locks it holds, and the
+  backends waiting on it. `sample_top_queries()` returns the ranking
+  `get_top_queries(interval_seconds=...)` returns, with how many other roles'
+  statements ran and could not be ranked. The functions behind the first two
+  are in `pg_debug.db.privileges`. `list_activity()` rows and `lock_tree()`
+  nodes carry `in_transaction`.
+
 ### Changed
 
 - A statement that failed was logged at ERROR with its full text, so a
@@ -200,6 +215,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it. `DEFAULT_LLM_MODEL` and `llm_model()` are defined in
   `pg_debug.index.llm_settings`, and `pg_debug.index.llm` still has them.
 
+- A `PgDebug` or `SyncPgDebug` client keeps no pooled connection while idle.
+  It held one for as long as it lived, two after its first call, and an open
+  connection keeps a scale-to-zero compute awake: Aurora Serverless v2 does
+  not pause while a client holds one, so a long-running application that made
+  one call kept its database running. The pool now closes a connection 30 to
+  60 seconds after its last use, and all five it can grow to within three
+  minutes, inside the five minutes that are Aurora's shortest pause delay; the
+  next call connects again. The CLI, which closes its pool when each command
+  ends, is unaffected. `DbConnPool` builds its pool with `min_size=0` and
+  `max_idle=30` (`POOL_MAX_IDLE` in `pg_debug.db.driver`).
+
+- A connection the pool cannot get raises `ConnectionFailedError`, not
+  `QueryError`, and says why. Once the pool kept nothing while idle, a call
+  after an idle spell had to connect, and a refused connection, from
+  `max_connections` or the role's connection limit, waited out the pool's 30
+  seconds and raised `QueryError: couldn't get a connection after 30.00 sec`,
+  with the server's reason only in a log warning: just when a diagnosis is
+  most wanted. A bad URL, port, database or role did the same on the first
+  connection. Now a client that has never connected fails at once with the
+  server's reason, and so does one that has, when the refusal will not clear
+  by the next attempt (too many connections, a wrong password, a role or
+  database that does not exist, no `pg_hba.conf` entry) and no connection can
+  come back to the caller instead. A refusal that may clear, from a server
+  restarting or failing over, is still waited for, and the wait still ends
+  after 30 seconds, saying whether every connection was in use or the attempt
+  had not finished.
+
 ### Fixed
 
 - One health check that failed ended the whole `health` run. A lock on one
@@ -237,7 +279,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   behind it. Each verdict is now a finding with its evidence:
   `connections_in_use` carries the counts, and each such session is an
   `idle_in_transaction` finding with its pid, role, database, application
-  name, how long it has been idle and the start of its last statement. The
+  name, how long it has been idle and the start of its last statement, with
+  `query_truncated` when the server cut it short. The
   two verdicts once shared one baseline entry, so accepting a forgotten psql
   session also accepted running out of connections; they are now apart, and a
   session is known by its role, database and application name rather than
@@ -249,6 +292,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the type or state of other roles' backends; the check counts those with a
   database as possible clients, says when they could change the verdict, and
   says "none of the visible ones" rather than "none" are idle in transaction.
+
+- Connected as a role without `pg_read_all_stats`, `activity` printed
+  `(nothing running)` while other roles' transactions held locks. PostgreSQL
+  withholds such a role's view of other roles' backends, their state, query,
+  wait and timings, and the filter that hides idle backends dropped them
+  through NULL logic. It does not withhold whether a backend is in a
+  transaction, which its transaction ID and the lock on its own virtual
+  transaction show, nor the locks it holds. `activity` now lists the ones in a
+  transaction as `in a transaction`, with the locks they hold and the
+  backends they block, and says how many others it left out, of which roles,
+  and that whether those are running cannot be told; `--all` lists them.
+  Since their timings are withheld, `--min-duration` names the ones in a
+  transaction. `locks` drew a withheld backend as `?`, and `activity
+  --blocked` left a withheld blocker as a bare pid; both now say what is
+  still shown of it. `vacuum-progress` printed `None/None` and `autovacuum
+  False` for a vacuum it was not shown, and now prints blanks and leaves
+  `autovacuum` unknown. `top-queries` listed `<insufficient privilege>` rows
+  without saying whose. Each command now says on standard error, in text and
+  with `--json` (whose output is the array it was), how many rows were
+  withheld and the statement that would show them. From PostgreSQL 15 the
+  statistics views ask for the privileges of `pg_read_all_stats`, not
+  membership, so a member of `pg_monitor` that does not inherit it is
+  withheld from too, and is told `GRANT ... WITH INHERIT TRUE` on 16 and
+  later, or `ALTER ROLE ... INHERIT` on 15, rather than a grant that changes
+  nothing. It works in restricted mode and on a standby.
+
+- `top-queries --interval`, as a role without `pg_read_all_stats`, reported
+  other roles' statements as one. `pg_stat_statements` shows such a role
+  their counters but not their queryid, and the sample matched its snapshots
+  by queryid, user and database, so every statement of a role in a database
+  was one key: seven statements came back as one row with one statement's
+  counters, and a lower call count read as a reset, so a cumulative total was
+  reported as activity during the interval. Those statements are no longer
+  ranked, and the command says on standard error how many ran.
 
 - On a database created with `ENCODING 'SQL_ASCII'`, `health`, `config`,
   `activity`, `vacuum-progress` and `top-queries` failed with "a bytes-like
@@ -287,21 +364,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `server_version_num`: on a pre-release such as `18beta1` or `19devel`,
   every version-gated command failed with "invalid literal for int()".
 
-- On Neon, `config` reported the `fsync = off` every Neon compute runs with
-  as HIGH, so `config --exit-code` failed on every Neon database. Neon
-  acknowledges a commit once a quorum of its safekeepers holds the commit's
-  WAL, so the compute's own fsync is not what makes it durable. pg-debug now
+- On Neon, `config` reported the `fsync = off` and `full_page_writes = off`
+  every Neon compute runs with as HIGH, so `config --exit-code` failed on
+  every Neon database. Neon acknowledges a commit once a quorum of its
+  safekeepers holds the commit's WAL, so the compute's own fsync is not what
+  makes it durable, and its storage rebuilds pages from the WAL, so there is
+  no torn page on the compute's disk for a full-page image to repair. pg-debug now
   recognises the platform it runs on, from the connection URL's host and
   options and from settings, functions and roles the platform adds, read with
   one statement restricted mode allows. Where the server has the
-  `neon.timeline_id` setting or the host is under `neon.tech`, `fsync = off`
-  is a low note that names that signal and does not fail `--exit-code`. A
+  `neon.timeline_id` setting or the host is under `neon.tech`, each is a low
+  note that names that signal and does not fail `--exit-code`; so is a
+  Databricks Lakebase host, built on Neon. A
   `neon_superuser` role alone is not enough, since any superuser can create
   one and a dump of a Neon project's roles carries it anywhere: then the
   finding stays HIGH and says why. None of the signals has been tried on a
   live platform, so a server none of them matches is reported as
-  unrecognised, not as self-hosted, and a Databricks Lakebase host, built on
-  Neon, is not taken for Neon.
+  unrecognised, not as self-hosted, and a Lakebase host is not taken for
+  Neon.
 
 - Where HypoPG was missing, `explain -i`, `tune-queries` and `tune-workload`
   told the user to install it with an `execute_query` tool that does not

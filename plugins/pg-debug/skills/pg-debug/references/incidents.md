@@ -45,10 +45,16 @@ nodes), `blocked_total`, and on a waiter `waits_for` with `locktype`, `mode`,
 `description`.
 
 Run these as a role with `pg_read_all_stats`, which `pg_monitor` includes.
-Without it, other roles' sessions come back with no state, no wait and
-`<insufficient privilege>` for the query. `activity` leaves them out unless
-you pass `--all`, so `(nothing running)` can mean nothing you are allowed to
-see, and pg-debug does not yet say so. Check before trusting an empty answer:
+Without it, other roles' sessions come back with no state, wait or timings
+and `<insufficient privilege>` for the query. Whether each is in a
+transaction, its locks and who it blocks still show. `activity` lists the ones
+in a transaction as `in a transaction` with their locks, and leaves out the
+rest, whose activity cannot be told (`--all` lists them). `locks` draws every
+tree whole, and `activity --blocked` describes a withheld blocker. Each says
+on stderr, also with `--json`, how many were withheld and the statement that
+shows them: `GRANT pg_monitor TO <role>`, or for a member that does not
+inherit it `... WITH INHERIT TRUE` (16+) or `ALTER ROLE <role> INHERIT` (15).
+To check by hand:
 
 ```bash
 pg-debug execute "SELECT pg_has_role(current_user, 'pg_read_all_stats', 'USAGE')"

@@ -142,13 +142,20 @@ class PooledServer(Server):
         super().__init__(version, conn=self.db_pool)
 
     async def execute_query(self, query, params=None, force_readonly=False, **kwargs) -> list[SqlDriver.RowResult] | None:
-        if self.db_pool.pool is None:
+        if self.db_pool.pool is None or not self.db_pool.is_valid:
             self.db_pool.pool = Pool()  # type: ignore[assignment]
+            self.db_pool._is_valid = True
         return await super().execute_query(query, params, force_readonly, **kwargs)
 
     def reconnect(self, version: str) -> None:
         """What pool_connect does after a failure: close the pool and open another, maybe to another server."""
         self.db_pool.pool = Pool()  # type: ignore[assignment]
+        self.db_pool._is_valid = True
+        self.version = version
+
+    def fail(self, version: str) -> None:
+        """A statement failed, as on a failover: the pool is marked invalid and replaced on the next one."""
+        self.db_pool._is_valid = False
         self.version = version
 
 
@@ -162,5 +169,16 @@ async def test_a_pool_that_reconnects_asks_its_server_again():
     assert server.versions_asked() == 1, "kept once the first statement opened the pool"
 
     server.reconnect("17.2 (Debian 17.2-1.pgdg120+1)")
+
+    assert await get_postgres_version(server) == 17
+
+
+@pytest.mark.asyncio
+async def test_the_version_is_asked_again_as_soon_as_the_pool_is_found_invalid():
+    """Not one call later: the first version-gated statement after a failover is the one that matters."""
+    server = PooledServer("15.8")
+    assert await get_postgres_version(server) == 15
+
+    server.fail("17.2 (Debian 17.2-1.pgdg120+1)")
 
     assert await get_postgres_version(server) == 17

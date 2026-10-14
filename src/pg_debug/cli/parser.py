@@ -478,7 +478,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             f"Exit with status {UNHEALTHY_EXIT_CODE} when a check that ran finds a problem, for use in CI. "
-            "A check that could not run makes the exit status 1 either way."
+            "A check that could not run makes the exit status 1, unless a check that ran found a problem; "
+            "with --save-baseline such a run saves nothing and exits 1."
         ),
     )
     add_baseline_arguments(health)

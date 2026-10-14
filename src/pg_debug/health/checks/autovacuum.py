@@ -111,7 +111,8 @@ ORDER BY dead_rows DESC
 # Which backends actually hold the horizon is narrower than the usual advice
 # about "idle in transaction". Measured on PostgreSQL 16: a READ COMMITTED
 # transaction that has only read holds neither an xid nor a snapshot once its
-# statement finishes, and blocks nothing. One that has written holds an xid;
+# statement finishes, so it holds back nothing vacuum needs (it still keeps its
+# locks, which the connection check judges). One that has written holds an xid;
 # one at REPEATABLE READ or above holds a snapshot. Only those two matter.
 HORIZON_SQL = """
 SELECT
@@ -218,8 +219,9 @@ class AutovacuumCalc:
         anything newer.
 
         Narrower than the usual "idle in transaction is bad": a READ COMMITTED
-        transaction that has only read holds nothing between statements and is
-        not reported. What is reported is a backend holding a snapshot, or one
+        transaction that has only read holds nothing vacuum needs between
+        statements and is not reported here; the locks it keeps are the
+        connection check's to judge. What is reported is a backend holding a snapshot, or one
         holding a transaction id because it has written.
         """
         thresholds = {"min_transaction_seconds": self.min_transaction_seconds}

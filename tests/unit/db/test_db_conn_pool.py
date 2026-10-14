@@ -358,6 +358,45 @@ async def test_a_failed_attempt_ends_the_wait_only_when_no_connection_can_come(a
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        psycopg.OperationalError("connection failed: FATAL:  the database system is starting up"),
+        psycopg.OperationalError("connection failed: Connection refused\n\tIs the server running on that host?"),
+        psycopg.OperationalError("connection failed: server closed the connection unexpectedly"),
+    ],
+    ids=["starting-up", "refused-while-restarting", "closed"],
+)
+async def test_an_attempt_that_may_succeed_next_time_does_not_end_the_wait(error):
+    """A restart or a failover clears in seconds; the pool's next attempt may
+    connect, so the waiting caller waits for it rather than failing at once."""
+    fake = FakePool(0, 1)
+    pool = holding(fake, 0)
+    pool._has_connected = True
+
+    pool._connect_failed([fake], error)  # type: ignore[list-item]
+    await asyncio.sleep(0)
+
+    assert not fake.closed
+    assert pool.is_valid
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        psycopg.OperationalError('connection failed: FATAL:  password authentication failed for user "app"'),
+        psycopg.OperationalError('connection failed: FATAL:  database "nope" does not exist'),
+        REFUSED,
+    ],
+    ids=["password", "no-database", "too-many"],
+)
+def test_a_refusal_that_will_stay_is_recognised(error):
+    from pg_debug.db.driver import _will_not_clear
+
+    assert _will_not_clear(error)
+
+
+@pytest.mark.asyncio
 async def test_a_borrow_the_pool_gave_up_on_says_what_the_server_said():
     """Closing the pool is what fails the waiting caller at once."""
     fake = FakePool(error=PoolClosed("the pool is closed"))

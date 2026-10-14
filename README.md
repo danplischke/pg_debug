@@ -87,7 +87,7 @@ pg-debug health --type index,vacuum
 pg-debug column-stats orders             # why the planner estimates what it does
 
 pg-debug config                          # settings vs what the server is doing
-pg-debug config --exit-code              # fails on a durability setting that is off (Neon's fsync = off is a note)
+pg-debug config --exit-code              # fails on a durability setting that is off (on Neon and Lakebase, fsync and full_page_writes off are notes)
 
 pg-debug partitions                      # is any table worth partitioning?
 pg-debug partitions --min-size 500MB --min-pruning-share 0.7
@@ -117,7 +117,7 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `--timeout SECONDS` | Statement timeout for every statement. Defaults to none in unrestricted mode and 30 in restricted mode. On an Aurora DSQL host, which refuses `statement_timeout`, it is kept on pg-debug's side instead, with a warning. |
 | `--search-path SCHEMAS` | Schema search path for every statement, e.g. `reporting,public`. |
 | `--llm-model MODEL` | Model for the `llm` tuning method. Defaults to `$PG_DEBUG_LLM_MODEL`, then `gpt-4o`. |
-| `--json` | Emit raw JSON instead of formatted text. |
+| `--json` | Emit raw JSON instead of formatted text. What PostgreSQL withheld from the connecting role is said on stderr, in both outputs. |
 | `-v, --verbose` | Log at INFO, or DEBUG when repeated; the text of a statement that failed is logged at DEBUG. |
 | `--version` | Print the version and exit. |
 
@@ -326,9 +326,12 @@ be removed by any amount of vacuuming, so one forgotten transaction, one
 replication slot nobody consumes or one prepared transaction pins the whole
 database. It is narrower than the usual advice to hunt "idle in transaction":
 measured on PostgreSQL 16, a READ COMMITTED transaction that has only *read*
-holds neither a snapshot nor a transaction id between statements and blocks
-nothing, so it is not reported. What is reported is a backend holding a
-snapshot, or holding a transaction id because it has written.
+holds neither a snapshot nor a transaction id between statements, so it holds
+back nothing vacuum needs and the horizon check does not report it. It does
+keep the locks it took, even a plain read's share lock, which queues DDL and
+everything behind it; `health --type connection` flags it once it has been idle
+in its transaction for a minute. What the horizon check reports is a backend
+holding a snapshot, or holding a transaction id because it has written.
 
 `model` reviews the data model rather than the running server, and needs no
 extension. Its rules are `unindexed_foreign_key`, `foreign_key_type_mismatch`,
@@ -568,8 +571,8 @@ context = QueryContext.from_file("pg-debug.toml")
 | `explain_query(sql, analyze=False, hypothetical_indexes=None)` | `ExplainPlanArtifact` |
 | `diagnose_query(sql, min_ratio=10)` | `list[PlanFinding]` — most severe first |
 | `diagnose_plan(plan, min_ratio=10)` | `list[PlanFinding]` — the same, over `EXPLAIN (ANALYZE, FORMAT JSON)` output; works in restricted mode. `pg_debug.diagnose_plan(plan)` does it with no database at all |
-| `list_activity(include_idle=False, min_duration_seconds=None, blocked_only=False)` | `list[dict]` — one per backend, with `blocked_by` |
-| `lock_tree()` | `list[dict]` — one per root blocker, waiters nested under `blocking` |
+| `list_activity(include_idle=False, min_duration_seconds=None, blocked_only=False)` | `list[dict]` — one per backend, with `blocked_by` and `in_transaction`; to a role without `pg_read_all_stats`, another role's backend in a transaction is listed with `query` `<insufficient privilege>` |
+| `lock_tree()` | `list[dict]` — one per root blocker, waiters nested under `blocking`; each node says `in_transaction` |
 | `vacuum_progress()` | `list[dict]` — one per running vacuum |
 | `explain_index_use(sql, index=None)` | `list[IndexUse]` — one per index on the query's tables, unused first, each with `findings` |
 | `column_stats(table)` / `extended_statistics(table)` | `list[dict]` — planner statistics |
@@ -578,7 +581,10 @@ context = QueryContext.from_file("pg-debug.toml")
 | `check_migration(sql)` | `list[StatementReview]` — most severe first |
 | `review_configuration()` | `list[ConfigFinding]` — most severe first |
 | `suggest_partitions(sql=None, min_table_bytes=1GB, min_pruning_share=0.5, limit=200)` | `list[PartitionCandidate]` — recommended first, then by size |
-| `get_top_queries(sort_by="resources", limit=10, interval_seconds=None)` | `list[dict]` — one per query |
+| `get_top_queries(sort_by="resources", limit=10, interval_seconds=None)` | `list[dict]` — one per query; a sample leaves out other roles' statements whose queryid is withheld |
+| `sample_top_queries(interval_seconds, sort_by="resources", limit=10)` | `QuerySample` — `queries`, and `withheld`, how many other roles' statements ran and could not be ranked |
+| `statistics_access()` | `StatisticsAccess` — `role`, `reads_all_stats`, `member`, `remedy` |
+| `withheld_backends()` | `list[dict]` — `pid`, `datname`, `usename`, `application_name`, `in_transaction`, `xmin_age`, `locks`, `blocking` |
 | `analyze_workload_indexes(...)` / `analyze_query_indexes(queries, ...)` | `dict` with `summary`, `recommendations`, `query_impact` |
 
 Each `HealthCheckResult` carries `healthy`, a text `summary`, the flagged
@@ -609,6 +615,10 @@ run. All exceptions derive from
 A statement PostgreSQL rejects, or restricted mode refuses, raises
 `QueryError`; when PostgreSQL rejected it, psycopg's exception, SQLSTATE and
 all, is its `__cause__`.
+A connection the pool cannot get raises `ConnectionFailedError`: at once with
+the server's reason when the server refused it in a way that will not clear
+(too many connections, a wrong password, role or database), or when this
+client has never connected; otherwise after the pool's 30-second wait.
 A query context the server refuses, a role the connecting user is not a
 member of or a setting it does not know, raises `InvalidArgumentError` when the
 client connects, before any query depends on it.

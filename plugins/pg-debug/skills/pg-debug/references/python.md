@@ -46,12 +46,13 @@ The client connects lazily; `await pg.connect()` first if you want a bad URL to
 fail immediately. Close it (or use the context manager) so the pool is
 released.
 
-On a scale-to-zero platform that matters more. Once connected, an open client
-keeps one pooled connection open, and an Aurora serverless instance does not
-auto-pause while any connection is open. Open a client for a piece of work and
-close it after (`async with`, `with` for `SyncPgDebug`, or `close()`) rather
-than holding one for the life of a long-running process; a pool handed in with
-`pool=` is not closed with the client, so close it too. Connecting wakes a
+An open client holds no connection while idle: the pool closes each 30 to 60
+seconds after its last use, so it does not keep an Aurora serverless instance
+from pausing, and the next call connects again. A reconnect refused for a
+reason that will not clear, such as `max_connections` or a role's connection
+limit, raises `ConnectionFailedError` at once with the server's reason. A pool
+handed in with `pool=` keeps its owner's settings and is not closed with the
+client, so close it too. Connecting wakes a
 suspended Neon compute and resets its idle timer, and any connection attempt,
 even one that fails to log in, resumes a paused Aurora serverless instance,
 which takes about 15 seconds. The first timings after a wake run cold.
@@ -59,7 +60,8 @@ which takes about 15 seconds. The first timings after a wake run cold.
 Failures raise rather than returning error strings, except in
 `analyze_db_health()`, which returns a check that could not run with its
 `error` and runs the rest. Catch `PgDebugError`, or
-the specific subclass — `ConnectionFailedError`, `InvalidArgumentError`,
+the specific subclass — `ConnectionFailedError` (no connection could be had,
+with the server's reason when it refused one), `InvalidArgumentError`,
 `ExtensionRequiredError` (has `.extension`), `ExplainPlanError`, `QueryError`
 (a statement PostgreSQL rejected or restricted mode refused),
 `IndexTuningError` (tables never analyzed, or nothing in the workload could
@@ -73,7 +75,12 @@ health, and `list[ModelFinding]` for the data model review.
 The live-activity and statistics methods mirror the commands:
 `list_activity(include_idle=, min_duration_seconds=, blocked_only=)`,
 `lock_tree()`, `vacuum_progress()`, `explain_index_use(sql, index=)`, `column_stats(table)`, `extended_statistics(table)`, and
-`get_top_queries(..., interval_seconds=)` for sampling. The model review is
+`get_top_queries(..., interval_seconds=)` for sampling. Their rows are what
+PostgreSQL showed the connecting role: `statistics_access()` says whether it is
+shown everything and how it could be; `withheld_backends()` gives
+`in_transaction`, `locks` and `blocking` for each backend it is not; and
+`sample_top_queries(interval_seconds, ...)` returns the ranking with
+`withheld`, how many other roles' statements ran and could not be ranked. The model review is
 `review_data_model(rules=, schema=, min_rows=, proven_only=)`; each
 `ModelFinding` has `rule`, `confidence`, `severity`, `summary`, `detail`,
 `evidence`, `remediation`, `verify` and `impact_bytes`, plus `to_dict()`.

@@ -77,6 +77,8 @@ def test_a_host_under_a_platforms_domain_names_the_platform(url, platform):
         "host=10.0.1.5 dbname=postgres user=admin options='-c amzn-cluster-id=abcdefghij'",
         "host=10.0.1.5 dbname=postgres options='-camzn_cluster_id=abcdefghij'",
         "postgresql://admin@vpce-0123.example.internal/postgres?options=--amzn-cluster-id%3Dabcdefghij",
+        # PostgreSQL reads option names without regard to case.
+        "postgresql://admin@10.0.1.5/postgres?options=-c%20AMZN-CLUSTER-ID%3Dabcdefghij",
     ],
 )
 def test_the_amzn_cluster_id_option_names_aurora_dsql_whatever_the_host(url):

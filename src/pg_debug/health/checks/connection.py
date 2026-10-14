@@ -101,7 +101,8 @@ long_idle AS (
         datname,
         application_name,
         extract(epoch FROM now() - state_change)::bigint AS idle_in_transaction_seconds,
-        left(query, {}) AS query
+        left(query, {}) AS query,
+        length(query) > {} AS query_truncated
     FROM activity
     WHERE backend_type = 'client backend'
       AND state = 'idle in transaction'
@@ -139,7 +140,9 @@ class ConnectionHealthCalc:
         tell rather than counting them as nothing, and it claims nothing about
         sessions it could not see.
         """
-        rows = await SafeSqlDriver.execute_param_query(self.sql_driver, CONNECTIONS_SQL, [QUERY_CHARS, self.max_idle_in_transaction_seconds])
+        rows = await SafeSqlDriver.execute_param_query(
+            self.sql_driver, CONNECTIONS_SQL, [QUERY_CHARS, QUERY_CHARS, self.max_idle_in_transaction_seconds]
+        )
         row: dict[str, Any] = dict(rows[0].cells) if rows else {}
         sessions = [_idle_session(r.cells) for r in rows or [] if r.cells.get("pid") is not None]
 
@@ -242,6 +245,7 @@ def _idle_session(cells: dict[str, Any]) -> dict[str, Any]:
         "application_name": cells.get("application_name"),
         "idle_in_transaction_seconds": cells.get("idle_in_transaction_seconds"),
         "query": cells.get("query"),
+        "query_truncated": bool(cells.get("query_truncated")),
     }
 
 
@@ -251,7 +255,7 @@ def _describe_idle(session: dict[str, Any]) -> str:
         who.append(f"application {session['application_name']}")
     idle = humanize.naturaldelta(int(session.get("idle_in_transaction_seconds") or 0))
     query = str(session.get("query") or "")
-    truncated = "…" if len(query) >= QUERY_CHARS else ""
+    truncated = "…" if session.get("query_truncated") else ""
     query = " ".join(query.split())
     last = f"; its last statement: {query}{truncated}" if query else ""
     return f"Backend {session['pid']} ({', '.join(who)}) has been idle in transaction for {idle}{last}"

@@ -311,15 +311,18 @@ seconds, that fires ends the connection.
 
 pg-debug recognises the platform from the URL's host and options and from the
 server's own settings, functions and roles, and uses it for three things only:
-Neon's `fsync = off` below, the HypoPG advice, and the timeout on Aurora DSQL.
+Neon's and Lakebase's durability settings below, the HypoPG advice, and the timeout on Aurora DSQL.
 Its other findings do not know the platform, and some are wrong there. Correct
 them when relaying.
 
-**Neon's `fsync = off`.** Neon fixes it: a commit is acknowledged once a
-quorum of safekeepers holds its WAL, so local fsync is not what makes it
-durable. Where the server has the `neon.timeline_id` setting or the host is
-under `neon.tech`, `config` reports it as a low note that names that signal
-and does not fail `--exit-code`. A `neon_superuser` role alone is not taken as
+**Neon's `fsync = off` and `full_page_writes = off`.** Neon fixes both: a
+commit is acknowledged once a quorum of safekeepers holds its WAL, so local
+fsync is not what makes it durable, and pages are rebuilt from the WAL by the
+storage layer, so there is no torn page on the compute's disk for a full-page
+image to repair. Where the server has the `neon.timeline_id` setting or the
+host is under `neon.tech`, `config` reports each as a low note that names that
+signal and does not fail `--exit-code`. Databricks Lakebase, built on Neon,
+gets the same notes when the host is a Lakebase endpoint. A `neon_superuser` role alone is not taken as
 enough: then it stays HIGH and says why. If the server is Neon all the same,
 say so instead of relaying it, and gate with a `--baseline` that records it.
 If the low note appears on a server that is not Neon, the recognition was
@@ -466,11 +469,14 @@ run, or say that the first ran cold. On Neon the counters restarted with the
 compute too, so a fresh wake is the worst moment to ask `health` or
 `top-queries` anything.
 
-pg-debug's pool keeps one connection open while the client lives. An open
-connection keeps an Aurora serverless instance from pausing; Neon documents
-only that each connection resets its idle timer, so whether an idle one keeps
-a Neon compute awake is unconfirmed. The CLI exits after each command, so
-this matters for long-lived library use: close the client when done. An RDS
+pg-debug's pool keeps no connection while idle. It closes each 30 to 60
+seconds after its last use, and all within three minutes, inside Aurora's
+shortest five-minute pause delay, so a long-lived client does not keep an
+Aurora serverless instance from pausing (Neon documents only that each
+connection resets its idle timer). The next call connects again, which wakes
+a paused compute. When that reconnect is refused for a reason that will not
+clear, such as `max_connections`, pg-debug says so at once with the server's
+reason. The CLI exits after each command and is unaffected. An RDS
 Proxy in front of Aurora serverless also prevents auto-pause.
 
 ### Aurora DSQL is a different engine

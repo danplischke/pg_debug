@@ -203,7 +203,7 @@ instance.
 | --- | --- | --- |
 | Checkpoint pressure | `config` reports when requested checkpoints outnumber timed ones, once at least 10 have happened, with both counts in `evidence` | A manual `CHECKPOINT`, a backup and a shutdown count as requested too; the counts run from the last reset, and pg-debug does not yet say when that was |
 | Whether autovacuum keeps up (the Notion symptom) | `health --type vacuum`: Autovacuum backlog, and Vacuum horizon for whatever holds cleanup back | A trend; each run is one moment |
-| WAL generation rate | Roughly: the sum of per-query `wal_bytes` over a `top-queries --interval` sample | Only the queries listed, so raise `--limit`; pg-debug does not read `pg_stat_wal`; on PostgreSQL 12 the column reads 0 |
+| WAL generation rate | Roughly: the sum of per-query `wal_bytes` over a `top-queries --interval` sample | Only the queries listed, so raise `--limit`, and only the connecting role's own unless it has `pg_read_all_stats`; pg-debug does not read `pg_stat_wal`; on PostgreSQL 12 the column reads 0 |
 | Working set against memory | Nothing direct: pg-debug does not read `pg_stat_io` and does not guess at RAM | `health --type buffer` gives cache hit rates, but a block served from the OS cache or a platform's cache tier counts as a miss there, so a low rate does not show the working set outgrowing RAM |
 | A candidate routing key | `partitions` gives, per large table, the share of its recorded query time that filters on its best column (`pruning_share`) and on each other column it could split by (`evidence.alternatives`) | Each table is weighed on its own; nothing checks that one key also covers the joins between tables |
 
