@@ -5,6 +5,7 @@ from collections.abc import Generator
 from pathlib import Path
 
 import docker
+import psycopg
 import pytest
 from docker import errors as docker_errors
 
@@ -103,6 +104,7 @@ def create_postgres_container(version: str) -> Generator[tuple[str, str], None, 
 
         # Get assigned port
         port = container.ports["5432/tcp"][0]["HostPort"]
+        connection_string = f"postgresql://postgres:{postgres_password}@localhost:{port}/{postgres_db}"
 
         # Wait for PostgreSQL to be ready
         deadline = time.time() + 60  # Increased timeout to 60 seconds
@@ -110,18 +112,20 @@ def create_postgres_container(version: str) -> Generator[tuple[str, str], None, 
         last_error = None
 
         while time.time() < deadline and not is_ready:
+            # Ready means a connection from here, through the mapped port.
+            # pg_isready inside the container also answers for the temporary
+            # server the image runs its init scripts on, which listens on a
+            # Unix socket only, and a test that connected on its word met that
+            # server shutting down: "server closed the connection unexpectedly".
             try:
-                exit_code, output = container.exec_run("pg_isready")
-                if exit_code == 0:
-                    logger.info("PostgreSQL in container %s is ready", container_name)
-                    is_ready = True
-                    break
-                else:
-                    last_error = output.decode("utf-8")
-                    logger.warning("PostgreSQL not ready yet: %s", last_error)
-            except Exception as e:
+                with psycopg.connect(connection_string, connect_timeout=5) as conn:
+                    conn.execute("SELECT 1")
+                logger.info("PostgreSQL in container %s is ready", container_name)
+                is_ready = True
+                break
+            except psycopg.Error as e:
                 last_error = str(e)
-                logger.warning("Error checking if PostgreSQL is ready: %s", e)
+                logger.warning("PostgreSQL not ready yet: %s", last_error)
 
             # Get container logs for debugging
             if time.time() - deadline + 60 > 50:  # Log when we're close to timeout
@@ -135,7 +139,6 @@ def create_postgres_container(version: str) -> Generator[tuple[str, str], None, 
             logger.error("Timeout waiting for PostgreSQL. Container logs:\n%s", logs[-2000:])
             pytest.skip(f"Timeout waiting for PostgreSQL to start: {last_error}")
 
-        connection_string = f"postgresql://postgres:{postgres_password}@localhost:{port}/{postgres_db}"
         logger.info("PostgreSQL connection string: %s", connection_string)
 
         yield connection_string, version
