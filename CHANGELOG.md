@@ -240,7 +240,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   come back to the caller instead. A refusal that may clear, from a server
   restarting or failing over, is still waited for, and the wait still ends
   after 30 seconds, saying whether every connection was in use or the attempt
-  had not finished.
+  had not finished. Each attempt to connect now gives up after 30 seconds
+  unless the connection string or `PGCONNECT_TIMEOUT` sets a limit: libpq
+  sets none, so an attempt to a host that drops packets went on for as long as
+  the operating system kept trying, about two minutes on Linux, after the
+  caller had stopped waiting. A caller that stops waiting itself, under a
+  timeout of its own, no longer leaves the pool trying to connect, which kept
+  its event loop from finishing.
 
 ### Fixed
 

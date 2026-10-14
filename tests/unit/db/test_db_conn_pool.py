@@ -435,3 +435,44 @@ async def test_a_borrowed_connection_is_counted_until_it_is_given_back():
     async with pool.connection() as connection:
         assert (connection, pool._borrowed) == ("connection", 1)
     assert pool._borrowed == 0
+
+
+@pytest.mark.asyncio
+async def test_a_caller_that_stops_waiting_does_not_leave_the_pool_trying():
+    """A timeout around the call cancels it while the pool is still connecting.
+    Left open, the pool's own task goes on trying and outlives the event loop,
+    which then never finishes."""
+    pool = DbConnPool("postgresql://app@localhost/db")
+    opened = FakePool()
+
+    async def connecting(conninfo):
+        pool.pool = opened  # type: ignore[assignment]
+        await asyncio.Event().wait()
+
+    with patch.object(pool, "_open", connecting), pytest.raises(TimeoutError):
+        await asyncio.wait_for(pool.pool_connect(), timeout=0.05)
+
+    assert opened.closed
+    assert pool.pool is None
+    assert not pool.is_valid
+
+
+@pytest.mark.parametrize(
+    ("url", "environment", "added"),
+    [
+        ("postgresql://app@localhost/db", {}, {"connect_timeout": 30}),
+        ("postgresql://app@localhost/db?connect_timeout=5", {}, {}),
+        ("host=localhost connect_timeout=5", {}, {}),
+        ("postgresql://app@localhost/db", {"PGCONNECT_TIMEOUT": "5"}, {}),
+    ],
+)
+def test_an_attempt_to_connect_is_bounded_unless_the_user_bounded_it(url, environment, added, monkeypatch):
+    """libpq sets no limit, so an attempt to a host that drops packets lasts
+    as long as the operating system keeps trying."""
+    from pg_debug.db.driver import _bounded
+
+    monkeypatch.delenv("PGCONNECT_TIMEOUT", raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    assert _bounded(url) == added

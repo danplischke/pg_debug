@@ -55,6 +55,9 @@ packages = ["src/pg_debug"]
 pythonpath = ["./src", "./tests"]
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+# A test still running after five minutes prints every thread's stack, so a
+# hang in CI names the test and the line it is stuck on.
+faulthandler_timeout = 300
 
 [dependency-groups]
 dev = [

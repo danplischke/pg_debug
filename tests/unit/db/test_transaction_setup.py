@@ -8,6 +8,7 @@ from pg_debug import AccessMode
 from pg_debug import PgDebug
 from pg_debug import QueryContext
 from pg_debug.db import QUERY_MARKER
+from pg_debug.db.driver import CONNECT_TIMEOUT
 from pg_debug.db.driver import DbConnPool
 from pg_debug.db.driver import build_transaction_setup
 from pg_debug.errors import InvalidArgumentError
@@ -74,9 +75,11 @@ def test_the_setup_is_marked_as_ours():
 
 
 @pytest.mark.asyncio
-async def test_the_pool_sets_nothing_on_its_connections_and_prepares_nothing():
+async def test_the_pool_sets_nothing_on_its_connections_and_prepares_nothing(monkeypatch):
     """A session SET, or a statement psycopg prepared, belongs to whichever
-    backend a transaction pooler gave the connection, and stays there."""
+    backend a transaction pooler gave the connection, and stays there. The
+    connect timeout is libpq's own and never reaches the server."""
+    monkeypatch.delenv("PGCONNECT_TIMEOUT", raising=False)
     pool = DbConnPool("postgresql://localhost/db", search_path="reporting", statement_timeout=5)
 
     with patch("pg_debug.db.driver.AsyncConnectionPool") as built:
@@ -86,7 +89,7 @@ async def test_the_pool_sets_nothing_on_its_connections_and_prepares_nothing():
 
     options = built.call_args.kwargs
     assert "configure" not in options
-    assert options["kwargs"] == {"prepare_threshold": None}
+    assert options["kwargs"] == {"prepare_threshold": None, "connect_timeout": CONNECT_TIMEOUT}
 
 
 @pytest.mark.parametrize("seconds", [-1, 2_147_484])

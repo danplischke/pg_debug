@@ -6,6 +6,7 @@ import asyncio
 import copy
 import functools
 import logging
+import os
 import re
 import time
 from collections.abc import AsyncIterator
@@ -20,6 +21,7 @@ from urllib.parse import urlparse
 from urllib.parse import urlunparse
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict
 from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg.sql import SQL
@@ -207,6 +209,22 @@ MAX_STATEMENT_TIMEOUT = 2_147_483
 #: attempt open while it starts, which on Aurora takes seconds to tens of
 #: seconds, and a refusal arrives at once anyway.
 POOL_MAX_IDLE = 30.0
+
+#: How long one attempt to connect may take, unless the connection string or
+#: ``PGCONNECT_TIMEOUT`` says. libpq sets no limit, so an attempt to a host
+#: that drops packets lasts as long as the operating system keeps trying,
+#: about two minutes on Linux. The caller stops waiting after the pool's 30
+#: seconds, but the attempt runs on in the pool's task, which outlives a pool
+#: closed under it and keeps an event loop from finishing. The same 30 seconds
+#: lets a resuming compute finish starting.
+CONNECT_TIMEOUT = 30
+
+
+def _bounded(conninfo: str) -> dict[str, Any]:
+    """The connect_timeout to add to a connection string that sets none."""
+    if "connect_timeout" in conninfo_to_dict(conninfo) or os.environ.get("PGCONNECT_TIMEOUT"):
+        return {}
+    return {"connect_timeout": CONNECT_TIMEOUT}
 
 
 def _reporting_connection(on_failure: Callable[[Exception], None]) -> type[psycopg.AsyncConnection[Any]]:
@@ -418,6 +436,13 @@ class DbConnPool:
             await self.close()
 
             raise ConnectionFailedError(f"Could not connect to database: {obfuscate_password(str(cause))}") from e
+        except asyncio.CancelledError:
+            # A caller that stopped waiting (a timeout around the call) leaves
+            # a pool still trying to connect, whose attempt does not end with
+            # the caller: closed here, or it outlives the event loop.
+            self._is_valid = False
+            await self.close()
+            raise
 
     @asynccontextmanager
     async def connection(self) -> AsyncIterator[Any]:
@@ -534,7 +559,7 @@ class DbConnPool:
             # poolers Cloud SQL, AlloyDB and Azure offer do not support
             # prepared statements at all. pg-debug runs few statements
             # often enough for preparing them to save anything.
-            kwargs={"prepare_threshold": None},
+            kwargs={"prepare_threshold": None, **_bounded(conninfo)},
         )
         built.append(self.pool)
 
