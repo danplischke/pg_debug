@@ -355,6 +355,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   since, and, after a crash, that it lost what it had recorded since the last
   clean shutdown, which its own reset time does not show.
 
+- `--role` (and a context's `role`) ran the user's query without the role's
+  own `ALTER ROLE ... SET` values, which PostgreSQL applies at login and
+  `SET ROLE` does not: on Supabase `authenticated` ran without its
+  8-second `statement_timeout` and its `work_mem`, so a plan or a timeout
+  could differ from the application's. They are now applied in the same
+  transaction setup, the role's value for this database over its value for
+  all databases. The context's settings stand over them, and so do
+  `--timeout`, restricted mode's timeout and `--search-path` when pg-debug
+  sets its own; a setting the connecting user may not set is left out
+  rather than failing every statement. The README and the skill said to
+  copy them with `--set`, which is no longer needed.
+
 - After a crash or `pg_stat_reset()`, `health --type statistics` said every
   table's statistics were current, and `tune-queries` and `tune-workload`
   refused with "Statistics are not up-to-date", on the same database. Both

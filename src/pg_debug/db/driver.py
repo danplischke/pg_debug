@@ -282,6 +282,34 @@ def _quoted_identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+#: Settings a role's own defaults do not decide here: who the statement runs
+#: as, and whether it may write, which --access-mode decides.
+_NEVER_FROM_THE_ROLE = {"role", "session_authorization", "transaction_read_only", "default_transaction_read_only"}
+
+#: The context role's ``ALTER ROLE ... SET`` values, applied the way a login
+#: as the role applies them: the value for this database over the one for all
+#: databases. Left out: a setting the context or pg-debug decides (``decided``),
+#: and one the connecting user may not set, which would fail every statement;
+#: a login as the role would have been allowed it.
+ROLE_DEFAULTS_SQL = """(SELECT count(set_config(d.name, d.value, true)) FROM (
+    SELECT DISTINCT ON (lower(split_part(c.cfg, '=', 1)))
+        split_part(c.cfg, '=', 1) AS name,
+        substr(c.cfg, strpos(c.cfg, '=') + 1) AS value
+    FROM pg_catalog.pg_db_role_setting s
+    CROSS JOIN LATERAL unnest(s.setconfig) AS c(cfg)
+    LEFT JOIN pg_catalog.pg_settings p ON p.name = lower(split_part(c.cfg, '=', 1))
+    WHERE s.setrole = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = {role})
+      AND s.setdatabase IN (0, (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()))
+      AND lower(split_part(c.cfg, '=', 1)) <> ALL ({decided}::text[])
+      AND (
+        p.context = 'user'
+        OR (p.context = 'superuser' AND (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user))
+        OR (p.name IS NULL AND strpos(split_part(c.cfg, '=', 1), '.') > 0)
+      )
+    ORDER BY lower(split_part(c.cfg, '=', 1)), s.setdatabase DESC
+) d)"""
+
+
 def build_transaction_setup(
     statement_timeout: int | None = None,
     search_path: str | None = None,
@@ -322,6 +350,10 @@ def build_transaction_setup(
 
     calls = [SQL("set_config({}, {}, true)").format(Literal(name), Literal(value)) for name, value in settings]
     if context and context.role is not None:
+        # A login as the role would also take its ALTER ROLE ... SET values;
+        # SET ROLE does not, so they are applied here, under the same rules.
+        decided = sorted({name.lower() for name, _ in settings} | _NEVER_FROM_THE_ROLE)
+        calls.append(SQL(ROLE_DEFAULTS_SQL).format(role=Literal(context.role), decided=Literal(decided)))
         calls.append(SQL("set_config('role', {}, true)").format(Literal(context.role)))
     if not calls:
         return None

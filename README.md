@@ -450,9 +450,13 @@ fails once, with PostgreSQL's reason. `--config FILE` reads another file and
   works there: setting a role or a variable writes nothing.
 - The file holds the context and nothing else. The connection URL, and with it
   the password, never goes in it.
-- Switching to a role does not apply that role's own defaults, the ones
-  `ALTER ROLE ... SET` gives it at login. If your application's role has any,
-  declare them under `[context.settings]` too.
+- The role's own defaults, the ones `ALTER ROLE ... SET` gives it at login,
+  are applied too, as a login as the role would apply them: its value for
+  this database over its value for all databases. A setting in the context
+  stands over the role's, and so do `--timeout` and `--search-path` when
+  given. A role default the connecting user may not set (a superuser-only
+  setting, when connecting as an ordinary role) is left out rather than
+  failing every statement.
 - The index advisor takes its candidate columns from the query's text. Under a
   context it costs every candidate with the policy's predicate in the plan, but
   it does not propose an index on a column only the policy restricts;

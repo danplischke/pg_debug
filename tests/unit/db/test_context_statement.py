@@ -7,18 +7,32 @@ from typing import Any
 
 import psycopg
 import pytest
+from psycopg.sql import SQL
+from psycopg.sql import Literal
 
 from pg_debug import QueryContext
 from pg_debug.db import QUERY_MARKER
 from pg_debug.db import SafeSqlDriver
 from pg_debug.db import SqlDriver
+from pg_debug.db.driver import ROLE_DEFAULTS_SQL
 from pg_debug.db.driver import DbConnPool
 from pg_debug.db.driver import build_transaction_setup
 from pg_debug.errors import InvalidArgumentError
 from pg_debug.errors import QueryError
 
 CONTEXT = QueryContext(role="app_user", settings={"app.tenant_id": "t7", "work_mem": "64MB"})
-APPLIED = f"{QUERY_MARKER} SELECT set_config('app.tenant_id', 't7', true), set_config('work_mem', '64MB', true), set_config('role', 'app_user', true)"
+
+
+def role_defaults(role: str, decided: list[str]) -> str:
+    """The call that applies the role's ALTER ROLE ... SET values, as the setup renders it."""
+    return SQL(ROLE_DEFAULTS_SQL).format(role=Literal(role), decided=Literal(decided)).as_string(None)
+
+
+NEVER = ["default_transaction_read_only", "role", "session_authorization", "transaction_read_only"]
+APPLIED = (
+    f"{QUERY_MARKER} SELECT set_config('app.tenant_id', 't7', true), set_config('work_mem', '64MB', true), "
+    f"{role_defaults('app_user', sorted(['app.tenant_id', 'work_mem', *NEVER]))}, set_config('role', 'app_user', true)"
+)
 
 
 class FakeCursor:
@@ -80,7 +94,10 @@ def test_names_and_values_are_quoted_as_literals():
     statement = build_transaction_setup(context=QueryContext(role='x"; DROP ROLE y; --', settings={"app.name": "it's"}))
 
     assert statement is not None
-    assert statement.as_string(None).endswith("set_config('app.name', 'it''s', true), set_config('role', 'x\"; DROP ROLE y; --', true)")
+    text = statement.as_string(None)
+    assert "SELECT set_config('app.name', 'it''s', true), " in text
+    assert "WHERE rolname = 'x\"; DROP ROLE y; --')" in text
+    assert text.endswith("set_config('role', 'x\"; DROP ROLE y; --', true)")
 
 
 @pytest.mark.asyncio
@@ -228,7 +245,13 @@ async def test_the_pools_settings_and_the_context_share_one_statement():
 
     await pooled(connection, statement_timeout=5, search_path="reporting").execute_query("SELECT 1", force_readonly=True, in_context=True)
 
-    setup = POOL_SETUP + APPLIED.replace(f"{QUERY_MARKER} SELECT", ",")
+    # The pool's timeout and search path stand over the role's own.
+    decided = sorted(["app.tenant_id", "work_mem", "statement_timeout", "search_path", *NEVER])
+    setup = (
+        POOL_SETUP
+        + ", set_config('app.tenant_id', 't7', true), set_config('work_mem', '64MB', true), "
+        + f"{role_defaults('app_user', decided)}, set_config('role', 'app_user', true)"
+    )
     assert connection.executed == ["BEGIN TRANSACTION READ ONLY", setup, f"{QUERY_MARKER} SELECT 1", "ROLLBACK"]
 
 

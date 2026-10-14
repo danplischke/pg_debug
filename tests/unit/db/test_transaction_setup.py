@@ -3,12 +3,15 @@
 from unittest.mock import patch
 
 import pytest
+from psycopg.sql import SQL
+from psycopg.sql import Literal
 
 from pg_debug import AccessMode
 from pg_debug import PgDebug
 from pg_debug import QueryContext
 from pg_debug.db import QUERY_MARKER
 from pg_debug.db.driver import CONNECT_TIMEOUT
+from pg_debug.db.driver import ROLE_DEFAULTS_SQL
 from pg_debug.db.driver import DbConnPool
 from pg_debug.db.driver import build_transaction_setup
 from pg_debug.errors import InvalidArgumentError
@@ -62,7 +65,24 @@ def test_the_settings_then_the_context_then_the_role():
         "SELECT set_config('statement_timeout', '5s', true), "
         """set_config('search_path', '"public"', true), """
         "set_config('work_mem', '64MB', true), "
-        "set_config('role', 'app_user', true)"
+        + SQL(ROLE_DEFAULTS_SQL)
+        .format(
+            role=Literal("app_user"),
+            # pg-debug's own timeout and search path stand over the role's.
+            decided=Literal(
+                [
+                    "default_transaction_read_only",
+                    "role",
+                    "search_path",
+                    "session_authorization",
+                    "statement_timeout",
+                    "transaction_read_only",
+                    "work_mem",
+                ]
+            ),
+        )
+        .as_string(None)
+        + ", set_config('role', 'app_user', true)"
     )
 
 

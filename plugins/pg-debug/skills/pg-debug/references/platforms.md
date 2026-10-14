@@ -451,12 +451,12 @@ pg-debug explain --role authenticated \
   --set 'request.jwt.claims={"sub":"<user uuid>","role":"authenticated"}' "<query>"
 ```
 
-`--role` does not apply the role's `ALTER ROLE ... SET` values, which
-PostgreSQL applies only at login, and on Supabase `authenticated` has an
-8-second `statement_timeout` (`anon` has 3). Read them with `pg-debug execute
-"SELECT rolconfig FROM pg_roles WHERE rolname = 'authenticated'"` and pass
-each with `--set`, except `statement_timeout`, which goes to `--timeout`, and
-`search_path`, which goes to `--search-path`; `--set` refuses both.
+`--role` applies the role's `ALTER ROLE ... SET` values as a login as the
+role would, so on Supabase `authenticated` runs with its 8-second
+`statement_timeout` (`anon` with 3), unless `--timeout` or restricted mode's
+own timeout stands over it, and `--set` stands over any of them. A role
+default the connecting user may not set is left out. To see them:
+`pg-debug execute "SELECT rolconfig FROM pg_roles WHERE rolname = 'authenticated'"`.
 
 A policy that calls `auth.uid()`, `auth.jwt()` or a security definer function
 directly runs it for every row it checks; written as `(select auth.uid())` it
