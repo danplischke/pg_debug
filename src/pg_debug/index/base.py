@@ -385,6 +385,7 @@ class IndexTuningBase(ABC):
         """
         validated_workload = []
         dropped: dict[str, int] = {}
+        plan_error: str | None = None
 
         for q in workload:
             query_text = q["query"]
@@ -421,44 +422,51 @@ class IndexTuningBase(ABC):
                 logger.debug("Skipping non-analyzable query: %s...", query_text[:50])
                 continue
 
-            if not await self._is_plannable(query_text):
+            error = await self._plan_error(query_text)
+            if error is not None:
                 dropped["unplannable"] = dropped.get("unplannable", 0) + 1
+                plan_error = plan_error or error
                 continue
 
             q["query"] = query_text
             q["stmt"] = stmt
             validated_workload.append(q)
 
-        self._workload_warning = self._describe_dropped_queries(dropped, kept=len(validated_workload))
+        self._workload_warning = self._describe_dropped_queries(dropped, kept=len(validated_workload), plan_error=plan_error)
         if self._workload_warning:
             logger.warning(self._workload_warning)
         return validated_workload
 
-    async def _is_plannable(self, query_text: str) -> bool:
-        """Whether the server will actually plan the query as reconstructed.
+    async def _plan_error(self, query_text: str) -> str | None:
+        """Why the server will not plan the query as reconstructed, or None if it will.
 
         pg_stat_statements records queries with their constants replaced by
         placeholders, and the values put back in their place are guesses. A
         guess of the wrong type — an integer where the column is an enum or a
-        domain — plans as an error. Finding that out here costs nothing, since
+        domain — plans as an error. So does a query on a table the role
+        planning it may not read. Finding that out here costs nothing, since
         the plan is cached and the analysis needs it anyway; finding it out
         later aborted the whole run.
         """
         try:
             await self.get_explain_plan_with_indexes(query_text, frozenset())
-            return True
+            return None
         except Exception as e:
             logger.debug("Skipping query the server will not plan (%s): %s...", e, query_text[:80])
-            return False
+            message = str(e).strip()
+            return message.splitlines()[0] if message else type(e).__name__
 
     @staticmethod
-    def _describe_dropped_queries(dropped: dict[str, int], kept: int) -> str | None:
+    def _describe_dropped_queries(dropped: dict[str, int], kept: int, plan_error: str | None = None) -> str | None:
         """Explain a workload that was read only in part, or not at all.
 
         Silence here would be misleading: an empty workload reports "no index
         recommendations", which reads as "your indexes are fine" rather than
-        "none of your queries could be used".
+        "none of your queries could be used". A query that could not be
+        planned is reported with what the server said about the first, since
+        the cause is not always the one this can guess.
         """
+        first = f" (the first: {plan_error})" if plan_error else ""
         explanations = {
             "hidden": (
                 f"came back as '{HIDDEN_QUERY_TEXT}' — pg_stat_statements hides the text of other roles' "
@@ -469,8 +477,8 @@ class IndexTuningBase(ABC):
                 "recorded text may be incomplete; run with -vv to see them"
             ),
             "unplannable": (
-                "could not be planned, usually because pg_stat_statements records a query without its "
-                "constants and the values substituted back in were the wrong type; run with -vv to see them"
+                f"could not be planned{first}; for a query read from pg_stat_statements, which records it without its "
+                "constants, the usual cause is a value of the wrong type substituted back in; run with -vv to see them"
             ),
         }
         reasons = [f"{count} {explanations[reason]}" for reason, count in dropped.items() if count]

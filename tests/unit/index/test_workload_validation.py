@@ -70,7 +70,23 @@ async def test_a_query_the_server_will_not_plan_is_skipped(advisor):
     kept = await advisor._validate_and_parse_workload(entries("select * from orders where enum_col = 44", USABLE))
 
     assert [q["query"] for q in kept] == [USABLE]
-    assert "could not be planned" in advisor._workload_warning
+    assert "could not be planned (the first: operator does not exist)" in advisor._workload_warning
+
+
+@pytest.mark.asyncio
+async def test_a_query_that_could_not_be_planned_is_reported_with_the_server_s_reason(advisor):
+    """A guessed constant is not the only cause, and for tune-queries, which
+    never reads pg_stat_statements, not a possible one: the role planning the
+    query may not be allowed to read the table. Guessing sends the reader the
+    wrong way."""
+    advisor.get_explain_plan_with_indexes = AsyncMock(side_effect=RuntimeError("permission denied for table payroll\nDETAIL: ..."))
+
+    kept = await advisor._validate_and_parse_workload(entries("select * from payroll where id = 1", "select * from payroll where id = 2"))
+
+    assert kept == []
+    assert advisor._workload_warning.startswith(
+        "None of the 2 queries in the workload could be analyzed: 2 could not be planned (the first: permission denied for table payroll);"
+    )
 
 
 @pytest.mark.asyncio

@@ -134,6 +134,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Index tuning that could not plan a query blamed `pg_stat_statements` and
+  kept what PostgreSQL had said to itself. The run reported such queries as
+  usually ones recorded without their constants and given back values of the
+  wrong type, even from `tune-queries`, whose queries never pass through
+  `pg_stat_statements`, and a query on a table the role may not read got the
+  same explanation. It now quotes PostgreSQL's reason for the first one —
+  `permission denied for table payroll`, `operator does not exist` — and
+  offers the old explanation only for queries read from
+  `pg_stat_statements`.
+
 - Restricted mode refused a statement with a bare `ValueError` reading
   `Error validating query: <the query>`. It was not a `PgDebugError`, though
   the README promises every failure is one, and it left out why: the reason
