@@ -324,6 +324,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   later, or `ALTER ROLE ... INHERIT` on 15, rather than a grant that changes
   nothing. It works in restricted mode and on a standby.
 
+- After a crash or `pg_stat_reset()`, `health --type statistics` said every
+  table's statistics were current, and `tune-queries` and `tune-workload`
+  refused with "Statistics are not up-to-date", on the same database. Both
+  judged whether a table has statistics from the activity counters, which a
+  reset zeroes together with the times of the last ANALYZE, though it leaves
+  the statistics themselves; the advisor also read only `last_analyze`, which
+  autovacuum's ANALYZE never sets, so a database analyzed only by autovacuum
+  was refused too. Whether a table has statistics is now read from
+  `pg_stats`, and a table with data and none is reported as having no planner
+  statistics, with its size, whatever the counters say. The same reading
+  serves `diagnose` and `index-use`, which name a table without statistics
+  as the reason for a misestimate. Drift since the last ANALYZE is still read
+  from the counters, which start again at a reset.
+
 - `top-queries`, `tune-workload` and `partitions` read `pg_stat_statements`
   rows of every database on the server, so another database's statements were
   ranked as this one's workload, and the advisors tried to plan queries

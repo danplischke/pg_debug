@@ -35,6 +35,14 @@ from ..plans.tree import calculate_improvement_multiple
 
 logger = logging.getLogger(__name__)
 
+#: Whether any table here has planner statistics.
+ANALYZED_SQL = """
+SELECT
+    EXISTS (SELECT 1 FROM pg_stats WHERE schemaname NOT IN ('pg_catalog', 'information_schema'))
+    OR EXISTS (SELECT 1 FROM pg_stat_user_tables WHERE last_analyze IS NOT NULL OR last_autoanalyze IS NOT NULL)
+    AS analyzed
+"""
+
 MAX_NUM_INDEX_TUNING_QUERIES = 10
 
 #: What pg_stat_statements shows instead of another role's query text, unless
@@ -368,13 +376,15 @@ class IndexTuningBase(ABC):
         if not is_hypopg_installed:
             raise ExtensionRequiredError("hypopg", hypopg_message)
 
-        # Pre-check 2: Check if ANALYZE has been run at least once
-        result = await self.sql_driver.execute_query("SELECT s.last_analyze FROM pg_stat_user_tables s ORDER BY s.last_analyze LIMIT 1;")
-        if not result or not any(row.cells.get("last_analyze") is not None for row in result):
+        # Pre-check 2: the planner has statistics to plan with. Read from
+        # pg_stats as well as the times of the last ANALYZE: a crash or
+        # pg_stat_reset() clears the times but not the statistics, and
+        # autovacuum's ANALYZE sets only last_autoanalyze.
+        result = await self.sql_driver.execute_query(ANALYZED_SQL)
+        if not result or not result[0].cells.get("analyzed"):
             raise IndexTuningError(
-                "Statistics are not up-to-date. The database needs to be analyzed first. "
-                "Please run 'ANALYZE;' on your database before using the tuning advisor. "
-                "Without up-to-date statistics, the index recommendations may be inaccurate."
+                "No table in this database has planner statistics, so every plan the advisor compared would rest on "
+                "guesses. Run ANALYZE on the tables the workload reads, then tune again."
             )
 
     async def _validate_and_parse_workload(self, workload: list[dict[str, Any]]) -> list[dict[str, Any]]:

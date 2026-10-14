@@ -94,7 +94,10 @@ async def test_stale_tables_also_reports_never_analyzed_tables():
     await StatisticsInspector(driver).stale_tables()
 
     query = executed_query(driver)
-    assert "last_analyze IS NULL AND last_autoanalyze IS NULL" in query
+    # Whether a table has statistics is read from pg_stats, which a reset of
+    # the counters leaves alone, and only of a table with data.
+    assert "FROM pg_stats p" in query
+    assert "pg_relation_size(s.relid) > 0" in query
 
 
 # -- Health check -----------------------------------------------------------
@@ -144,13 +147,14 @@ async def test_statistics_check_reports_never_analyzed_tables_differently():
             "changed_rows": 5000,
             "changed_fraction": 1.0,
             "never_analyzed": True,
+            "size_bytes": 5 * 1024 * 1024,
         }
     ]
 
     with patch.object(StatisticsInspector, "stale_tables", AsyncMock(return_value=tables)):
         result = await StatisticsHealthCalc(MagicMock(spec=SqlDriver)).stale_statistics_check()
 
-    assert "has never been analyzed (5,000 rows)" in result.summary
+    assert "'public.fresh' has no planner statistics: it has never been analyzed with rows in it (5.0 MiB)" in result.summary
 
 
 @pytest.mark.asyncio
@@ -166,3 +170,17 @@ async def test_statistics_check_passes_its_thresholds_through():
 
 def test_statistics_is_part_of_all_checks():
     assert HealthType.STATISTICS in HealthType.parse("all")
+
+
+@pytest.mark.asyncio
+async def test_the_statistics_reads_run_in_restricted_mode():
+    """Restricted mode validates a statement before it reaches the server."""
+    from pg_debug.db import SafeSqlDriver
+    from pg_debug.index.base import ANALYZED_SQL
+
+    driver = make_driver()
+    await StatisticsInspector(driver).stale_tables()
+
+    safe = SafeSqlDriver(MagicMock(spec=SqlDriver))
+    safe._validate(executed_query(driver))
+    safe._validate(ANALYZED_SQL)

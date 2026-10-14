@@ -1,5 +1,7 @@
 """Health check for planner statistics freshness."""
 
+import humanize
+
 from ...db import SafeSqlDriver
 from ...db import SqlDriver
 from ...statistics import DEFAULT_MIN_CHANGED_ROWS
@@ -50,7 +52,8 @@ class StatisticsHealthCalc:
         for table in tables:
             qualified = f"{table['schema']}.{table['table']}"
             if table["never_analyzed"]:
-                lines.append(f"Table '{qualified}' has never been analyzed ({table['live_rows']:,} rows)")
+                size = humanize.naturalsize(table.get("size_bytes") or 0, binary=True)
+                lines.append(f"Table '{qualified}' has no planner statistics: it has never been analyzed with rows in it ({size})")
             else:
                 fraction = (table["changed_fraction"] or 0) * 100
                 lines.append(f"Table '{qualified}' has {table['changed_rows']:,} rows changed since its last ANALYZE ({fraction:.1f}% of the table)")

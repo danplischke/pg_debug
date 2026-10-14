@@ -184,6 +184,8 @@ async def test_the_candidates_are_measured_and_reset_in_one_transaction(async_sq
 async def test_analyze_workload(async_sql_driver, create_dta):
     async def mock_execute_query(query, **kwargs):
         logger.info("Query: %s", query)
+        if "AS analyzed" in query:
+            return [MockCell({"analyzed": True})]
         if "FROM pg_extension e" in query:
             return [MockCell({"schema": "public", "version": "1.10"})]
         if "pg_stat_statements" in query:
@@ -561,8 +563,8 @@ async def test_basic_workload_analysis(async_sql_driver):
     responses = [
         # check if hypopg is enabled
         [MockCell({"hypopg_enabled_result": 1})],
-        # check last analyze
-        [MockCell({"last_analyze": "2024-01-01 00:00:00"})],
+        # whether any table has statistics
+        [MockCell({"analyzed": True})],
         # where pg_stat_statements is
         [MockCell({"schema": "public", "version": "1.10"})],
         # pg_stat_statements
