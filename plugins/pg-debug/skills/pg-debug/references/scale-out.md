@@ -26,34 +26,31 @@ first (see [platforms.md](platforms.md)) and treat a young replica's counters
 as young.
 
 `health --type replication` reports, for the node it is connected to, whether
-it is a primary or a replica; on a replica, the replay lag in seconds; whether
-any standby is connected, counted from the rows of `pg_stat_replication` on
-that node; and each replication slot's name and whether it is active. That is
-all it reads. It has nothing on retained WAL, `wal_status`, recovery
-conflicts or `hot_standby_feedback`; the sections below read those with
-`execute`.
+it is a primary or a replica. On a replica it reads its WAL receiver, to say
+whether it is streaming and from which host, and the replay lag in seconds; on
+a primary, whether any standby streams from it, leaving out Neon's
+`walproposer` connection, which is not one. It lists each replication slot's
+name and whether it is active. That is all it reads. It has nothing on
+retained WAL, `wal_status`, recovery conflicts or `hot_standby_feedback`; the
+sections below read those with `execute`.
 
-Three of its readings mislead:
+What it cannot read it says. A role without `pg_read_all_stats`, which
+`pg_monitor` includes, sees the receiver's columns blank, and the check says
+it could not tell whether the replica is receiving rather than calling it
+stopped. A lag it could not read comes with the reason.
 
-- **On a replica it can warn falsely.** A replica's own `pg_stat_replication`
-  lists only the standbys streaming from it, so a replica with none is
-  reported "not actively replicating" and unhealthy while it streams normally.
-  On PostgreSQL 16 a streaming standby got exactly that warning. Before
-  relaying it, read the replica's receiver; the columns need
-  `pg_read_all_stats`, which `pg_monitor` includes, and are blank without it:
+A build from before these readings warns "Replica is not actively replicating
+from primary!", with no reason after it, on every replica that has no
+standbys of its own, because it counted the replica's own
+`pg_stat_replication`, and in restricted mode leaves the lag out without a
+word. Before relaying that warning, read the receiver:
 
-  ```bash
-  pg-debug -d "$REPLICA_URL" --access-mode restricted execute \
-    "SELECT status, sender_host, latest_end_time FROM pg_stat_wal_receiver"
-  ```
+```bash
+pg-debug -d "$REPLICA_URL" --access-mode restricted execute \
+  "SELECT status, sender_host, latest_end_time FROM pg_stat_wal_receiver"
+```
 
-  `status = streaming` with a recent `latest_end_time` is a working replica.
-- **In restricted mode the lag is missing.** The functions it is computed
-  from are not on restricted mode's allowlist, so the line is left out without
-  a word, and `replication_lag_seconds` is null in JSON. Run the check
-  unrestricted for the lag; it only reads.
-- **On Neon** it counts the `walproposer` row as a connected replica, which it
-  is not.
+`status = streaming` with a recent `latest_end_time` is a working replica.
 
 What a replica's numbers mean depends on the platform:
 

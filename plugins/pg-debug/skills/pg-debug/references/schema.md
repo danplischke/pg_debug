@@ -235,9 +235,13 @@ Put each step through `check-migration`, knowing which of them it reviews:
   `VALIDATE CONSTRAINT` before the ATTACH, or the ATTACH scans anyway.
 - `CREATE INDEX CONCURRENTLY` on a partition and `DROP CONSTRAINT` it reviews
   correctly.
-- `CREATE INDEX ... ON ONLY` it reviews as an ordinary index build and offers a
-  `CONCURRENTLY` rewrite, which a partitioned table does not accept. Do not
-  relay that rewrite.
+- `CREATE INDEX` on a partitioned table, against the database, it reviews as
+  a build on every partition, refuses `CONCURRENTLY` on it as PostgreSQL does,
+  and writes out the `ON ONLY` recipe with the partitions' names. `ON ONLY` on
+  its own it reviews as the catalog update it is. Offline it cannot tell a
+  partitioned table, and says so. A build from before this offered a
+  `CONCURRENTLY` rewrite for the partitioned table, which PostgreSQL refuses;
+  do not relay that.
 - `ATTACH PARTITION`, `DETACH PARTITION`, `CREATE TABLE ... PARTITION OF` and
   `ALTER INDEX ... ATTACH PARTITION` it does not review at all: they are missing
   from its output and from its statement count. Its silence on them is not a

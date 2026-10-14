@@ -15,6 +15,7 @@ decides whether a migration is fine or needs rewriting.
 
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import dataclass
 from dataclasses import field
@@ -26,6 +27,7 @@ from pglast.enums import AlterTableType
 from pglast.enums import ConstrType
 from pglast.enums import ObjectType
 from pglast.parser import ParseError
+from pglast.stream import RawStream
 
 from ..db import SafeSqlDriver
 from ..db import SqlDriver
@@ -42,6 +44,13 @@ logger = logging.getLogger(__name__)
 #: point at which a rewrite takes longer than a deployment is usually willing
 #: to wait, not from any property of the server.
 LARGE_TABLE_BYTES = 1024 * 1024 * 1024
+
+#: How many partitions a partitioned index's recipe spells out before it says
+#: "and the same for the rest".
+RECIPE_PARTITIONS = 5
+
+#: PostgreSQL truncates an identifier to this many bytes.
+MAX_IDENTIFIER_LENGTH = 63
 
 #: Types that can be widened without touching the rows, because the on-disk
 #: representation does not change. varchar(n) -> varchar(m > n) and
@@ -141,6 +150,14 @@ class MigrationLinter:
                 correct, just unquantified.
         """
         self.sql_driver = sql_driver
+        # The statement behind each index review, to review it again once the
+        # catalog says whether its table is partitioned.
+        self._index_statements: dict[int, ast.IndexStmt] = {}
+        # Each partitioned table's partitions, with whether each is itself
+        # partitioned; a table not partitioned is not in it.
+        self._partitions: dict[str, list[tuple[str, bool]]] = {}
+        # The tables the catalog was asked about and answered for.
+        self._known_tables: set[str] = set()
 
     async def review(self, sql: str) -> list[StatementReview]:
         """Review every statement in a migration.
@@ -163,10 +180,14 @@ class MigrationLinter:
         except ParseError as e:
             raise InvalidArgumentError(f"Could not parse the migration: {e}") from e
 
+        self._index_statements = {}
+        self._partitions = {}
+        self._known_tables = set()
         reviews = [self._review_statement(raw, sql) for raw in parsed]
         reviews = [review for review in reviews if review is not None]
         await self._resolve_default_volatility(reviews)
         await self._add_table_sizes(reviews)
+        reviews = [self._settle_index(review) for review in reviews]
         for review in reviews:
             self._weigh(review)
 
@@ -238,29 +259,62 @@ class MigrationLinter:
             return
 
         try:
+            # A partitioned table has no storage of its own: its size is its
+            # partitions', and an index on it is built on each of them.
             rows = await SafeSqlDriver.execute_param_query(
                 self.sql_driver,
                 """
-                SELECT t.name AS name, pg_total_relation_size(c.oid) AS bytes
+                SELECT t.name AS name,
+                       CASE WHEN c.relkind = 'p'
+                            THEN (SELECT coalesce(sum(pg_total_relation_size(p.relid)), 0)
+                                  FROM pg_partition_tree(c.oid) AS p WHERE p.isleaf)
+                            ELSE pg_total_relation_size(c.oid) END AS bytes,
+                       c.relkind = 'p' AS partitioned,
+                       (SELECT array_agg(i.inhrelid::regclass::text ORDER BY i.inhrelid::regclass::text)
+                        FROM pg_inherits AS i WHERE i.inhparent = c.oid) AS partitions,
+                       (SELECT array_agg(pc.relkind = 'p' ORDER BY i.inhrelid::regclass::text)
+                        FROM pg_inherits AS i JOIN pg_class AS pc ON pc.oid = i.inhrelid
+                        WHERE i.inhparent = c.oid) AS partitions_partitioned
                 FROM unnest({}::text[]) AS t(name)
                 JOIN pg_class c ON c.oid = to_regclass(t.name)
                 """,
                 [tables],
             )
-            sizes = {row.cells["name"]: int(row.cells["bytes"]) for row in rows or []}
         except Exception as e:
             # A migration is worth reviewing even against a database that will
             # not answer questions about it.
             logger.debug("Could not size the tables in the migration: %s", e)
             return
 
+        sizes: dict[str, int] = {}
+        for row in rows or []:
+            name = row.cells["name"]
+            sizes[name] = int(row.cells["bytes"])
+            self._known_tables.add(name)
+            if row.cells["partitioned"]:
+                names = row.cells["partitions"] or []
+                nested = row.cells["partitions_partitioned"] or [False] * len(names)
+                self._partitions[name] = list(zip(names, nested, strict=True))
+
         for review in reviews:
             if review.table in sizes:
                 review.table_bytes = sizes[review.table]
 
+    def _settle_index(self, review: StatementReview) -> StatementReview:
+        """Review an index build again, now that the catalog says whether its table is partitioned."""
+        stmt = self._index_statements.get(id(review))
+        if stmt is None or review.table not in self._known_tables:
+            return review
+        settled = self._index(stmt, review.statement, partitions=self._partitions.get(review.table, []), known=True)
+        settled.table_bytes = review.table_bytes
+        return settled
+
     def _weigh(self, review: StatementReview) -> None:
         """Decide how much a statement matters, and say why in its detail."""
-        if review.lock is LockLevel.SHARE_UPDATE_EXCLUSIVE:
+        if review.kind == "create_index_concurrently_partitioned":
+            # It takes no lock worth weighing: it fails, and the migration with it.
+            review.severity = Severity.HIGH
+        elif review.lock is LockLevel.SHARE_UPDATE_EXCLUSIVE:
             # Blocks no reads and no writes, so its duration does not matter to
             # anyone but the next migration.
             review.severity = Severity.LOW
@@ -338,8 +392,88 @@ class MigrationLinter:
         # lock worth reporting on an existing table.
         return None
 
-    def _index(self, stmt: ast.IndexStmt, text: str) -> StatementReview:
+    def _index(
+        self,
+        stmt: ast.IndexStmt,
+        text: str,
+        partitions: list[tuple[str, bool]] | None = None,
+        known: bool = False,
+    ) -> StatementReview:
+        """An index build.
+
+        Args:
+            partitions: The table's partitions, when the catalog was read and
+                it is partitioned; empty when it was read and is not.
+            known: Whether the catalog was read for this table.
+        """
         table = _relation_name(stmt.relation)
+        only = stmt.relation is not None and stmt.relation.inh is False
+        partitioned = bool(partitions)
+        if only and (partitioned or not known):
+            review = _review(
+                text,
+                "create_index_on_only",
+                LockLevel.SHARE,
+                Duration.INSTANT,
+                rewrites=False,
+                table=table,
+                summary="CREATE INDEX ON ONLY creates a partitioned table's index without building one.",
+                detail=(
+                    "It is a catalog update, and the index stays invalid, unused by the planner, until an index on "
+                    "every partition is attached to it. Build each partition's with CREATE INDEX CONCURRENTLY, which "
+                    "blocks no writes, and attach it with ALTER INDEX ... ATTACH PARTITION. On a table that is not "
+                    "partitioned, ONLY changes nothing and the index is built as usual."
+                ),
+                safer=_partitioned_index_recipe(stmt, partitions or []) if partitioned else [],
+            )
+            self._index_statements[id(review)] = stmt
+            return review
+        if partitioned and stmt.concurrent:
+            review = _review(
+                text,
+                "create_index_concurrently_partitioned",
+                LockLevel.SHARE_UPDATE_EXCLUSIVE,
+                Duration.INSTANT,
+                rewrites=False,
+                table=table,
+                summary="PostgreSQL refuses CREATE INDEX CONCURRENTLY on a partitioned table, so this statement fails.",
+                detail=(
+                    f"{table} is partitioned. Create the index ON ONLY the parent, which builds nothing, then build each "
+                    "partition's CONCURRENTLY and attach it."
+                ),
+                safer=_partitioned_index_recipe(stmt, partitions or []),
+            )
+            self._index_statements[id(review)] = stmt
+            return review
+        if partitioned:
+            review = _review(
+                text,
+                "create_index_partitioned",
+                LockLevel.SHARE,
+                Duration.SCAN,
+                rewrites=False,
+                table=table,
+                summary="CREATE INDEX on a partitioned table builds an index on every partition, blocking writes to each.",
+                detail=(
+                    f"{table} has {len(partitions or [])} partitions. The build takes each one's SHARE lock in turn and "
+                    "holds them all until the statement ends, so writes to a partition already built wait for the "
+                    "rest. CONCURRENTLY is refused on a partitioned table; the way round is ON ONLY on the parent and a "
+                    "concurrent build on each partition."
+                ),
+                safer=_partitioned_index_recipe(stmt, partitions or []),
+            )
+            self._index_statements[id(review)] = stmt
+            return review
+        review = self._plain_index(stmt, text, table)
+        if not known:
+            review.detail += (
+                " On a partitioned table CONCURRENTLY is refused and the build runs on every partition; reviewed "
+                "against the database, the review says which this is and gives the per-partition steps."
+            )
+        self._index_statements[id(review)] = stmt
+        return review
+
+    def _plain_index(self, stmt: ast.IndexStmt, text: str, table: str | None) -> StatementReview:
         if stmt.concurrent:
             return _review(
                 text,
@@ -748,6 +882,58 @@ def _statement_text(raw: Any, sql: str) -> str:
     start = raw.stmt_location or 0
     end = start + raw.stmt_len if raw.stmt_len else len(sql)
     return sql[start:end].strip().rstrip(";")
+
+
+def _partitioned_index_recipe(stmt: ast.IndexStmt, partitions: list[tuple[str, bool]]) -> list[str]:
+    """The statements that build an index on a partitioned table without blocking its writes.
+
+    The parent's index ON ONLY, which builds nothing; then for each partition
+    a concurrent build and an ALTER INDEX ... ATTACH PARTITION, after which the
+    parent's index is valid.
+    """
+    relation = stmt.relation
+    if relation is None:
+        return []
+    name = stmt.idxname or _identifier(f"{relation.relname}_{'_'.join(_index_column_names(stmt))}_idx")
+    qualified = f"{relation.schemaname}.{name}" if relation.schemaname else name
+
+    parent = copy.deepcopy(stmt)
+    parent.relation = copy.deepcopy(relation)
+    parent.relation.inh = False
+    parent.concurrent = False
+    parent.idxname = name
+    steps = [f"{_deparse(parent)};"]
+
+    for partition, nested in partitions[:RECIPE_PARTITIONS]:
+        schema, _, relname = partition.rpartition(".")
+        child_name = _identifier(f"{name}_{relname.strip(chr(34))}")
+        if nested:
+            steps.append(f"-- {partition} is partitioned itself: give it the same treatment, ON ONLY and then its partitions.")
+            continue
+        child = copy.deepcopy(stmt)
+        child.relation = ast.RangeVar(schemaname=schema or None, relname=relname.strip('"'), inh=True, relpersistence="p")
+        child.concurrent = True
+        child.idxname = child_name
+        steps.append(f"{_deparse(child)};")
+        steps.append(f"ALTER INDEX {qualified} ATTACH PARTITION {f'{schema}.' if schema else ''}{child_name};")
+    if len(partitions) > RECIPE_PARTITIONS:
+        steps.append(f"-- and the same for each of the other {len(partitions) - RECIPE_PARTITIONS} partitions.")
+    if not partitions:
+        steps.append("-- then, for each partition: CREATE INDEX CONCURRENTLY on it, and ALTER INDEX ... ATTACH PARTITION.")
+    return steps
+
+
+def _deparse(node: ast.Node) -> str:
+    return str(RawStream()(node))
+
+
+def _index_column_names(stmt: ast.IndexStmt) -> list[str]:
+    return [str(param.name) if param.name else "expr" for param in stmt.indexParams or () if isinstance(param, ast.IndexElem)]
+
+
+def _identifier(name: str) -> str:
+    """A name PostgreSQL will not truncate, cut where it would cut it."""
+    return name.encode()[:MAX_IDENTIFIER_LENGTH].decode(errors="ignore")
 
 
 def _relation_name(relation: Any) -> str | None:

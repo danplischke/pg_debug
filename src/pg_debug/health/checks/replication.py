@@ -6,6 +6,10 @@ from ..result import HealthCheckResult
 
 REPLICATION_HEALTH = "Replication health"
 
+#: The application_name of the connection a Neon compute's WAL proposer keeps
+#: to its safekeepers. It is in pg_stat_replication, and it is not a replica.
+NEON_WALPROPOSER = "walproposer"
+
 
 @dataclass
 class ReplicationSlot:
@@ -16,10 +20,28 @@ class ReplicationSlot:
 
 @dataclass
 class ReplicationMetrics:
+    """What the check read.
+
+    Attributes:
+        is_replica: Whether this server is in recovery.
+        replication_lag_seconds: On a replica, how far replay trails; None
+            when it could not be read, and why is in ``lag_error``.
+        is_replicating: On a replica, whether its WAL receiver is streaming
+            from the primary; on a primary, whether any standby streams from
+            it. None when it could not be told: a replica's receiver is
+            hidden from a role without ``pg_read_all_stats``.
+        replication_slots: The slots on this server.
+        lag_error: Why the lag could not be read, when it could not.
+        receiver: On a replica, its WAL receiver's status, primary host and
+            the time of the last report it received, as far as visible.
+    """
+
     is_replica: bool
     replication_lag_seconds: float | None
-    is_replicating: bool
+    is_replicating: bool | None
     replication_slots: list[ReplicationSlot]
+    lag_error: str | None = None
+    receiver: dict[str, str | None] | None = None
 
 
 class ReplicationCalc:
@@ -34,6 +56,11 @@ class ReplicationCalc:
         A replica that is not receiving from its primary is the only condition
         reported as unhealthy; lag and inactive slots are reported as-is for
         the caller to judge against its own expectations.
+
+        Whether a replica receives is read from its own WAL receiver. Its
+        ``pg_stat_replication`` lists only the standbys that stream from it,
+        so a replica with none of its own, which is most of them, would read
+        as not replicating. What cannot be read is said, not left out.
         """
         metrics = await self._get_replication_metrics()
         result = []
@@ -41,12 +68,24 @@ class ReplicationCalc:
 
         if metrics.is_replica:
             result.append("This is a replica database.")
-            # Check replication status
-            if not metrics.is_replicating:
+            receiver = metrics.receiver or {}
+            if metrics.is_replicating is None:
+                result.append(
+                    "Whether it is receiving from its primary could not be read: pg_stat_wal_receiver is hidden from "
+                    "a role without pg_read_all_stats, which pg_monitor includes."
+                )
+            elif not metrics.is_replicating:
                 healthy = False
-                result.append("WARNING: Replica is not actively replicating from primary!")
+                status = receiver.get("status")
+                why = (
+                    f"its WAL receiver is {status}"
+                    if status
+                    else "it has no WAL receiver, so it is not streaming (it may be restoring from an archive)"
+                )
+                result.append(f"WARNING: Replica is not actively replicating from primary: {why}.")
             else:
-                result.append("Replica is actively replicating from primary.")
+                source = f" {receiver['sender_host']}" if receiver.get("sender_host") else ""
+                result.append(f"Replica is actively replicating from primary{source}.")
 
             # Check replication lag
             if metrics.replication_lag_seconds is not None:
@@ -54,6 +93,8 @@ class ReplicationCalc:
                     result.append("No replication lag detected.")
                 else:
                     result.append(f"Replication lag: {metrics.replication_lag_seconds:.1f} seconds")
+            elif metrics.lag_error:
+                result.append(f"Replication lag could not be read: {metrics.lag_error}")
         else:
             result.append("This is a primary database.")
             if metrics.is_replicating:
@@ -87,16 +128,27 @@ class ReplicationCalc:
                 "is_replica": metrics.is_replica,
                 "is_replicating": metrics.is_replicating,
                 "replication_lag_seconds": metrics.replication_lag_seconds,
+                **({"lag_error": metrics.lag_error} if metrics.lag_error else {}),
+                **({"receiver": metrics.receiver} if metrics.receiver is not None else {}),
             },
         )
 
     async def _get_replication_metrics(self) -> ReplicationMetrics:
         """Get comprehensive replication metrics."""
+        is_replica = await self._is_replica()
+        lag, lag_error = await self._get_replication_lag()
+        receiver = await self._get_wal_receiver() if is_replica else None
+        if is_replica:
+            is_replicating = _receiving(receiver)
+        else:
+            is_replicating = await self._has_streaming_standbys()
         return ReplicationMetrics(
-            is_replica=await self._is_replica(),
-            replication_lag_seconds=await self._get_replication_lag(),
-            is_replicating=await self._is_replicating(),
+            is_replica=is_replica,
+            replication_lag_seconds=lag,
+            is_replicating=is_replicating,
             replication_slots=await self._get_replication_slots(),
+            lag_error=lag_error,
+            receiver=receiver,
         )
 
     async def _is_replica(self) -> bool:
@@ -105,10 +157,10 @@ class ReplicationCalc:
         result_list = [dict(x.cells) for x in result] if result is not None else []
         return bool(result_list[0]["pg_is_in_recovery"]) if result_list else False
 
-    async def _get_replication_lag(self) -> float | None:
-        """Get replication lag in seconds."""
+    async def _get_replication_lag(self) -> tuple[float | None, str | None]:
+        """Replication lag in seconds, or why it could not be read."""
         if not self._feature_supported("replication_lag"):
-            return None
+            return None, None
 
         # Use appropriate functions based on PostgreSQL version
         if await self._get_server_version() >= 100000:
@@ -126,10 +178,10 @@ class ReplicationCalc:
                 AS replication_lag
             """)
             result_list = [dict(x.cells) for x in result] if result is not None else []
-            return float(result_list[0]["replication_lag"]) if result_list else None
-        except Exception:
+            return (float(result_list[0]["replication_lag"]) if result_list else None), None
+        except Exception as e:
             self._feature_support["replication_lag"] = False
-            return None
+            return None, str(e)
 
     async def _get_replication_slots(self) -> list[ReplicationSlot]:
         """Get information about replication slots."""
@@ -159,18 +211,31 @@ class ReplicationCalc:
             self._feature_support["replication_slots"] = False
             return []
 
-    async def _is_replicating(self) -> bool:
-        """Check if replication is active."""
+    async def _has_streaming_standbys(self) -> bool:
+        """Whether any standby streams from this server.
+
+        Neon's WAL proposer keeps a connection of its own in
+        pg_stat_replication; it is the compute's link to its safekeepers, not
+        a replica, and is not counted.
+        """
         if not self._feature_supported("replicating"):
             return False
 
         try:
-            result = await self.sql_driver.execute_query("SELECT state FROM pg_stat_replication")
+            result = await self.sql_driver.execute_query(
+                f"SELECT state FROM pg_stat_replication WHERE application_name IS DISTINCT FROM '{NEON_WALPROPOSER}'"
+            )
             result_list = [dict(x.cells) for x in result] if result is not None else []
             return bool(result_list and len(result_list) > 0)
         except Exception:
             self._feature_support["replicating"] = False
             return False
+
+    async def _get_wal_receiver(self) -> dict[str, str | None]:
+        """A replica's WAL receiver: an empty dict when it has none."""
+        result = await self.sql_driver.execute_query("SELECT status, sender_host, latest_end_time::text AS latest_end_time FROM pg_stat_wal_receiver")
+        rows = [dict(x.cells) for x in result] if result else []
+        return {key: (None if value is None else str(value)) for key, value in rows[0].items()} if rows else {}
 
     async def _get_server_version(self) -> int:
         """Get PostgreSQL server version as a number (e.g. 100000 for version 10.0)."""
@@ -183,3 +248,17 @@ class ReplicationCalc:
     def _feature_supported(self, feature: str) -> bool:
         """Check if a feature is supported and cache the result."""
         return self._feature_support.get(feature, True)
+
+
+def _receiving(receiver: dict[str, str | None] | None) -> bool | None:
+    """Whether a replica's WAL receiver is streaming, or None when its row is hidden.
+
+    No row means no receiver: the replica is not streaming. A row whose status
+    is NULL is one the role may not read; without pg_read_all_stats every
+    column but the pid reads NULL.
+    """
+    if not receiver:
+        return False
+    if receiver.get("status") is None:
+        return None
+    return receiver["status"] == "streaming"

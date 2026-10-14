@@ -313,8 +313,9 @@ not what makes it durable. Say so instead of relaying the finding.
 needs a `--baseline` that records it.
 
 **Neon's `walproposer` row.** Neon's `pg_stat_replication` holds a row with
-`application_name = 'walproposer'`, which Neon's own checks filter out and
-`health --type replication` counts as a connected replica. It is not one.
+`application_name = 'walproposer'`, the compute's link to its safekeepers,
+which Neon's own checks filter out. `health --type replication` leaves it out
+too; a build from before that counted it as a connected replica.
 
 **Connection thresholds.** `health --type connection` flags 500 connections in
 total or 100 idle in transaction, whatever `max_connections` is, while

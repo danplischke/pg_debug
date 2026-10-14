@@ -296,6 +296,9 @@ ALLOWED_FUNCTIONS: set[str] = {
     "pg_table_size",
     "pg_tablespace_size",
     "pg_total_relation_size",
+    "pg_partition_ancestors",
+    "pg_partition_root",
+    "pg_partition_tree",
     # Security privilege check functions
     "has_any_column_privilege",
     "has_column_privilege",
@@ -506,6 +509,9 @@ ALLOWED_FUNCTIONS: set[str] = {
     "pg_postmaster_start_time",  # Shows server start time
     # Recovery Information Functions (safe ones)
     "pg_is_in_recovery",
+    "pg_last_wal_receive_lsn",
+    "pg_last_wal_replay_lsn",
+    "pg_last_xact_replay_timestamp",
     # Hypopg functions
     "hypopg",
     "hypopg_create_index",

@@ -15,9 +15,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   not, which role to connect as, how long the counters behind a finding have
   been counting, which settings Neon, Supabase, RDS, Aurora, Cloud SQL,
   AlloyDB and Azure fix or re-tune, where pg-debug misreads them today
-  (Neon's `fsync = off` reported HIGH, its `walproposer` row taken for a
-  replica, fixed connection thresholds), and when the evidence lives outside
-  SQL. A new `scale-out.md` covers replicas, slots and logical replication,
+  (Neon's `fsync = off` reported HIGH, fixed connection thresholds), and when
+  the evidence lives outside SQL. A new `scale-out.md` covers replicas, slots and logical replication,
   and answers "should we shard?" from what the server shows, starting from
   "not yet". `schema.md` adds pruning, lock slots and the DDL that maintains
   partitions; `incidents.md` adds the DDL lock queue, multixact member
@@ -196,6 +195,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `pg_debug.index.llm_settings`, and `pg_debug.index.llm` still has them.
 
 ### Fixed
+
+- `health --type replication` warned "Replica is not actively replicating
+  from primary!" on a healthy replica. It decided from the replica's own
+  `pg_stat_replication`, which lists only the standbys streaming from it, so
+  every replica without standbys of its own was reported unhealthy. It now
+  reads the replica's WAL receiver and says whether it streams, and from which
+  host, or why not; a receiver hidden from a role without `pg_read_all_stats`
+  is said to be unreadable rather than stopped. In restricted mode the lag
+  was left out without a word, because the functions it is read from were not
+  on the allowlist; they are now, and a lag that cannot be read comes with the
+  reason. On a primary, Neon's `walproposer` connection to its safekeepers no
+  longer counts as a replica.
+
+- `check-migration` offered `CREATE INDEX CONCURRENTLY` as the safer form of
+  an index on a partitioned table, which PostgreSQL refuses, sized the
+  partitioned table at 0 bytes, since it has no storage of its own, and
+  reviewed `CREATE INDEX ... ON ONLY`, which builds nothing, as a full build.
+  Against the database it now sizes a partitioned table by its partitions,
+  says the build runs on every one of them and that `CONCURRENTLY` on the
+  parent fails, and gives the recipe that blocks no writes, with the
+  partitions' names: the index `ON ONLY` the parent, then each partition's
+  built concurrently and attached. Offline it says what a partitioned table
+  would change.
 
 - Behind a pooler that does not support prepared statements, `health`,
   `model`, `tune-queries` and `tune-workload` failed with `prepared statement

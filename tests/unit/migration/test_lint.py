@@ -253,12 +253,31 @@ async def test_the_statement_text_is_reported_as_written(linter):
 # -- Sizing -----------------------------------------------------------------
 
 
+def sized(name: str, size: int, partitions: list[tuple[str, bool]] | None = None) -> SqlDriver.RowResult:
+    """The catalog's answer for one table: its size, and its partitions when it has them."""
+    return SqlDriver.RowResult(
+        cells={
+            "name": name,
+            "bytes": size,
+            "partitioned": partitions is not None,
+            "partitions": [partition for partition, _ in partitions] if partitions else None,
+            "partitions_partitioned": [nested for _, nested in partitions] if partitions else None,
+        }
+    )
+
+
+def catalog(*rows: SqlDriver.RowResult) -> MagicMock:
+    driver = MagicMock(spec=SqlDriver)
+    driver.execute_query = AsyncMock(return_value=list(rows))
+    return driver
+
+
 @pytest.mark.asyncio
 async def test_a_small_table_softens_the_verdict():
     """The same statement is an outage on a large table and a pause on a small
     one, and only the database knows which this is."""
     driver = MagicMock(spec=SqlDriver)
-    driver.execute_query = AsyncMock(return_value=[SqlDriver.RowResult(cells={"name": "orders", "bytes": 4 * 1024 * 1024})])
+    driver.execute_query = AsyncMock(return_value=[sized("orders", 4 * 1024 * 1024)])
 
     review = await one(MigrationLinter(driver), "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint")
 
@@ -270,7 +289,7 @@ async def test_a_small_table_softens_the_verdict():
 @pytest.mark.asyncio
 async def test_a_large_table_stays_high():
     driver = MagicMock(spec=SqlDriver)
-    driver.execute_query = AsyncMock(return_value=[SqlDriver.RowResult(cells={"name": "orders", "bytes": 40 * 1024**3})])
+    driver.execute_query = AsyncMock(return_value=[sized("orders", 40 * 1024**3)])
 
     review = await one(MigrationLinter(driver), "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint")
 
@@ -293,7 +312,7 @@ async def test_a_database_that_will_not_answer_does_not_stop_the_review():
 @pytest.mark.asyncio
 async def test_an_instant_statement_is_not_annotated_with_a_size():
     driver = MagicMock(spec=SqlDriver)
-    driver.execute_query = AsyncMock(return_value=[SqlDriver.RowResult(cells={"name": "orders", "bytes": 40 * 1024**3})])
+    driver.execute_query = AsyncMock(return_value=[sized("orders", 40 * 1024**3)])
 
     review = await one(MigrationLinter(driver), "ALTER TABLE orders DROP COLUMN note")
 
@@ -313,3 +332,89 @@ def test_the_serialized_form_carries_both_halves_of_the_answer():
     assert payload["duration"].startswith("proportional")
     assert payload["blocks"]
     assert payload["safer"]
+
+
+# -- Partitioned tables -------------------------------------------------------
+
+EVENTS = [("app.events_2025", False), ("app.events_2026", False)]
+
+
+@pytest.mark.asyncio
+async def test_an_index_on_a_partitioned_table_is_built_on_every_partition():
+    """The parent has no storage; the build is the partitions', and CONCURRENTLY is refused."""
+    review = await one(MigrationLinter(catalog(sized("app.events", 3 * 1024**3, EVENTS))), "CREATE INDEX events_at ON app.events (at)")
+
+    assert review.kind == "create_index_partitioned"
+    assert review.severity is Severity.MEDIUM, "SHARE blocks writes, not reads, as on a plain table"
+    assert "3.0 GB" in review.detail and "2 partitions" in review.detail
+    assert review.safer == [
+        "CREATE INDEX events_at ON ONLY app.events (at);",
+        "CREATE INDEX CONCURRENTLY events_at_events_2025 ON app.events_2025 (at);",
+        "ALTER INDEX app.events_at ATTACH PARTITION app.events_at_events_2025;",
+        "CREATE INDEX CONCURRENTLY events_at_events_2026 ON app.events_2026 (at);",
+        "ALTER INDEX app.events_at ATTACH PARTITION app.events_at_events_2026;",
+    ]
+    assert not any(step.startswith("CREATE INDEX CONCURRENTLY events_at ON app.events") for step in review.safer)
+
+
+@pytest.mark.asyncio
+async def test_concurrently_on_a_partitioned_table_fails_and_says_so():
+    review = await one(MigrationLinter(catalog(sized("app.events", 1024, EVENTS))), "CREATE INDEX CONCURRENTLY ON app.events (lower(kind))")
+
+    assert review.kind == "create_index_concurrently_partitioned"
+    assert review.severity is Severity.HIGH
+    assert "fails" in review.summary
+    assert review.safer[0] == "CREATE INDEX events_expr_idx ON ONLY app.events ((lower(kind)));"
+
+
+@pytest.mark.asyncio
+async def test_an_index_on_only_the_parent_is_a_catalog_update_with_no_concurrent_rewrite():
+    review = await one(MigrationLinter(catalog(sized("app.events", 1024, EVENTS))), "CREATE INDEX events_at ON ONLY app.events (at)")
+
+    assert review.kind == "create_index_on_only"
+    assert review.duration is Duration.INSTANT
+    assert review.severity is Severity.LOW
+    assert not any("CONCURRENTLY events_at ON ONLY" in step for step in review.safer)
+
+
+@pytest.mark.asyncio
+async def test_on_only_reviewed_offline_is_taken_for_a_partitioned_table():
+    """ONLY means something only on a partitioned table, so offline it is read as one."""
+    review = await one(MigrationLinter(), "CREATE INDEX events_at ON ONLY app.events (at)")
+
+    assert review.kind == "create_index_on_only"
+    assert review.safer == []
+
+
+@pytest.mark.asyncio
+async def test_on_only_on_a_plain_table_is_an_ordinary_build():
+    review = await one(MigrationLinter(catalog(sized("plain", 1024))), "CREATE INDEX plain_at ON ONLY plain (at)")
+
+    assert review.kind == "create_index"
+
+
+@pytest.mark.asyncio
+async def test_a_partition_that_is_partitioned_itself_gets_a_note_not_a_statement_that_fails():
+    review = await one(
+        MigrationLinter(catalog(sized("app.events", 1024, [("app.events_2025", False), ("app.events_2026", True)]))),
+        "CREATE INDEX events_at ON app.events (at)",
+    )
+
+    assert review.safer[-1] == "-- app.events_2026 is partitioned itself: give it the same treatment, ON ONLY and then its partitions."
+    assert not any("ON app.events_2026 " in step for step in review.safer)
+
+
+@pytest.mark.asyncio
+async def test_the_recipe_spells_out_the_first_partitions_and_counts_the_rest():
+    partitions = [(f"app.events_{n}", False) for n in range(8)]
+    review = await one(MigrationLinter(catalog(sized("app.events", 1024, partitions))), "CREATE INDEX events_at ON app.events (at)")
+
+    assert review.safer[-1] == "-- and the same for each of the other 3 partitions."
+    assert sum(step.startswith("CREATE INDEX CONCURRENTLY") for step in review.safer) == 5
+
+
+@pytest.mark.asyncio
+async def test_offline_an_ordinary_build_says_what_a_partitioned_table_would_change():
+    review = await one(MigrationLinter(), "CREATE INDEX events_at ON events (at)")
+
+    assert "On a partitioned table CONCURRENTLY is refused" in review.detail
