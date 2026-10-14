@@ -24,6 +24,7 @@ from .client import TuningMethod
 from .configuration import ConfigFinding
 from .context import QueryContext
 from .db import DbConnPool
+from .db.privileges import StatisticsRows
 from .health import HealthCheckResult
 from .health import HealthType
 from .index_use import IndexUse
@@ -261,7 +262,7 @@ class SyncPgDebug:
         include_idle: bool = False,
         min_duration_seconds: float | None = None,
         blocked_only: bool = False,
-    ) -> list[dict[str, Any]]:
+    ) -> StatisticsRows:
         """Report what the server is doing right now."""
         return self._call(
             self._client.list_activity,
@@ -270,11 +271,11 @@ class SyncPgDebug:
             blocked_only=blocked_only,
         )
 
-    def vacuum_progress(self) -> list[dict[str, Any]]:
+    def vacuum_progress(self) -> StatisticsRows:
         """Report running vacuums and how far along they are."""
         return self._call(self._client.vacuum_progress)
 
-    def lock_tree(self) -> list[dict[str, Any]]:
+    def lock_tree(self) -> StatisticsRows:
         """Report who is blocking whom, root blockers first."""
         return self._call(self._client.lock_tree)
 
@@ -292,7 +293,7 @@ class SyncPgDebug:
         sort_by: SortBy = "resources",
         limit: int = 10,
         interval_seconds: float | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> StatisticsRows:
         """Report the most expensive queries recorded by pg_stat_statements."""
         return self._call(self._client.get_top_queries, sort_by=sort_by, limit=limit, interval_seconds=interval_seconds)
 

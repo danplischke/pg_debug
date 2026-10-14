@@ -19,6 +19,7 @@ from .db import SqlDriver
 from .db import check_hypopg_installation_status
 from .db import obfuscate_password
 from .db.driver import check_statement_timeout
+from .db.privileges import StatisticsRows
 from .errors import ConnectionFailedError
 from .errors import ExtensionRequiredError
 from .errors import InvalidArgumentError
@@ -649,7 +650,7 @@ class PgDebug:
         include_idle: bool = False,
         min_duration_seconds: float | None = None,
         blocked_only: bool = False,
-    ) -> list[dict[str, Any]]:
+    ) -> StatisticsRows:
         """Report what the server is doing right now.
 
         Args:
@@ -663,18 +664,20 @@ class PgDebug:
 
         Returns:
             One dict per backend, including ``blocked_by`` (the pids blocking
-            it) and the age of its state, query and transaction.
+            it) and the age of its state, query and transaction. The list's
+            ``hidden`` says how many backends PostgreSQL showed the connecting
+            role only in part, for want of ``pg_read_all_stats``, or is None.
         """
         inspector = ActivityInspector(await self.sql_driver())
         if blocked_only:
             return await inspector.blocked_backends()
         return await inspector.list_backends(include_idle=include_idle, min_duration_seconds=min_duration_seconds)
 
-    async def vacuum_progress(self) -> list[dict[str, Any]]:
+    async def vacuum_progress(self) -> StatisticsRows:
         """Report running vacuums and how far along they are."""
         return await ActivityInspector(await self.sql_driver()).vacuum_progress()
 
-    async def lock_tree(self) -> list[dict[str, Any]]:
+    async def lock_tree(self) -> StatisticsRows:
         """Report who is blocking whom, as trees rooted at the backends that wait on nothing.
 
         Returns:
@@ -721,7 +724,7 @@ class PgDebug:
         sort_by: SortBy = "resources",
         limit: int = 10,
         interval_seconds: float | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> StatisticsRows:
         """Report the most expensive queries recorded by pg_stat_statements.
 
         Args:
@@ -738,7 +741,9 @@ class PgDebug:
                 workload; sampling measures what is running now.
 
         Returns:
-            One dict of statistics per query.
+            One dict of statistics per query. The list's ``hidden`` says how
+            many came without their text, other roles' queries hidden from a
+            role without ``pg_read_all_stats``, or is None.
 
         Raises:
             InvalidArgumentError: If ``sort_by`` is not a valid criterion, or

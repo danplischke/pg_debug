@@ -113,6 +113,11 @@ async def run(args: argparse.Namespace) -> int:
         split = partition(args.command, result, baseline)
 
     print(format_result(args, result, baseline))
+    hidden = getattr(result, "hidden", None)
+    if hidden and args.json:
+        # The rows stay the array a script reads. What PostgreSQL withheld
+        # from the role goes beside them, as the text puts it under them.
+        print(f"{PROG}: {hidden}", file=sys.stderr)
     if split is not None and not args.json:
         print(render_baseline_trailer(args.baseline, split, could_not_run=len(could_not_run)))
 

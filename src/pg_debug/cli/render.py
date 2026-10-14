@@ -137,10 +137,16 @@ def _cell(value: Any, max_width: int = MAX_CELL_WIDTH) -> str:
     return text
 
 
+def _with_hidden(text: str, result: Any) -> str:
+    """The rendering, then what PostgreSQL withheld from the role that read the result, if anything."""
+    hidden = getattr(result, "hidden", None)
+    return f"{text}\n\n{hidden}" if hidden else text
+
+
 def render_rows(rows: Sequence[Mapping[str, Any]], empty: str = "(no rows)", max_width: int = MAX_CELL_WIDTH) -> str:
     """Render a list of uniform dicts as an aligned text table."""
     if not rows:
-        return empty
+        return _with_hidden(empty, rows)
 
     columns: list[str] = []
     for row in rows:
@@ -157,7 +163,7 @@ def render_rows(rows: Sequence[Mapping[str, Any]], empty: str = "(no rows)", max
     ]
     lines.extend("  ".join(row[i].ljust(widths[i]) for i in range(len(columns))).rstrip() for row in cells)
     lines.append(f"\n({len(rows)} row{'s' if len(rows) != 1 else ''})")
-    return "\n".join(lines)
+    return _with_hidden("\n".join(lines), rows)
 
 
 def render_mapping(mapping: Mapping[str, Any], empty: str = "(nothing to report)") -> str:
@@ -184,7 +190,7 @@ def format_duration(seconds: Any) -> str:
 def render_activity(rows: Sequence[Mapping[str, Any]]) -> str:
     """Render backends as a scannable table, keeping the query text wide."""
     if not rows:
-        return "(nothing running)"
+        return _with_hidden("(nothing running that this role can see)" if getattr(rows, "hidden", None) else "(nothing running)", rows)
 
     projected = [
         {
@@ -198,7 +204,7 @@ def render_activity(rows: Sequence[Mapping[str, Any]]) -> str:
         }
         for row in rows
     ]
-    return render_rows(projected, max_width=80)
+    return _with_hidden(render_rows(projected, max_width=80), rows)
 
 
 def render_lock_tree(roots: Sequence[Mapping[str, Any]]) -> str:
@@ -210,7 +216,7 @@ def render_lock_tree(roots: Sequence[Mapping[str, Any]]) -> str:
     for root in roots:
         _lock_tree_lines(root, 0, lines)
         lines.append("")
-    return "\n".join(lines).rstrip()
+    return _with_hidden("\n".join(lines).rstrip(), roots)
 
 
 def _lock_tree_lines(node: Mapping[str, Any], depth: int, lines: list[str]) -> None:
@@ -255,14 +261,15 @@ def render_vacuum_progress(rows: Sequence[Mapping[str, Any]]) -> str:
             "table": ".".join(p for p in (row.get("schema"), row.get("table")) if p),
             "phase": row.get("phase"),
             "scanned": f"{row.get('percent_scanned')}%" if row.get("percent_scanned") is not None else "",
-            "heap_blks": f"{row.get('heap_blks_scanned')}/{row.get('heap_blks_total')}",
+            # Withheld from a role without pg_read_all_stats, and blank then.
+            "heap_blks": f"{row.get('heap_blks_scanned')}/{row.get('heap_blks_total')}" if row.get("heap_blks_total") is not None else "",
             "index_passes": row.get("index_vacuum_count"),
             "running": format_duration(row.get("running_seconds")),
             "autovacuum": row.get("autovacuum"),
         }
         for row in rows
     ]
-    return render_rows(projected)
+    return _with_hidden(render_rows(projected), rows)
 
 
 def render_column_stats(result: Mapping[str, Any]) -> str:

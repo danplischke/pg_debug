@@ -175,6 +175,22 @@ CLEANUP_SAVEPOINT = "pg_debug_cleanup"
 #: in milliseconds, up to the largest 32-bit integer.
 MAX_STATEMENT_TIMEOUT = 2_147_483
 
+#: How long, in seconds, a pooled connection may sit unused before the pool
+#: closes it.
+#:
+#: The pool keeps none open while idle, because an open connection keeps a
+#: scale-to-zero compute awake: Aurora Serverless v2 does not pause while a
+#: client holds one, and a long-lived application that made one call would
+#: hold it for good. psycopg_pool closes idle connections one at a time, once
+#: every ``max_idle`` seconds, and only one that went unused for a whole
+#: interval: a connection is closed one to two intervals after its last use,
+#: and the five the pool can grow to within six. At 30 seconds that is three
+#: minutes, inside the five minutes that are the shortest pause delay Aurora
+#: offers. A caller that comes back less often reconnects each time, which
+#: costs a connection's setup; the CLI closes its pool when the command ends,
+#: and is not affected either way.
+POOL_MAX_IDLE = 30.0
+
 
 def check_statement_timeout(seconds: int | None) -> None:
     """Refuse a timeout PostgreSQL would refuse, before any statement depends on it.
@@ -339,8 +355,10 @@ class DbConnPool:
         """
         self.pool = AsyncConnectionPool(
             conninfo=conninfo,
-            min_size=1,
+            # None kept open while the client is idle: see POOL_MAX_IDLE.
+            min_size=0,
             max_size=5,
+            max_idle=POOL_MAX_IDLE,
             open=False,  # Don't connect immediately, let's do it explicitly
             # psycopg prepares a statement on the server once it has run
             # five times on a connection. Behind a transaction pooler the
@@ -356,7 +374,8 @@ class DbConnPool:
         # Open the pool explicitly
         await self.pool.open()
 
-        # Test the connection pool by executing a simple query
+        # Test the connection pool by executing a simple query. The pool
+        # opened none of its own, so this is the first connection.
         async with self.pool.connection() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(f"{QUERY_MARKER} SELECT 1")

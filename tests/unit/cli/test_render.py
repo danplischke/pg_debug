@@ -8,6 +8,7 @@ from pg_debug.cli.render import render_mapping
 from pg_debug.cli.render import render_object_details
 from pg_debug.cli.render import render_rows
 from pg_debug.cli.render import to_json
+from pg_debug.db.privileges import StatisticsRows
 
 
 def test_to_json_handles_database_types():
@@ -199,3 +200,18 @@ def test_the_lock_tree_renders_the_root_first_and_indents_the_waiters():
 
 def test_an_empty_lock_tree_says_so():
     assert render_lock_tree([]) == "(nothing is blocked)"
+
+
+def test_a_lock_tree_ends_with_what_the_role_was_not_shown():
+    note = "2 of the backends in these trees are shown without state, query or timings. ..."
+    tree = StatisticsRows(
+        [{"pid": 41, "usename": "postgres", "datname": "app", "query": "<insufficient privilege>", "blocked_total": 0, "blocking": []}],
+        hidden=note,
+    )
+
+    assert render_lock_tree(tree).endswith(f"<insufficient privilege>\n\n{note}")
+
+
+def test_rows_with_nothing_withheld_render_as_before():
+    assert render_rows(StatisticsRows([{"a": 1}])) == render_rows([{"a": 1}])
+    assert render_rows(StatisticsRows()) == "(no rows)"

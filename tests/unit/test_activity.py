@@ -6,10 +6,18 @@ import pytest
 
 from pg_debug.activity import LOCK_TREE_BACKENDS_SQL
 from pg_debug.activity import LOCK_TREE_HOLDERS_SQL
+from pg_debug.activity import WITHHELD_BACKENDS_SQL
 from pg_debug.activity import ActivityInspector
 from pg_debug.activity import assemble_lock_tree
 from pg_debug.db import SafeSqlDriver
 from pg_debug.db import SqlDriver
+from pg_debug.db.privileges import HIDDEN_QUERY_TEXT
+from pg_debug.db.privileges import StatisticsAccess
+
+#: A role shown everything, as a superuser or a member of pg_monitor is.
+MONITOR = StatisticsAccess(role="monitor", reads_all_stats=True)
+#: A role without pg_read_all_stats.
+PLAIN = StatisticsAccess(role="app_user", reads_all_stats=False)
 
 
 def make_driver(rows=()):
@@ -20,6 +28,13 @@ def make_driver(rows=()):
 
 def executed_query(driver):
     return driver.execute_query.call_args[0][0]
+
+
+@pytest.fixture(autouse=True)
+def access():
+    """The role reads every role's statistics, unless a test says otherwise."""
+    with patch("pg_debug.activity.statistics_access", AsyncMock(return_value=MONITOR)) as asked:
+        yield asked
 
 
 @pytest.fixture
@@ -351,3 +366,201 @@ def test_an_unblocked_backend_blocking_nobody_is_not_a_root():
     roots = assemble_lock_tree(rows, [])
 
     assert [root["pid"] for root in roots] == [1]
+
+
+# -- What PostgreSQL withholds from a role without pg_read_all_stats ---------
+
+
+def withheld(pid, usename: str | None = "postgres", **fields):
+    """A backend as PostgreSQL 16 shows it to a role that may not see it."""
+    row = {
+        "pid": pid,
+        "datname": "app",
+        "usename": usename,
+        "application_name": "",
+        "backend_type": None,
+        "state": None,
+        "wait_event_type": None,
+        "wait_event": None,
+        "blocked_by": [],
+        "state_seconds": None,
+        "query_seconds": None,
+        "transaction_seconds": None,
+        "query": HIDDEN_QUERY_TEXT,
+    }
+    row.update(fields)
+    return row
+
+
+def answering(listed=(), withheld_count=0, roles=("postgres",), server_processes=0):
+    """A driver that lists these backends, and counts this many withheld."""
+    driver = MagicMock(spec=SqlDriver)
+
+    async def execute(query, *args, **kwargs):
+        if query == WITHHELD_BACKENDS_SQL:
+            cells = {"withheld": withheld_count, "roles": list(roles), "server_processes": server_processes}
+            return [SqlDriver.RowResult(cells=cells)]
+        return [SqlDriver.RowResult(cells=row) for row in listed]
+
+    driver.execute_query = AsyncMock(side_effect=execute)
+    return driver
+
+
+def ran(driver, query):
+    return any(call.args[0] == query for call in driver.execute_query.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_backends_withheld_from_the_role_are_counted_rather_than_called_nothing(pg16, access):
+    """The reported failure: activity said "(nothing running)" while other
+    roles' queries ran. PostgreSQL still lists their backends to a role
+    without pg_read_all_stats, with the state, query and wait withheld."""
+    access.return_value = PLAIN
+    driver = answering(withheld_count=7, roles=["postgres", "svc"], server_processes=4)
+
+    backends = await ActivityInspector(driver).list_backends()
+
+    assert backends == []
+    assert backends.hidden_count == 7
+    assert backends.hidden is not None
+    assert backends.hidden.startswith("7 other backends, of postgres and svc, and of the server itself, are not listed")
+    assert "app_user" in backends.hidden and "pg_read_all_stats" in backends.hidden and "pg_monitor" in backends.hidden
+    assert "Whether they are running cannot be told" in backends.hidden
+
+
+@pytest.mark.asyncio
+async def test_a_withheld_backend_is_left_out_of_the_running_ones_on_purpose(pg16):
+    """Its NULL state and wait once dropped it by accident; whether it is idle
+    cannot be told, so it is left out, and counted apart."""
+    driver = make_driver()
+
+    await ActivityInspector(driver).list_backends()
+
+    assert f"a.query IS DISTINCT FROM '{HIDDEN_QUERY_TEXT}'" in executed_query(driver)
+
+
+@pytest.mark.asyncio
+async def test_a_minimum_duration_says_how_long_cannot_be_told(pg16, access):
+    access.return_value = PLAIN
+    driver = answering(withheld_count=1, roles=["postgres"])
+
+    backends = await ActivityInspector(driver).list_backends(include_idle=True, min_duration_seconds=30)
+
+    assert backends.hidden is not None
+    assert backends.hidden.startswith("1 other backend, of postgres, is not listed")
+    assert "How long they have been in their state cannot be told." in backends.hidden
+
+
+@pytest.mark.asyncio
+async def test_withheld_backends_listed_with_idle_ones_are_counted_among_them(pg16, access):
+    access.return_value = PLAIN
+    driver = answering(listed=[withheld(5), withheld(6, usename=None), {"pid": 7, "state": "idle", "query": "SELECT 1"}])
+
+    backends = await ActivityInspector(driver).list_backends(include_idle=True)
+
+    assert [row["pid"] for row in backends] == [5, 6, 7]
+    assert backends.hidden_count == 2
+    assert backends.hidden is not None
+    assert backends.hidden.startswith("2 of these backends are shown without state, query, wait or timings.")
+    assert not ran(driver, WITHHELD_BACKENDS_SQL), "the rows themselves say which are withheld"
+
+
+@pytest.mark.asyncio
+async def test_a_role_shown_everything_is_told_nothing_and_asked_nothing_more(pg16):
+    driver = make_driver([{"pid": 42, "state": "active", "query": "SELECT 1"}])
+
+    backends = await ActivityInspector(driver).list_backends()
+
+    assert backends.hidden is None and backends.hidden_count == 0
+    assert not ran(driver, WITHHELD_BACKENDS_SQL)
+
+
+@pytest.mark.asyncio
+async def test_a_role_without_the_privilege_is_told_nothing_when_nothing_was_withheld(pg16, access):
+    """A database only its own role uses withholds nothing from it."""
+    access.return_value = PLAIN
+    driver = answering(withheld_count=0, roles=[])
+
+    backends = await ActivityInspector(driver).list_backends()
+
+    assert backends.hidden is None
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_backend_withheld_from_the_role_is_listed_and_counted(pg16, access):
+    """Blocking is read from the locks, which every role is shown."""
+    access.return_value = PLAIN
+    driver = answering(listed=[withheld(5, blocked_by=[4]), withheld(6), {"pid": 7, "blocked_by": [4], "query": "UPDATE t SET a = 1"}])
+
+    blocked = await ActivityInspector(driver).blocked_backends()
+
+    assert [row["pid"] for row in blocked] == [5, 7]
+    assert blocked.hidden is not None and blocked.hidden.startswith("1 of these backends is shown without state")
+
+
+@pytest.mark.asyncio
+async def test_blocked_backends_ask_the_server_only_when_something_was_withheld(pg16, access):
+    driver = make_driver([{"pid": 2, "blocked_by": [1], "query": "UPDATE t SET a = 1"}])
+
+    blocked = await ActivityInspector(driver).blocked_backends()
+
+    assert blocked.hidden is None
+    access.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_lock_tree_says_which_backends_in_it_are_withheld_and_that_it_is_whole(access):
+    access.return_value = PLAIN
+    driver = tree_driver(
+        [withheld(41), withheld(42, blocked_by=[41], waiting_locktype="relation", waiting_mode="AccessShareLock")],
+        [holder(42, 41, "AccessExclusiveLock")],
+    )
+
+    roots = await ActivityInspector(driver).lock_tree()
+
+    assert [root["pid"] for root in roots] == [41]
+    assert roots.hidden_count == 2
+    assert roots.hidden is not None
+    assert roots.hidden.startswith("2 of the backends in these trees are shown without state, query or timings.")
+    assert "Who blocks whom is complete" in roots.hidden
+
+
+@pytest.mark.asyncio
+async def test_a_lock_tree_of_visible_backends_asks_nothing_more(access):
+    driver = tree_driver([backend(41), backend(42, blocked_by=[41])], [holder(42, 41, "AccessExclusiveLock")])
+
+    roots = await ActivityInspector(driver).lock_tree()
+
+    assert roots.hidden is None
+    access.assert_not_awaited()
+    assert driver.execute_query.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_vacuum_withheld_from_the_role_is_counted(pg16, access):
+    access.return_value = PLAIN
+    driver = make_driver([{"pid": 9, "phase": None, "table": None, "autovacuum": None, "query": HIDDEN_QUERY_TEXT}])
+
+    vacuums = await ActivityInspector(driver).vacuum_progress()
+
+    assert vacuums.hidden is not None
+    assert vacuums.hidden.startswith("1 of these vacuums is shown without table, phase or progress.")
+    assert "autovacuum" in vacuums.hidden
+
+
+@pytest.mark.asyncio
+async def test_whether_a_vacuum_is_autovacuum_is_read_from_the_backend_type(pg16):
+    """Read from the query text, a withheld one said False: '<insufficient
+    privilege>' does not start with 'autovacuum:'. The backend type is
+    withheld with the rest, so the answer is NULL, which is the truth."""
+    driver = make_driver()
+
+    await ActivityInspector(driver).vacuum_progress()
+
+    query = executed_query(driver)
+    assert "a.backend_type = 'autovacuum worker' AS autovacuum" in query
+    assert "LIKE 'autovacuum:%'" not in query
+
+
+def test_the_withheld_backends_query_is_allowed_in_restricted_mode():
+    SafeSqlDriver(MagicMock(spec=SqlDriver))._validate(WITHHELD_BACKENDS_SQL)

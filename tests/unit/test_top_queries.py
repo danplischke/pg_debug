@@ -7,6 +7,8 @@ import pytest
 import pg_debug.top_queries as top_queries_module
 from pg_debug.db import SqlDriver
 from pg_debug.db.extensions import ExtensionStatus
+from pg_debug.db.privileges import HIDDEN_QUERY_TEXT
+from pg_debug.db.privileges import StatisticsAccess
 from pg_debug.errors import ExtensionRequiredError
 from pg_debug.top_queries import PG_STAT_STATEMENTS
 from pg_debug.top_queries import TopQueriesCalc
@@ -245,3 +247,84 @@ async def test_resource_queries_pg13(mock_pg13_driver, mock_extension_installed)
     assert "mean_exec_time" in call_args, "Should use mean_exec_time for PG13"
     # wal_bytes should be the actual column for PG13
     assert "wal_bytes" in call_args, "Should use wal_bytes column for PG13"
+
+
+# -- Text pg_stat_statements withholds from the role -------------------------
+
+
+def recorded(*texts):
+    """A PostgreSQL 16 driver whose pg_stat_statements holds these query texts."""
+    driver = MagicMock(spec=SqlDriver)
+
+    async def execute(query, *args, **kwargs):
+        if "pg_stat_statements" in query:
+            return [
+                MockSqlRowResult(cells={"query": text, "calls": 10, "total_exec_time": 100.0, "mean_exec_time": 10.0, "rows": 1}) for text in texts
+            ]
+        return None
+
+    driver.execute_query = AsyncMock(side_effect=execute)
+    return driver
+
+
+@pytest.fixture
+def pg16():
+    with patch.object(top_queries_module, "get_postgres_version", AsyncMock(return_value=16)):
+        yield
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("texts", "said"),
+    [
+        ([HIDDEN_QUERY_TEXT, HIDDEN_QUERY_TEXT, "SELECT 1"], "2 of these queries are other roles': pg_stat_statements shows app_user their text"),
+        ([HIDDEN_QUERY_TEXT, "SELECT 1"], "1 of these queries is another role's: pg_stat_statements shows app_user its text"),
+    ],
+)
+async def test_queries_shown_without_their_text_are_counted_and_explained(texts, said, pg16, mock_extension_installed):
+    """Only the index advisor used to say so; top-queries listed the
+    '<insufficient privilege>' rows and left the reader to guess why."""
+    access = StatisticsAccess(role="app_user", reads_all_stats=False)
+    with patch.object(top_queries_module, "statistics_access", AsyncMock(return_value=access)):
+        result = await TopQueriesCalc(recorded(*texts)).get_top_queries_by_time(limit=10, sort_by="total")
+
+    assert [row["query"] for row in result] == texts
+    assert result.hidden is not None
+    assert result.hidden.startswith(said)
+    assert "pg_read_all_stats, which pg_monitor includes" in result.hidden
+    assert result.hidden_count == texts.count(HIDDEN_QUERY_TEXT)
+
+
+@pytest.mark.asyncio
+async def test_the_resource_ranking_says_so_too(pg16, mock_extension_installed):
+    access = StatisticsAccess(role="app_user", reads_all_stats=False)
+    with patch.object(top_queries_module, "statistics_access", AsyncMock(return_value=access)):
+        result = await TopQueriesCalc(recorded(HIDDEN_QUERY_TEXT)).get_top_resource_queries()
+
+    assert result.hidden is not None and result.hidden_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_sample_says_so_too(mock_extension_installed):
+    access = StatisticsAccess(role="app_user", reads_all_stats=False)
+    snapshots = [
+        {(1, 10, 1): {"queryid": 1, "query": HIDDEN_QUERY_TEXT, "calls": 1, "total_exec_time": 1.0}},
+        {(1, 10, 1): {"queryid": 1, "query": HIDDEN_QUERY_TEXT, "calls": 3, "total_exec_time": 5.0}},
+    ]
+    with (
+        patch.object(top_queries_module, "statistics_access", AsyncMock(return_value=access)),
+        patch.object(TopQueriesCalc, "_counter_snapshot", AsyncMock(side_effect=snapshots)),
+        patch("pg_debug.top_queries.asyncio.sleep", AsyncMock()),
+    ):
+        result = await TopQueriesCalc(MagicMock(spec=SqlDriver)).sample(1)
+
+    assert result.hidden is not None and result.hidden.startswith("1 of these queries is another role's")
+
+
+@pytest.mark.asyncio
+async def test_the_server_is_asked_only_when_some_text_was_withheld(pg16, mock_extension_installed):
+    with patch.object(top_queries_module, "statistics_access", AsyncMock()) as asked:
+        result = await TopQueriesCalc(recorded("SELECT 1")).get_top_queries_by_time(limit=10)
+
+    assert result.hidden is None
+    asked.assert_not_awaited()

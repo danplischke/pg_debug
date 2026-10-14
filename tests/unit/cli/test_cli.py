@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from pg_debug import cli
+from pg_debug.db.privileges import StatisticsRows
 from pg_debug.errors import ExtensionRequiredError
 from pg_debug.errors import IndexTuningError
 from pg_debug.health import HealthCheckResult
@@ -649,6 +650,53 @@ def test_vacuum_progress_renders_percentage(pg_client):
     assert "79.0%" in out
     assert "79/100" in out
     assert "1m05s" in out
+
+
+#: What a role without pg_read_all_stats is told about the backends it was not shown.
+NOT_LISTED = "7 other backends, of postgres, are not listed: PostgreSQL shows app_user their pid ..."
+
+
+def test_activity_says_what_the_role_was_not_shown_rather_than_nothing_running(pg_client):
+    pg_client.list_activity = AsyncMock(return_value=StatisticsRows(hidden=NOT_LISTED, hidden_count=7))
+
+    code, out, err = run(["activity"])
+
+    assert code == 0
+    assert out.strip() == f"(nothing running that this role can see)\n\n{NOT_LISTED}"
+    assert err == ""
+
+
+def test_activity_json_stays_an_array_and_says_what_was_withheld_beside_it(pg_client):
+    """Scripts read the array with `jq '.[]'`; the note goes to standard error."""
+    pg_client.list_activity = AsyncMock(return_value=StatisticsRows([{"pid": 5, "query": "<insufficient privilege>"}], hidden=NOT_LISTED))
+
+    code, out, err = run(["--json", "activity"])
+
+    assert code == 0
+    assert json.loads(out) == [{"pid": 5, "query": "<insufficient privilege>"}]
+    assert err == f"pg-debug: {NOT_LISTED}\n"
+
+
+def test_top_queries_say_how_many_texts_were_withheld(pg_client):
+    note = "1 of these queries is another role's: pg_stat_statements shows app_user its text as <insufficient privilege> ..."
+    pg_client.get_top_queries = AsyncMock(return_value=StatisticsRows([{"query": "<insufficient privilege>", "calls": 3}], hidden=note))
+
+    code, out, _ = run(["top-queries"])
+
+    assert code == 0
+    assert out.rstrip().endswith(f"(1 row)\n\n{note}")
+
+
+def test_a_withheld_vacuum_shows_blank_progress_rather_than_none(pg_client):
+    pg_client.vacuum_progress = AsyncMock(
+        return_value=StatisticsRows([{"pid": 7, "heap_blks_total": None, "heap_blks_scanned": None}], hidden="1 of these vacuums ...")
+    )
+
+    code, out, _ = run(["vacuum-progress"])
+
+    assert code == 0
+    assert "None" not in out
+    assert out.rstrip().endswith("1 of these vacuums ...")
 
 
 def test_column_stats_renders_both_sections(pg_client):

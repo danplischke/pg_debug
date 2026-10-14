@@ -13,6 +13,11 @@ from .db import SqlDriver
 from .db import workload_only as _workload_only
 from .db.extensions import check_extension
 from .db.extensions import get_postgres_version
+from .db.privileges import HIDDEN_QUERY_TEXT
+from .db.privileges import MISSING_PRIVILEGE
+from .db.privileges import StatisticsRows
+from .db.privileges import statistics_access
+from .db.privileges import withheld_rows
 from .errors import ExtensionRequiredError
 from .errors import InvalidArgumentError
 
@@ -103,12 +108,33 @@ class TopQueriesCalc:
             logger.warning("Extension %s is not installed", PG_STAT_STATEMENTS)
             raise ExtensionRequiredError(PG_STAT_STATEMENTS, install_pg_stat_statements_message)
 
+    async def _noting_hidden_text(self, queries: list[dict[str, Any]]) -> StatisticsRows:
+        """The queries, saying how many of them pg_stat_statements showed without their text.
+
+        It shows a role the text of its own statements only, unless the role
+        holds pg_read_all_stats. The server is asked which once, and only when
+        some text was withheld, so a role that is shown everything pays
+        nothing for the question.
+        """
+        withheld = withheld_rows(queries)
+        if not withheld:
+            return StatisticsRows(queries)
+        access = await statistics_access(self.sql_driver)
+        if access.reads_all_stats:
+            return StatisticsRows(queries)
+        whose, their = ("are other roles'", "their") if withheld != 1 else ("is another role's", "its")
+        hidden = (
+            f"{withheld} of these queries {whose}: pg_stat_statements shows {access.role} {their} text as "
+            f"{HIDDEN_QUERY_TEXT}, because it {MISSING_PRIVILEGE}."
+        )
+        return StatisticsRows(queries, hidden=hidden, hidden_count=withheld)
+
     async def sample(
         self,
         interval_seconds: float,
         sort_by: Literal["resources", "mean", "total"] = "total",
         limit: int = 10,
-    ) -> list[dict[str, Any]]:
+    ) -> StatisticsRows:
         """Measure query activity over an interval instead of since the last reset.
 
         pg_stat_statements counters are cumulative, so the usual ranking is
@@ -129,7 +155,8 @@ class TopQueriesCalc:
         Returns:
             One dict per query that ran during the interval, with the counters
             accumulated over it. ``mean_exec_time`` is recomputed from the
-            interval, not carried over from the cumulative view.
+            interval, not carried over from the cumulative view. The list's
+            ``hidden`` says how many came without their text, or is None.
 
         Raises:
             ExtensionRequiredError: If pg_stat_statements is not installed.
@@ -145,7 +172,7 @@ class TopQueriesCalc:
         after = await self._counter_snapshot()
 
         deltas = self._diff_snapshots(before, after)
-        return self._rank(deltas, sort_by=sort_by, limit=limit)
+        return await self._noting_hidden_text(self._rank(deltas, sort_by=sort_by, limit=limit))
 
     async def _counter_snapshot(self) -> dict[Any, dict[str, Any]]:
         """Read the raw per-query counters, keyed by query identity."""
@@ -242,7 +269,7 @@ class TopQueriesCalc:
 
         return deltas[:limit]
 
-    async def get_top_queries_by_time(self, limit: int = 10, sort_by: Literal["total", "mean"] = "mean") -> list[dict[str, Any]]:
+    async def get_top_queries_by_time(self, limit: int = 10, sort_by: Literal["total", "mean"] = "mean") -> StatisticsRows:
         """Reports the slowest SQL queries based on execution time.
 
         Args:
@@ -252,7 +279,8 @@ class TopQueriesCalc:
 
         Returns:
             One dict per query with its query text, call count, total and mean
-            execution time, and row count.
+            execution time, and row count. The list's ``hidden`` says how many
+            came without their text, or is None.
 
         Raises:
             ExtensionRequiredError: If pg_stat_statements is not installed.
@@ -291,9 +319,9 @@ class TopQueriesCalc:
         )
         slow_queries = [row.cells for row in slow_query_rows] if slow_query_rows else []
         logger.info("Found %s slow queries", len(slow_queries))
-        return slow_queries
+        return await self._noting_hidden_text(slow_queries)
 
-    async def get_top_resource_queries(self, frac_threshold: float = 0.05) -> list[dict[str, Any]]:
+    async def get_top_resource_queries(self, frac_threshold: float = 0.05) -> StatisticsRows:
         """Reports the most time consuming queries based on a resource blend.
 
         A query is reported when it accounts for more than ``frac_threshold`` of
@@ -305,6 +333,8 @@ class TopQueriesCalc:
 
         Returns:
             One dict per query with its execution, buffer and WAL statistics.
+            The list's ``hidden`` says how many came without their text, or is
+            None.
 
         Raises:
             ExtensionRequiredError: If pg_stat_statements is not installed.
@@ -381,4 +411,4 @@ class TopQueriesCalc:
         )
         resource_queries = [row.cells for row in slow_query_rows] if slow_query_rows else []
         logger.info("Found %s resource-intensive queries", len(resource_queries))
-        return resource_queries
+        return await self._noting_hidden_text(resource_queries)

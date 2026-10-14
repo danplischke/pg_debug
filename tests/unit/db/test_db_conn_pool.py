@@ -4,7 +4,9 @@ from unittest.mock import MagicMock
 from unittest.mock import patch
 
 import pytest
+from psycopg_pool import AsyncConnectionPool
 
+from pg_debug.db.driver import POOL_MAX_IDLE
 from pg_debug.db.driver import DbConnPool
 from pg_debug.db.driver import SqlDriver
 from pg_debug.errors import ConnectionFailedError
@@ -213,6 +215,34 @@ async def test_connection_url_property():
     # Change the URL
     db_pool.connection_url = "postgresql://newuser:newpass@otherhost/otherdb"
     assert db_pool.connection_url == "postgresql://newuser:newpass@otherhost/otherdb"
+
+
+@pytest.mark.asyncio
+async def test_an_idle_pool_keeps_no_connection_open():
+    """An open connection keeps a scale-to-zero compute awake, and a
+    long-lived client that made one call would hold one for good."""
+    pool = DbConnPool("postgresql://localhost/db")
+
+    with patch("pg_debug.db.driver.AsyncConnectionPool") as built:
+        built.return_value.open.side_effect = RuntimeError("stop here")
+        with pytest.raises(Exception, match="stop here"):
+            await pool.pool_connect()
+
+    options = built.call_args.kwargs
+    assert options["min_size"] == 0
+    assert options["max_idle"] == POOL_MAX_IDLE
+    # Every connection the pool can grow to is closed within six intervals
+    # of going unused, inside the five minutes of Aurora's shortest pause.
+    assert (options["max_size"] + 1) * POOL_MAX_IDLE <= 300
+
+
+@pytest.mark.asyncio
+async def test_psycopg_pool_takes_an_empty_minimum():
+    """psycopg_pool refuses min_size 0 only with max_size 0 as well. CI runs
+    this at the lowest version the dependency allows, too."""
+    pool = AsyncConnectionPool("postgresql://localhost/db", min_size=0, max_size=5, max_idle=POOL_MAX_IDLE, open=False)
+
+    assert (pool.min_size, pool.max_size, pool.max_idle) == (0, 5, POOL_MAX_IDLE)
 
 
 @pytest.mark.asyncio

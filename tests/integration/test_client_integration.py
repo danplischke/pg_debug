@@ -13,6 +13,8 @@ import json
 import os
 from typing import LiteralString
 from typing import cast
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
 
 import psycopg
 import pytest
@@ -850,6 +852,131 @@ async def test_vacuum_progress_when_nothing_is_vacuuming(pg):
     assert all("phase" in row for row in rows)
 
 
+# -- A role without pg_read_all_stats ----------------------------------------
+
+#: A login role that is neither a superuser nor a member of pg_monitor, as an
+#: application's own role usually is.
+PLAIN_ROLE = "pgdebug_plain"
+
+
+def as_role(role: str, **params: str) -> str:
+    """The test database, connecting as another role. The test servers trust local connections."""
+    parts = urlsplit(DATABASE_URI or "")
+    query = "&".join([*filter(None, [parts.query]), *(f"{name}={value}" for name, value in params.items())])
+    return urlunsplit(parts._replace(netloc=f"{role}@{parts.hostname}:{parts.port}", query=query))
+
+
+@pytest.fixture
+def plain_role() -> str:
+    with psycopg.connect(DATABASE_URI or "", autocommit=True) as conn:
+        # Roles belong to the server, so one may be left from an earlier run.
+        conn.execute(
+            f"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{PLAIN_ROLE}') THEN CREATE ROLE {PLAIN_ROLE} LOGIN; END IF; END $$"
+        )
+    return as_role(PLAIN_ROLE)
+
+
+async def sleeping_backend(seconds: float) -> tuple[asyncio.Task[None], int]:
+    """A superuser's backend running pg_sleep, and its pid."""
+    conn = await psycopg.AsyncConnection.connect(DATABASE_URI or "", autocommit=True)
+    pid = (await (await conn.execute("SELECT pg_backend_pid()")).fetchone() or [0])[0]
+
+    async def sleep():
+        try:
+            await conn.execute("SELECT pg_sleep(%s)", [seconds])
+        finally:
+            await conn.close()
+
+    task = asyncio.create_task(sleep())
+    await asyncio.sleep(0.5)
+    return task, pid
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("access_mode", [AccessMode.UNRESTRICTED, AccessMode.RESTRICTED])
+async def test_activity_says_what_a_role_without_pg_read_all_stats_is_not_shown(plain_role, access_mode):
+    """The reported failure: "(nothing running)" while a superuser's query ran."""
+    sleeper, pid = await sleeping_backend(3)
+    try:
+        async with PgDebug(plain_role, access_mode=access_mode) as plain:
+            running = await plain.list_activity()
+            everything = await plain.list_activity(include_idle=True)
+    finally:
+        await sleeper
+
+    assert pid not in [row["pid"] for row in running]
+    assert running.hidden is not None and running.hidden_count >= 1
+    assert f"PostgreSQL shows {PLAIN_ROLE} their pid" in running.hidden and "pg_read_all_stats" in running.hidden
+
+    (shown,) = [row for row in everything if row["pid"] == pid]
+    assert (shown["state"], shown["wait_event_type"], shown["query"]) == (None, None, HIDDEN_QUERY_TEXT)
+    assert everything.hidden is not None and "of these backends" in everything.hidden
+
+
+@pytest.mark.asyncio
+async def test_a_superuser_is_shown_everything_and_told_nothing(pg):
+    sleeper, pid = await sleeping_backend(2)
+    try:
+        running = await pg.list_activity()
+    finally:
+        await sleeper
+
+    assert pid in [row["pid"] for row in running]
+    assert running.hidden is None
+
+
+@pytest.mark.asyncio
+async def test_top_queries_say_how_many_texts_a_role_without_pg_read_all_stats_is_not_shown(pg, plain_role):
+    if not await has_extension(pg, "pg_stat_statements"):
+        pytest.skip("pg_stat_statements is not installed")
+    # Another role's statement, so there is at least one to withhold.
+    await pg.execute_sql("SELECT count(*) FROM pg_class WHERE relname = 'pgdebug_top_queries_probe'")
+
+    async with PgDebug(plain_role) as plain:
+        queries = await plain.get_top_queries(sort_by="total_time", limit=10_000)
+
+    assert queries.hidden_count == sum(1 for row in queries if row["query"] == HIDDEN_QUERY_TEXT) > 0
+    assert queries.hidden is not None and f"shows {PLAIN_ROLE} their text as {HIDDEN_QUERY_TEXT}" in queries.hidden
+
+
+def test_cli_activity_json_stays_an_array_with_the_note_beside_it(plain_role, capsys):
+    capsys.readouterr()
+
+    assert cli.main(["--json", "-d", plain_role, "activity", "--all"]) == 0
+    captured = capsys.readouterr()
+
+    assert isinstance(json.loads(captured.out), list)
+    assert captured.err.startswith("pg-debug: ") and "pg_read_all_stats" in captured.err
+
+
+# -- The pool ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_idle_client_holds_no_connection(monkeypatch):
+    """An open connection keeps a scale-to-zero compute from pausing."""
+    monkeypatch.setattr("pg_debug.db.driver.POOL_MAX_IDLE", 0.5)
+    application = "pgdebug_idle_probe"
+
+    def connections() -> int:
+        with psycopg.connect(DATABASE_URI or "") as conn:
+            row = conn.execute("SELECT count(*) FROM pg_stat_activity WHERE application_name = %s", [application]).fetchone()
+            return row[0] if row else 0
+
+    async with PgDebug(as_role(urlsplit(DATABASE_URI or "").username or "postgres", application_name=application)) as pg:
+        await pg.list_schemas()
+        assert connections() == 1
+
+        for _ in range(40):
+            if connections() == 0:
+                break
+            await asyncio.sleep(0.25)
+        assert connections() == 0, "the idle connection was not closed"
+
+        await pg.list_schemas()
+        assert connections() == 1, "the next call connects again"
+
+
 @pytest.mark.asyncio
 async def test_column_stats_reflect_the_data(pg):
     stats = {row["column"]: row for row in await pg.column_stats(f"{SCHEMA}.orders")}
@@ -1520,11 +1647,20 @@ def test_cli_check_migration_against_a_real_database(capsys, monkeypatch, pg):
 @pytest.mark.asyncio
 async def test_a_table_with_autovacuum_disabled_is_reported_as_that(pg):
     """Not as "behind": the fix for a switched-off table is not the fix for a
-    late one, so the two must not read the same."""
-    await pg.execute_sql(f"CREATE TABLE {SCHEMA}.frozen (id int, pad text) WITH (autovacuum_enabled = false)")
-    await pg.execute_sql(f"INSERT INTO {SCHEMA}.frozen SELECT i, 'x' FROM generate_series(1, 40000) i")
-    await pg.execute_sql(f"DELETE FROM {SCHEMA}.frozen WHERE id % 2 = 0")
-    await pg.execute_sql(f"ANALYZE {SCHEMA}.frozen")
+    late one, so the two must not read the same.
+
+    The rows are written and deleted by a connection of their own, as an
+    application would. A backend publishes the counts of its own writes in
+    batches, when idle up to seconds later, and an ANALYZE in that backend
+    leaves the unpublished ones out of its estimate: on pg-debug's single
+    pooled connection the dead rows would not show yet. Closing the writer
+    publishes them.
+    """
+    with psycopg.connect(DATABASE_URI or "", autocommit=True) as app:
+        app.execute(f"CREATE TABLE {SCHEMA}.frozen (id int, pad text) WITH (autovacuum_enabled = false)")
+        app.execute(f"INSERT INTO {SCHEMA}.frozen SELECT i, 'x' FROM generate_series(1, 40000) i")
+        app.execute(f"DELETE FROM {SCHEMA}.frozen WHERE id % 2 = 0")
+        app.execute(f"ANALYZE {SCHEMA}.frozen")
 
     calc = AutovacuumCalc(await pg.sql_driver())
     check = await calc.autovacuum_backlog_check()
