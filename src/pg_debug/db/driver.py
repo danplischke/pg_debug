@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
-import os
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -17,7 +16,6 @@ from urllib.parse import urlparse
 from urllib.parse import urlunparse
 
 import psycopg
-from psycopg.conninfo import conninfo_to_dict
 from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg.sql import SQL
@@ -108,13 +106,65 @@ def obfuscate_password(text: str | None) -> str | None:
     return text
 
 
-def _rejected(error: psycopg.Error) -> QueryError:
+#: The SQLSTATE of ``invalid byte sequence for encoding``, with which a SQL_ASCII
+#: server refuses to send a client that asked for UTF-8 bytes that are not.
+CHARACTER_NOT_IN_REPERTOIRE = "22021"
+
+
+def _rejected(error: psycopg.Error, conn: Any = None) -> QueryError:
     """PostgreSQL's refusal of a statement, as the error pg_debug raises.
 
     The psycopg exception stays attached as ``__cause__``, with its SQLSTATE
     and diagnostics, for a caller that needs more than the message.
+
+    Args:
+        error: The refusal.
+        conn: What the statement ran on: a :class:`DbConnPool` that chose
+            UTF-8 for a SQL_ASCII database says so, with the remedy, when the
+            refusal is a byte that is not UTF-8.
     """
+    if isinstance(conn, DbConnPool) and conn.reads_sql_ascii_as_utf8 and error.sqlstate == CHARACTER_NOT_IN_REPERTOIRE:
+        return QueryError(
+            f"{error}. The database is SQL_ASCII, which stores text as bytes without saying what encoding they are in; "
+            "pg-debug reads them as UTF-8, and these are not UTF-8. Name the encoding the data is really in when connecting, "
+            "for example ?client_encoding=LATIN1 in the URL, or PGCLIENTENCODING=LATIN1."
+        )
     return QueryError(str(error))
+
+
+def _names_no_encoding(encoding: str | None) -> bool:
+    """Whether a client encoding is SQL_ASCII, which declares that the bytes have none.
+
+    The server sends a SQL_ASCII client the bytes it stores, unconverted, and
+    psycopg returns them as ``bytes`` rather than guess at a decoding, and
+    sends statements as ASCII.
+    """
+    # PostgreSQL ignores case and punctuation in encoding names.
+    return encoding is not None and re.sub(r"[^a-z0-9]", "", encoding.lower()) == "sqlascii"
+
+
+def _refuse_undecoded_text(connection: Any) -> None:
+    """Refuse a connection whose text would come back as ``bytes``, before anything runs on it.
+
+    pg-debug's own pool asks for UTF-8 instead (see :meth:`DbConnPool.pool_connect`),
+    but a caller can hand :class:`SqlDriver` a connection of their own, and
+    psycopg returns text read on it as ``bytes``: names came back as
+    ``b'public'``, so a comparison with the query's columns found nothing, and
+    a version check or a join of names failed with a ``TypeError`` that said
+    nothing of the cause.
+
+    Raises:
+        QueryError: If the connection's client encoding is SQL_ASCII.
+    """
+    if not isinstance(connection, psycopg.AsyncConnection):
+        return
+    encoding = connection.info.parameter_status("client_encoding")
+    if _names_no_encoding(encoding):
+        raise QueryError(
+            f"The connection's client_encoding is {encoding}, so the server sends text as the bytes it stores and psycopg "
+            'returns them undecoded, which pg-debug cannot read. Open it with client_encoding="UTF8", or the encoding '
+            'the data is in: psycopg.AsyncConnection.connect(url, client_encoding="UTF8").'
+        )
 
 
 #: The savepoint a statement with a cleanup runs after, so that the cleanup can
@@ -191,36 +241,6 @@ def build_transaction_setup(
     return SQL(QUERY_MARKER + " SELECT ") + SQL(", ").join(calls)
 
 
-def _text_as_utf8(url: str) -> str:
-    """The connection URL, asking for text in UTF-8 unless it or the environment names an encoding.
-
-    Left to libpq, the client encoding is the database's, and on a SQL_ASCII
-    database that is no encoding at all: the server sends the bytes it stores,
-    and psycopg returns text columns as ``bytes`` and encodes statements as
-    ASCII. Commands that read the server version failed, the others printed
-    names as ``b'...'`` or, comparing those bytes with names, missed the
-    columns a query filters on; a query with a non-ASCII literal could not be
-    sent at all.
-
-    A server in any other encoding converts its text to UTF-8, which decodes
-    to the same strings its own encoding did. A SQL_ASCII server converts
-    nothing, but checks that what it sends is valid UTF-8, and refuses the
-    statement, naming the byte, when it is not: nothing is decoded on a guess.
-    An encoding named in the URL's ``client_encoding`` or in
-    ``PGCLIENTENCODING`` is kept, so data stored in LATIN1 can be read as
-    LATIN1; SQL_ASCII names no encoding, so naming it is the same as naming
-    none.
-
-    It is a startup parameter, not a ``SET``: PgBouncer keeps it for each
-    client and sets it on whichever backend serves that client.
-    """
-    named = conninfo_to_dict(url).get("client_encoding") or os.environ.get("PGCLIENTENCODING")
-    # PostgreSQL ignores case and punctuation in encoding names.
-    if named and re.sub(r"[^a-z0-9]", "", str(named).lower()) != "sqlascii":
-        return url
-    return make_conninfo(url, client_encoding="UTF8")
-
-
 class DbConnPool:
     """Database connection manager using psycopg's connection pool."""
 
@@ -249,6 +269,9 @@ class DbConnPool:
         self.search_path = search_path
         self.statement_timeout = statement_timeout
         self.pool: AsyncConnectionPool | None = None
+        #: Whether the database sent its text as SQL_ASCII, no encoding at
+        #: all, so that the pool asked for it in UTF-8 instead.
+        self.reads_sql_ascii_as_utf8 = False
         self._is_valid = False
         self._last_error = None
 
@@ -269,34 +292,22 @@ class DbConnPool:
         await self.close()
 
         try:
-            # Configure connection pool with appropriate settings
-            self.pool = AsyncConnectionPool(
-                conninfo=_text_as_utf8(url),
-                min_size=1,
-                max_size=5,
-                open=False,  # Don't connect immediately, let's do it explicitly
-                # psycopg prepares a statement on the server once it has run
-                # five times on a connection. Behind a transaction pooler the
-                # connection is not one session: the next execution reaches a
-                # backend without the statement, or another client's
-                # preparation one that already has it, and Supavisor and the
-                # poolers Cloud SQL, AlloyDB and Azure offer do not support
-                # prepared statements at all. pg-debug runs few statements
-                # often enough for preparing them to save anything.
-                kwargs={"prepare_threshold": None},
-            )
-
-            # Open the pool explicitly
-            await self.pool.open()
-
-            # Test the connection pool by executing a simple query
-            async with self.pool.connection() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(f"{QUERY_MARKER} SELECT 1")
+            pool, encoding = await self._open(url)
+            # Decided from what the server reports once connected, not from
+            # the URL: an encoding can also be named in PGCLIENTENCODING, in
+            # options or PGOPTIONS, in a service file, or by ALTER DATABASE or
+            # ALTER ROLE ... SET client_encoding, and only the reported value
+            # says which of them won. SQL_ASCII, whether named, reached by
+            # client_encoding=auto in a C locale, or the database's own, is no
+            # encoding at all.
+            self.reads_sql_ascii_as_utf8 = _names_no_encoding(encoding)
+            if self.reads_sql_ascii_as_utf8:
+                await self.close()
+                pool, _ = await self._open(make_conninfo(url, client_encoding="UTF8"))
 
             self._is_valid = True
             self._last_error = None
-            return self.pool
+            return pool
         except Exception as e:
             self._is_valid = False
             self._last_error = str(e)
@@ -305,6 +316,43 @@ class DbConnPool:
             await self.close()
 
             raise ConnectionFailedError(f"Could not connect to database: {obfuscate_password(str(e))}") from e
+
+    async def _open(self, conninfo: str) -> tuple[AsyncConnectionPool, str | None]:
+        """Open the pool on a connection string, test it, and return it with the client encoding it reports.
+
+        A SQL_ASCII database asked for text in UTF-8 converts nothing, but
+        checks that what it sends is UTF-8, and refuses the statement, naming
+        the byte, when it is not: nothing is decoded on a guess. Any other
+        database converts its text to the encoding asked for.
+
+        The encoding is asked for as a startup parameter, not with a ``SET``:
+        PgBouncer keeps one for each client, and sets it on whichever backend
+        serves that client.
+        """
+        self.pool = AsyncConnectionPool(
+            conninfo=conninfo,
+            min_size=1,
+            max_size=5,
+            open=False,  # Don't connect immediately, let's do it explicitly
+            # psycopg prepares a statement on the server once it has run
+            # five times on a connection. Behind a transaction pooler the
+            # connection is not one session: the next execution reaches a
+            # backend without the statement, or another client's
+            # preparation one that already has it, and Supavisor and the
+            # poolers Cloud SQL, AlloyDB and Azure offer do not support
+            # prepared statements at all. pg-debug runs few statements
+            # often enough for preparing them to save anything.
+            kwargs={"prepare_threshold": None},
+        )
+
+        # Open the pool explicitly
+        await self.pool.open()
+
+        # Test the connection pool by executing a simple query
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(f"{QUERY_MARKER} SELECT 1")
+            return self.pool, conn.info.parameter_status("client_encoding")
 
     async def close(self) -> None:
         """Close the connection pool."""
@@ -352,7 +400,10 @@ class SqlDriver:
         Initialize with a PostgreSQL connection or pool.
 
         Args:
-            conn: PostgreSQL connection object or pool
+            conn: PostgreSQL connection object or pool. A psycopg connection
+                whose client encoding is SQL_ASCII, which is what a SQL_ASCII
+                database gives one that names none, is refused: open it with
+                ``client_encoding="UTF8"``.
             engine_url: Connection URL string as an alternative to providing a connection
             context: The role and settings for the statements that run or
                 plan the user's query, the ones executed with
@@ -446,7 +497,7 @@ class SqlDriver:
                 finally:
                     self._pinned_connection = None
         except psycopg.Error as e:
-            raise _rejected(e) from e
+            raise _rejected(e, self.conn) from e
 
     async def execute_query(
         self,
@@ -532,7 +583,7 @@ class SqlDriver:
                 self.conn = None
 
             if isinstance(e, psycopg.Error):
-                raise _rejected(e) from e
+                raise _rejected(e, self.conn) from e
             raise
 
     @staticmethod
@@ -615,6 +666,7 @@ class SqlDriver:
         cleanup: LiteralString | None = None,
     ) -> list[RowResult] | None:
         """Execute query with the given connection."""
+        _refuse_undecoded_text(connection)
         transaction_started = False
         setup = self._transaction_setup(in_context)
         if cleanup is not None:
@@ -730,10 +782,11 @@ class SqlDriver:
                     return await self._execute_rolled_back(connection, query, params, in_context=in_context)
             return await self._execute_rolled_back(self.conn, query, params, in_context=in_context)
         except psycopg.Error as e:
-            raise _rejected(e) from e
+            raise _rejected(e, self.conn) from e
 
     async def _execute_rolled_back(self, connection, query, params, in_context=False) -> list[RowResult] | None:
         """Execute on a connection inside a transaction that is always undone."""
+        _refuse_undecoded_text(connection)
         try:
             async with connection.cursor(row_factory=dict_row) as cursor:
                 # Without autocommit psycopg has already opened a transaction

@@ -225,8 +225,8 @@ async def test_a_server_with_nothing_measurably_wrong_reports_nothing():
                     ("random_page_cost", "1.1", None),
                 )
             ]
-        if query.strip() == "SHOW server_version":
-            return [SqlDriver.RowResult(cells={"server_version": "16.4"})]
+        if query.strip() == "SHOW server_version_num":
+            return [SqlDriver.RowResult(cells={"server_version_num": "160004"})]
         return [SqlDriver.RowResult(cells=healthy_measurements())]
 
     driver.execute_query = AsyncMock(side_effect=answer)

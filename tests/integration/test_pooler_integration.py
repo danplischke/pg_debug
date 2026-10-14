@@ -20,7 +20,9 @@ from typing import NamedTuple
 
 import psycopg
 import pytest
+from psycopg import sql
 from utils import PGBOUNCER_POOL_SIZE
+from utils import sql_ascii_database
 
 from pg_debug import AccessMode
 from pg_debug import IndexUseReason
@@ -111,6 +113,24 @@ def server(test_pooled_postgres, monkeypatch, tmp_path):
     finally:
         with psycopg.connect(direct, autocommit=True) as conn:
             conn.execute("DROP TABLE IF EXISTS pooled_orders, pooled_customers")
+
+
+def reconnect(pooled: str) -> None:
+    """Have the pooler replace its backends, which keep the client encoding the database gave them when they opened."""
+    with psycopg.connect(pooled.rsplit("/", 1)[0] + "/pgbouncer", autocommit=True) as admin:
+        admin.execute("RECONNECT")
+
+
+@pytest.fixture
+def sql_ascii(test_pooled_postgres, monkeypatch):
+    """A SQL_ASCII database, directly and behind the pooler, with no encoding named in the environment."""
+    for variable in ("PGCLIENTENCODING", "PGOPTIONS"):
+        monkeypatch.delenv(variable, raising=False)
+    direct, pooled = test_pooled_postgres
+    with sql_ascii_database(direct) as database:
+        name = database.rsplit("/", 1)[1]
+        reconnect(pooled)
+        yield Server(database, f"{pooled.rsplit('/', 1)[0]}/{name}")
 
 
 def verdicts(uses) -> list[tuple[str, bool, list[str]]]:
@@ -231,3 +251,33 @@ class TestBehindATransactionPooler:
                     await pg.explain_query(WITH_CUSTOMER, hypothetical_indexes=[{"table": "pooled_orders", "columns": ["customer_id"]}])
 
         assert on_every_backend(server.pooled, "SELECT count(*) FROM hypopg()") == [0] * PGBOUNCER_POOL_SIZE
+
+    @pytest.mark.asyncio
+    async def test_a_sql_ascii_database_is_read_in_utf8_and_left_as_it_was_for_other_clients(self, sql_ascii):
+        """pg-debug asks for UTF-8 when it connects, not with a SET: the pooler
+        keeps a client's startup parameters for that client, and puts each
+        client's own back on whichever backend serves it."""
+        encoding = "SELECT current_setting('client_encoding')"
+        # Read by a client that named no encoding, so the bytes come back undecoded.
+        assert on_every_backend(sql_ascii.pooled, encoding) == [b"SQL_ASCII"] * PGBOUNCER_POOL_SIZE
+
+        async with PgDebug(sql_ascii.pooled) as pg:
+            # Round robin takes these to every backend.
+            for _ in range(2 * PGBOUNCER_POOL_SIZE):
+                assert await pg.execute_sql("SELECT name, current_setting('client_encoding') AS encoding FROM places") == [
+                    {"name": "Zürich", "encoding": "UTF8"}
+                ]
+
+        assert on_every_backend(sql_ascii.pooled, encoding) == [b"SQL_ASCII"] * PGBOUNCER_POOL_SIZE
+
+    @pytest.mark.asyncio
+    async def test_an_encoding_the_database_names_is_kept_behind_the_pooler(self, sql_ascii):
+        """The pooler reports what its backends were given, and pg-debug takes it rather than ask for UTF-8 over it."""
+        with psycopg.connect(sql_ascii.direct, autocommit=True) as conn:
+            conn.execute(sql.SQL("ALTER DATABASE {} SET client_encoding = 'LATIN1'").format(sql.Identifier(sql_ascii.direct.rsplit("/", 1)[1])))
+        reconnect(sql_ascii.pooled)
+
+        async with PgDebug(sql_ascii.pooled) as pg:
+            assert await pg.execute_sql("SELECT label, current_setting('client_encoding') AS encoding FROM legacy") == [
+                {"label": "café", "encoding": "LATIN1"}
+            ]

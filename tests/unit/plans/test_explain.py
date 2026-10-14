@@ -94,7 +94,7 @@ async def test_explain_success(mock_sql_driver):
 async def test_explain_with_bind_variables(mock_sql_driver):
     """Test explain with bind variables."""
     # Prepare mock response for PostgreSQL version check
-    version_response = [MockCell({"server_version": "16.0"})]
+    version_response = [MockCell({"server_version_num": "160000"})]
     # Prepare mock response for explain query
     plan_data = {
         "Plan": {
@@ -109,7 +109,7 @@ async def test_explain_with_bind_variables(mock_sql_driver):
 
     # Set up the mock to return different responses for different queries
     def side_effect(query, **kwargs):
-        if query == "SHOW server_version":
+        if query == "SHOW server_version_num":
             return version_response
         else:
             return [MockCell({"QUERY PLAN": [plan_data]})]
@@ -137,7 +137,7 @@ async def test_explain_with_bind_variables(mock_sql_driver):
 async def test_explain_with_bind_variables_pg15(mock_sql_driver, monkeypatch):
     """Test explain with bind variables on PostgreSQL < 16."""
     # Prepare mock response for PostgreSQL version check
-    version_response = [MockCell({"server_version": "15.4"})]
+    version_response = [MockCell({"server_version_num": "150004"})]
 
     # Prepare plan data for the replaced parameter query
     plan_data = {
@@ -164,7 +164,7 @@ async def test_explain_with_bind_variables_pg15(mock_sql_driver, monkeypatch):
 
     # Set up the mock to return different responses for different queries
     def side_effect(query, **kwargs):
-        if query == "SHOW server_version":
+        if query == "SHOW server_version_num":
             return version_response
         elif "EXPLAIN" in query and "id = 42" in query:
             # For the parameter-replaced EXPLAIN query, return mock results
@@ -336,7 +336,7 @@ async def test_explain_with_empty_plan_data(mock_sql_driver):
 async def test_explain_with_like_and_bind_variables_pg16(mock_sql_driver, monkeypatch):
     """Test explain with LIKE and bind variables on PostgreSQL 16."""
     # Prepare mock response for PostgreSQL version check
-    version_response = [MockCell({"server_version": "16.0"})]
+    version_response = [MockCell({"server_version_num": "160000"})]
 
     # Prepare plan data for the replaced parameter query
     plan_data = {
@@ -363,7 +363,7 @@ async def test_explain_with_like_and_bind_variables_pg16(mock_sql_driver, monkey
 
     # Set up the mock to return different responses for different queries
     def side_effect(query, **kwargs):
-        if query == "SHOW server_version":
+        if query == "SHOW server_version_num":
             return version_response
         elif "EXPLAIN" in query and "LIKE '%John%'" in query:
             # For the parameter-replaced EXPLAIN query, return mock results

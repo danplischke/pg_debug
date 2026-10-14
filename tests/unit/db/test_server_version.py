@@ -1,5 +1,6 @@
-"""The server version is asked once per server, not once per process."""
+"""The server version is asked once per server, not once per process, and read from any release."""
 
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -11,13 +12,23 @@ from pg_debug.db import SqlDriver
 from pg_debug.db import get_postgres_version
 from pg_debug.db import reset_postgres_version_cache
 
+#: What servers report as server_version and server_version_num.
+RELEASES = {
+    "9.6.24": "90624",
+    "15.8": "150008",
+    "17.2 (Debian 17.2-1.pgdg120+1)": "170002",
+    "18beta1": "180000",
+    "18rc1 (Debian 18~rc1-1.pgdg120+1)": "180000",
+    "19devel": "190000",
+}
+
 
 class Connection:
     """A connection of a driver's own, so that two drivers reach two servers."""
 
 
 class Server(SqlDriver):
-    """A driver whose server reports one version, and that keeps what it was asked."""
+    """A driver whose server reports one release, and that keeps what it was asked."""
 
     def __init__(self, version: str, conn: Any = None):
         super().__init__(conn=conn or Connection())
@@ -28,12 +39,29 @@ class Server(SqlDriver):
         self.asked.append(query)
         if query.strip() == "SHOW server_version":
             return [SqlDriver.RowResult(cells={"server_version": self.version})]
+        if query.strip() == "SHOW server_version_num":
+            return [SqlDriver.RowResult(cells={"server_version_num": RELEASES[self.version]})]
         if "pg_settings" in query:
             return []
         return [SqlDriver.RowResult(cells={"blks_read": 0, "blks_hit": 0, "checkpoints_timed": 0, "checkpoints_requested": 0})]
 
     def versions_asked(self) -> int:
-        return sum(query.strip() == "SHOW server_version" for query in self.asked)
+        return sum(query.strip().startswith("SHOW server_version") for query in self.asked)
+
+
+@pytest.mark.asyncio
+async def test_the_major_version_of_any_release():
+    """A pre-release's version text is no number before a dot: int('18beta1') failed."""
+    majors = {version: await get_postgres_version(Server(version)) for version in RELEASES}
+
+    assert majors == {
+        "9.6.24": 9,
+        "15.8": 15,
+        "17.2 (Debian 17.2-1.pgdg120+1)": 17,
+        "18beta1": 18,
+        "18rc1 (Debian 18~rc1-1.pgdg120+1)": 18,
+        "19devel": 19,
+    }
 
 
 @pytest.mark.asyncio
@@ -53,10 +81,32 @@ async def test_each_server_reports_its_own_version():
     assert fifteen.versions_asked() == 2, "a reset forgets every server"
 
 
+@dataclass
+class Wrapped:
+    """A connection wrapper as a dataclass: compared by value, so not hashable."""
+
+
+class Slotted:
+    """A connection wrapper with slots, and so no weak reference."""
+
+    __slots__ = ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conn", [Wrapped(), Slotted()], ids=["unhashable", "no-weakref"])
+async def test_a_connection_that_cannot_be_kept_is_asked_each_time(conn):
+    """Keeping the version for it raised a TypeError, and every version-gated feature failed with it."""
+    server = Server("17.2 (Debian 17.2-1.pgdg120+1)", conn=conn)
+
+    assert await get_postgres_version(server) == 17
+    assert await get_postgres_version(server) == 17
+    assert server.versions_asked() == 2
+
+
 @pytest.mark.asyncio
 async def test_the_configuration_review_reads_each_servers_own_checkpoint_view():
     """PostgreSQL 17 moved the counters to pg_stat_checkpointer, which a 15 does not have."""
-    seventeen = Server("17.2")
+    seventeen = Server("17.2 (Debian 17.2-1.pgdg120+1)")
     fifteen = Server("15.8")
 
     await ConfigurationReviewer(seventeen).review()
@@ -70,7 +120,7 @@ async def test_the_configuration_review_reads_each_servers_own_checkpoint_view()
 @pytest.mark.asyncio
 async def test_restricted_mode_and_a_query_context_share_their_servers_version():
     """Both reach the server through the driver that holds the connection."""
-    seventeen = Server("17.2")
+    seventeen = Server("17.2 (Debian 17.2-1.pgdg120+1)")
     fifteen = Server("15.8")
     await get_postgres_version(seventeen)
 
@@ -111,6 +161,6 @@ async def test_a_pool_that_reconnects_asks_its_server_again():
     assert await get_postgres_version(server) == 15
     assert server.versions_asked() == 1, "kept once the first statement opened the pool"
 
-    server.reconnect("17.2")
+    server.reconnect("17.2 (Debian 17.2-1.pgdg120+1)")
 
     assert await get_postgres_version(server) == 17

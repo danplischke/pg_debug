@@ -43,7 +43,8 @@ def _server_of(sql_driver: SqlDriver) -> object | None:
 
     Restricted mode wraps the driver that holds the connection, and a driver
     made by ``with_context`` shares it, so all of them share one entry. None
-    while nothing is open yet: the version is then asked and not kept.
+    while the driver's pool is not open yet; the query for the version opens
+    it, and the version is kept under the pool it opened.
     """
     while isinstance(sql_driver, SafeSqlDriver):
         sql_driver = sql_driver.sql_driver
@@ -51,6 +52,33 @@ def _server_of(sql_driver: SqlDriver) -> object | None:
     if isinstance(conn, DbConnPool):
         return conn.pool
     return conn
+
+
+def _kept_version(server: object | None) -> int | None:
+    """The version kept for a server, or None when none is or none can be."""
+    if server is None:
+        return None
+    try:
+        return _server_versions.get(server)
+    except TypeError:
+        # A connection object that cannot be hashed or weakly referenced:
+        # nothing can have been kept for it.
+        return None
+
+
+def _keep_version(server: object | None, version: int) -> None:
+    """Keep a server's version, unless its connection object cannot be a weak key.
+
+    Such an object, a dataclass or a class with ``__slots__`` wrapping a
+    connection, has its server asked again each time rather than make every
+    version-gated feature fail on a cache.
+    """
+    if server is None:
+        return
+    try:
+        _server_versions[server] = version
+    except TypeError:
+        logger.debug("Not keeping the server version for %r, which cannot be weakly referenced or hashed", type(server).__name__)
 
 
 async def get_postgres_version(sql_driver: SqlDriver) -> int:
@@ -67,27 +95,27 @@ async def get_postgres_version(sql_driver: SqlDriver) -> int:
         The major PostgreSQL version as an integer (e.g., 16 for PostgreSQL 16.2)
         Returns 0 if the version cannot be determined
     """
-    server = _server_of(sql_driver)
-    if server is not None and server in _server_versions:
-        return _server_versions[server]
+    kept = _kept_version(_server_of(sql_driver))
+    if kept is not None:
+        return kept
 
     try:
-        rows = await sql_driver.execute_query("SHOW server_version")
+        # server_version_num, not server_version: the number is the same for
+        # a release and its pre-releases (180000 for 18beta1 and 18rc1), where
+        # the text is not a number before its first dot, and a packager's
+        # suffix such as "(Debian 18~rc1-1.pgdg120+1)" is never in it.
+        rows = await sql_driver.execute_query("SHOW server_version_num")
         if not rows:
             logger.warning("Could not determine PostgreSQL version")
             return 0
 
-        version_string = rows[0].cells["server_version"]
-        # Extract the major version (before the first dot)
-        major_version = version_string.split(".")[0]
-        version = int(major_version)
+        # 160004 is 16.4; 90624 is 9.6.24, whose major version is reported as 9.
+        version = int(rows[0].cells["server_version_num"]) // 10000
     except Exception as e:
         raise QueryError(f"Error determining PostgreSQL version: {e}") from e
 
     # Read again: the query may have been what opened the pool.
-    server = _server_of(sql_driver)
-    if server is not None:
-        _server_versions[server] = version
+    _keep_version(_server_of(sql_driver), version)
     return version
 
 

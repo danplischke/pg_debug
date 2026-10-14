@@ -7,12 +7,14 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
 
 import docker
 import psycopg
 import pytest
 from docker import errors as docker_errors
 from docker.models.containers import Container
+from psycopg import sql
 
 logger = logging.getLogger(__name__)
 
@@ -238,3 +240,39 @@ def _postgres_container(version: str) -> Iterator[tuple[Container, str]]:
             container.remove(v=True)
         except Exception as e:
             logger.warning("Error cleaning up container %s: %s", container_name, e)
+
+
+#: The bytes of "café" in LATIN1. 0xe9 on its own is no character in UTF-8.
+LATIN1_CAFE = "\\x636166e9"
+
+
+@contextmanager
+def sql_ascii_database(url: str) -> Iterator[str]:
+    """A SQL_ASCII database beside the one ``url`` names, until the block ends.
+
+    SQL_ASCII declares no encoding: the server stores and sends the bytes it
+    was given. ``places`` holds "Zürich" in UTF-8, and ``legacy`` holds "café"
+    in LATIN1, which is not UTF-8.
+
+    Yields:
+        The URL of the database, named after the one ``url`` names.
+    """
+    parts = urlsplit(url)
+    name = f"{parts.path.lstrip('/')}_sql_ascii"
+    database = sql.Identifier(name)
+    with psycopg.connect(url, autocommit=True) as conn:
+        conn.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(database))
+        conn.execute(sql.SQL("CREATE DATABASE {} ENCODING 'SQL_ASCII' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0").format(database))
+    database_url = urlunsplit(parts._replace(path=f"/{name}"))
+    try:
+        with psycopg.connect(database_url, autocommit=True, client_encoding="UTF8") as conn:
+            conn.execute("CREATE TABLE places (name text)")
+            conn.execute("INSERT INTO places VALUES ('Zürich')")
+            conn.execute("CREATE TABLE legacy (label text)")
+            conn.execute(sql.SQL("INSERT INTO legacy VALUES (convert_from({}::bytea, 'SQL_ASCII'))").format(sql.Literal(LATIN1_CAFE)))
+        yield database_url
+    finally:
+        with psycopg.connect(url, autocommit=True) as conn:
+            # Before PostgreSQL 13 there is no DROP DATABASE ... WITH (FORCE).
+            conn.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid()", [name])
+            conn.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(database))
