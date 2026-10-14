@@ -36,6 +36,13 @@ def pg(pool):
     return PgDebug(access_mode=AccessMode.UNRESTRICTED, pool=pool)
 
 
+@pytest.fixture
+def hypopg_installed():
+    """HypoPG present, so index tuning gets past the client's own check for it."""
+    with patch("pg_debug.client.check_hypopg_installation_status", AsyncMock(return_value=(True, ""))) as check:
+        yield check
+
+
 def make_plan() -> ExplainPlanArtifact:
     node = PlanNode(node_type="Seq Scan", total_cost=10.0, startup_cost=0.0, plan_rows=1, plan_width=4)
     return ExplainPlanArtifact(value='{"Plan": {}}', plan_tree=node)
@@ -400,6 +407,7 @@ async def test_analyze_query_indexes_caps_query_count(pg):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("hypopg_installed")
 async def test_analyze_query_indexes_uses_dta_by_default(pg):
     with (
         patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
@@ -414,6 +422,7 @@ async def test_analyze_query_indexes_uses_dta_by_default(pg):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("hypopg_installed")
 async def test_analyze_workload_indexes_with_llm_method(pg):
     with (
         patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
@@ -442,6 +451,7 @@ async def test_llm_method_rejects_multiple_queries_up_front(pg):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("hypopg_installed")
 async def test_llm_method_accepts_a_single_query(pg):
     with (
         patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
@@ -475,6 +485,7 @@ def test_llm_model_defaults_to_the_environment(monkeypatch, pool):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("hypopg_installed")
 async def test_llm_model_from_the_client_reaches_the_optimizer(pg):
     with (
         patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
@@ -489,6 +500,7 @@ async def test_llm_model_from_the_client_reaches_the_optimizer(pg):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("hypopg_installed")
 async def test_a_per_call_llm_model_wins(pg):
     with (
         patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),

@@ -25,6 +25,8 @@ from typing import Any
 from .db import SafeSqlDriver
 from .db import SqlDriver
 from .db.extensions import get_postgres_version
+from .platform import Platform
+from .platform import PlatformDetection
 from .severity import SEVERITY_ORDER
 from .severity import Severity
 
@@ -107,8 +109,16 @@ class ConfigFinding:
 class ConfigurationReviewer:
     """Reads pg_settings, and the counters that say whether they are working."""
 
-    def __init__(self, sql_driver: SqlDriver | SafeSqlDriver):
+    def __init__(self, sql_driver: SqlDriver | SafeSqlDriver, platform: PlatformDetection | None = None):
+        """
+        Args:
+            sql_driver: The driver to read the settings and counters through.
+            platform: The managed platform the server runs on, which decides
+                whether ``fsync = off`` is a risk. Left out, it is the risk it
+                is on PostgreSQL itself.
+        """
         self.sql_driver = sql_driver
+        self.platform = platform
 
     async def review(self) -> list[ConfigFinding]:
         """Review the server's configuration.
@@ -121,11 +131,10 @@ class ConfigurationReviewer:
         settings = await self._settings()
         measurements = await self._measurements()
 
-        findings = []
-        for rule in _RULES:
-            finding = rule(settings, measurements)
-            if finding is not None:
-                findings.append(finding)
+        # The durability rule is the one whose verdict depends on the platform.
+        verdicts = [_durability(settings, measurements, self.platform)]
+        verdicts += [rule(settings, measurements) for rule in _RULES]
+        findings = [finding for finding in verdicts if finding is not None]
 
         return sorted(findings, key=lambda finding: SEVERITY_ORDER[finding.severity])
 
@@ -206,14 +215,28 @@ Rule = Callable[[dict[str, dict[str, Any]], dict[str, Any]], ConfigFinding | Non
 # -- Rules ------------------------------------------------------------------
 
 
-def _durability(settings: dict[str, dict[str, Any]], _measurements: dict[str, Any]) -> ConfigFinding | None:
-    """fsync and full_page_writes exist to survive a crash."""
+def _durability(
+    settings: dict[str, dict[str, Any]],
+    _measurements: dict[str, Any],
+    platform: PlatformDetection | None = None,
+) -> ConfigFinding | None:
+    """fsync and full_page_writes exist to survive a crash.
+
+    Except fsync on Neon, which runs every compute with it off: a commit there
+    is acknowledged once a quorum of safekeepers holds its WAL, so the
+    compute's own fsync is not what makes it durable. That is reported as a
+    note, low enough not to fail ``--exit-code``, rather than left out, so
+    that the reader sees the setting and the signal the platform was
+    recognised by, and can tell if the recognition was wrong. A full_page_writes
+    that is off is still reported in its place, whatever the platform.
+    """
+    neon = platform if platform is not None and platform.platform is Platform.NEON else None
     for name, consequence in (
         ("fsync", "a crash or power loss can leave the database unrecoverably corrupt, not merely missing recent commits"),
         ("full_page_writes", "a crash during a write can tear a page in half, and recovery has nothing to repair it from"),
     ):
         setting = settings.get(name)
-        if _off(setting):
+        if _off(setting) and not (neon is not None and name == "fsync"):
             return ConfigFinding(
                 setting=name,
                 current="off",
@@ -227,6 +250,23 @@ def _durability(settings: dict[str, dict[str, Any]], _measurements: dict[str, An
                 ),
                 evidence={"source": setting.get("source") if setting else None},
             )
+
+    fsync = settings.get("fsync")
+    if neon is not None and _off(fsync):
+        return ConfigFinding(
+            setting="fsync",
+            current="off",
+            severity=Severity.LOW,
+            summary="fsync is off, as Neon runs every compute; that does not put commits at risk here.",
+            detail=(
+                "Neon acknowledges a commit once a quorum of its safekeepers holds the commit's WAL, so the compute's "
+                "own fsync is not what makes a commit durable, and Neon fixes the setting: there is nothing to change. "
+                f"pg-debug took this server for Neon because {neon.signal}. If that is wrong, this is the most "
+                "serious finding there is: with fsync off, a crash or power loss can leave the database unrecoverably "
+                "corrupt."
+            ),
+            evidence={"source": fsync.get("source") if fsync else None, "platform": neon.platform.value, "platform_signal": neon.signal},
+        )
     return None
 
 
@@ -439,8 +479,9 @@ def _idle_transaction_timeout(settings: dict[str, dict[str, Any]], _measurements
     )
 
 
+#: The rules that read only the settings and the counters. _durability is not
+#: among them: the reviewer calls it with the platform too.
 _RULES: list[Rule] = [
-    _durability,
     _autovacuum_off,
     _work_mem,
     _checkpoints,

@@ -249,6 +249,8 @@ class DbConnPool:
         connection_url: str | None = None,
         search_path: str | None = None,
         statement_timeout: int | None = None,
+        *,
+        server_side_timeout: bool = True,
     ):
         """
         Args:
@@ -258,6 +260,11 @@ class DbConnPool:
             statement_timeout: Statement timeout in seconds for every
                 statement a :class:`SqlDriver` runs on this pool. None leaves
                 the server default in place.
+            server_side_timeout: Whether the timeout is set on the server, as
+                its ``statement_timeout``. False keeps it on this side
+                instead, for a server that refuses ``statement_timeout``: the
+                driver stops waiting for a statement once it has run that
+                long, and asks the server to cancel it.
 
         The driver applies both inside each transaction, never to the
         connection: behind a transaction pooler a connection is not one
@@ -268,6 +275,7 @@ class DbConnPool:
         self.connection_url = connection_url
         self.search_path = search_path
         self.statement_timeout = statement_timeout
+        self.server_side_timeout = server_side_timeout
         self.pool: AsyncConnectionPool | None = None
         #: Whether the database sent its text as SQL_ASCII, no encoding at
         #: all, so that the pool asked for it in UTF-8 instead.
@@ -532,8 +540,22 @@ class SqlDriver:
 
         Raises:
             QueryError: If PostgreSQL rejected the statement or it failed to
-                run. The psycopg exception is its ``__cause__``.
+                run, or it outlasted a timeout the pool keeps on this side.
+                The psycopg exception is its ``__cause__``.
         """
+        async with self._client_side_timeout():
+            return await self._execute_query(query, params, force_readonly, in_context=in_context, cleanup=cleanup)
+
+    async def _execute_query(
+        self,
+        query: LiteralString,
+        params: list[Any] | None,
+        force_readonly: bool,
+        *,
+        in_context: bool,
+        cleanup: LiteralString | None,
+    ) -> list[RowResult] | None:
+        """:meth:`execute_query`, without the timeout kept on this side."""
         try:
             if self.conn is None:
                 self.connect()
@@ -618,10 +640,36 @@ class SqlDriver:
         """The statement that sets up a transaction: the pool's timeout and search path, and the context if asked for."""
         pool = self.conn if self.is_pool else None
         return build_transaction_setup(
-            statement_timeout=getattr(pool, "statement_timeout", None),
+            statement_timeout=getattr(pool, "statement_timeout", None) if getattr(pool, "server_side_timeout", True) else None,
             search_path=getattr(pool, "search_path", None),
             context=self.context if in_context else None,
         )
+
+    @asynccontextmanager
+    async def _client_side_timeout(self) -> AsyncIterator[None]:
+        """Bound a statement on this side, for a pool whose server will not take statement_timeout.
+
+        Aurora DSQL refuses ``statement_timeout`` at any scope, by its
+        documentation, so the pool's timeout cannot be set there, and every
+        statement's setup would fail if it were. For such a pool the same
+        number of seconds bounds the wait here instead, the way restricted
+        mode bounds its own. It is a weaker promise than the server's: when it
+        passes, psycopg sends PostgreSQL's cancel request and waits for the
+        server to act on it, and how soon DSQL does has not been tried.
+        """
+        pool = self.conn if self.is_pool else None
+        seconds = None if getattr(pool, "server_side_timeout", True) else getattr(pool, "statement_timeout", None)
+        if not seconds:
+            yield
+            return
+        try:
+            async with asyncio.timeout(seconds):
+                yield
+        except TimeoutError as e:
+            raise QueryError(
+                f"The statement did not finish within the {seconds}-second timeout, which pg-debug keeps on its own side "
+                "because this server does not take statement_timeout."
+            ) from e
 
     async def _apply_setup(self, cursor: Any, setup: Composed, in_context: bool) -> None:
         """Apply the setup to the transaction the cursor is in."""
@@ -763,9 +811,14 @@ class SqlDriver:
         trigger that wrote to another system has already written. Callers that
         offer this to a user should say so.
 
-        ``in_context`` runs it with the query context, as for
-        :meth:`execute_query`.
+        ``in_context`` runs it with the query context, and a timeout the pool
+        keeps on this side bounds it, as for :meth:`execute_query`.
         """
+        async with self._client_side_timeout():
+            return await self._execute_query_and_rollback(query, params, in_context=in_context)
+
+    async def _execute_query_and_rollback(self, query: LiteralString, params: list[Any] | None, *, in_context: bool) -> list[RowResult] | None:
+        """:meth:`execute_query_and_rollback`, without the timeout kept on this side."""
         if self.conn is None:
             self.connect()
             if self.conn is None:

@@ -24,6 +24,8 @@ from pg_debug.configuration import _slow_query_log
 from pg_debug.configuration import _work_mem
 from pg_debug.db import SqlDriver
 from pg_debug.db import reset_postgres_version_cache
+from pg_debug.platform import Platform
+from pg_debug.platform import PlatformDetection
 from pg_debug.severity import Severity
 
 
@@ -62,6 +64,65 @@ def test_full_page_writes_off_is_reported_too():
 
 def test_durability_left_alone_when_it_is_on():
     assert _durability(setting("fsync", "on"), healthy_measurements()) is None
+
+
+NEON = PlatformDetection(Platform.NEON, "the server has the setting neon.timeline_id")
+
+
+def test_neons_fsync_off_is_a_note_not_a_failure():
+    """Neon runs every compute with fsync off; a commit is durable once its
+    safekeepers hold the WAL, which a HIGH finding on every Neon database hid."""
+    finding = _durability(setting("fsync", "off"), healthy_measurements(), NEON)
+
+    assert finding is not None
+    assert finding.severity is Severity.LOW, "low enough not to fail --exit-code"
+    assert finding.recommended is None, "there is nothing to change"
+    assert "quorum of its safekeepers" in finding.detail
+    assert "neon.timeline_id" in finding.detail, "it says what it took the platform from"
+    assert finding.evidence["platform"] == "neon"
+    assert finding.evidence["platform_signal"] == NEON.signal
+
+
+@pytest.mark.parametrize(
+    "platform", [None, PlatformDetection(Platform.UNKNOWN, "nothing matched"), PlatformDetection(Platform.SUPABASE, "a setting")]
+)
+def test_fsync_off_anywhere_else_is_still_high(platform):
+    finding = _durability(setting("fsync", "off"), healthy_measurements(), platform)
+
+    assert finding is not None
+    assert finding.severity is Severity.HIGH
+
+
+def test_full_page_writes_off_on_neon_is_still_reported_high():
+    """The note about fsync must not take the place of a finding that is not about it."""
+    settings = {**setting("fsync", "off"), **setting("full_page_writes", "off")}
+
+    finding = _durability(settings, healthy_measurements(), NEON)
+
+    assert finding is not None
+    assert finding.setting == "full_page_writes"
+    assert finding.severity is Severity.HIGH
+
+
+@pytest.mark.asyncio
+async def test_the_reviewer_judges_fsync_by_the_platform_it_is_given():
+    reset_postgres_version_cache()
+    driver = MagicMock(spec=SqlDriver)
+
+    async def answer(query, *args, **kwargs):
+        if "pg_settings" in query:
+            return [SqlDriver.RowResult(cells={"name": "fsync", "setting": "off", "unit": None, "source": "configuration file", "boot_val": "on"})]
+        if query.strip() == "SHOW server_version":
+            return [SqlDriver.RowResult(cells={"server_version": "16.4"})]
+        return [SqlDriver.RowResult(cells=healthy_measurements())]
+
+    driver.execute_query = AsyncMock(side_effect=answer)
+
+    on_neon = await ConfigurationReviewer(driver, platform=NEON).review()
+    unknown = await ConfigurationReviewer(driver).review()
+
+    assert [(f.setting, f.severity) for f in on_neon] == [("fsync", Severity.LOW)]
+    assert [(f.setting, f.severity) for f in unknown] == [("fsync", Severity.HIGH)]
 
 
 # -- work_mem ---------------------------------------------------------------

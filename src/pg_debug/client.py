@@ -27,6 +27,7 @@ from .health import DatabaseHealthTool
 from .health import HealthCheckResult
 from .health import HealthType
 from .index.base import MAX_NUM_INDEX_TUNING_QUERIES
+from .index.base import IndexTuningBase
 from .index.dta import DatabaseTuningAdvisor
 from .index.presentation import TextPresentation
 from .index_use import IndexUse
@@ -47,6 +48,9 @@ from .plans import PlanDiagnoser
 from .plans import PlanFinding
 from .plans import PlanInput
 from .plans.tree import ExplainPlanArtifact
+from .platform import PlatformDetection
+from .platform import detect_from_url
+from .platform import detect_platform
 from .schema import ObjectType
 from .schema import SchemaInspector
 from .statistics import StatisticsInspector
@@ -170,6 +174,7 @@ class PgDebug:
         self.llm_model = llm_model
         self.context = context
         self._context_checked = False
+        self._platform: PlatformDetection | None = None
         self._pool = (
             pool
             if pool is not None
@@ -214,14 +219,69 @@ class PgDebug:
                 role the connecting user is not a member of, or a setting it
                 does not know or will not take.
         """
+        url = self.database_url
+        self._keep_timeout_off_a_server_that_refuses_it(url)
         try:
-            await self._pool.pool_connect(self.database_url)
+            await self._pool.pool_connect(url)
         except PgDebugError:
             raise
         except Exception as e:
             raise ConnectionFailedError(f"Could not connect to database: {obfuscate_password(str(e))}") from e
         await self._check_context()
         return self
+
+    def _keep_timeout_off_a_server_that_refuses_it(self, url: str) -> None:
+        """Keep the statement timeout on this side for a server that will not take statement_timeout.
+
+        Aurora DSQL refuses ``statement_timeout`` at any scope, by its
+        documentation; pg-debug has not been run against it. Set in each
+        transaction's setup, as everywhere else, the timeout would make every
+        statement fail before it ran, and restricted mode always has one. So
+        on DSQL it is not set on the server. DSQL is recognised from the URL's
+        host, before anything runs: no statement could run to ask the server.
+
+        The pool keeps the same number of seconds on this side instead, which
+        restricted mode does for every statement already. With ``timeout`` in
+        unrestricted mode the bound is kept too, rather than the option
+        refused: the option then means one thing in both modes, and a user who
+        asked for a bound keeps the one that can be had instead of being left
+        with none. It is weaker than the server's, and the warning says how.
+        A pool handed in is its owner's to configure.
+        """
+        if not self._owns_pool or not self._pool.server_side_timeout:
+            return
+        detection = detect_from_url(url)
+        if detection is None or not detection.platform.refuses_statement_timeout:
+            return
+        self._pool.server_side_timeout = False
+        if self.effective_timeout:
+            logger.warning(
+                "%s refuses statement_timeout, so the %s-second timeout is not set on the server: pg-debug stops waiting for "
+                "a statement after that long and asks the server to cancel it, which has not been tried there. pg-debug took "
+                "the server for %s because %s.",
+                detection.platform.label,
+                self.effective_timeout,
+                detection.platform.label,
+                detection.signal,
+            )
+
+    async def _detect_platform(self) -> PlatformDetection:
+        """Which managed platform the server runs on, detected once per client.
+
+        One statement, which restricted mode allows, and the host of the URL
+        the pool connected with; :func:`~pg_debug.platform.detect_platform`
+        lists the signals.
+        """
+        if self._platform is None:
+            driver = await self.sql_driver()
+            self._platform = await detect_platform(driver, getattr(self._pool, "connection_url", None))
+        return self._platform
+
+    async def _require_hypopg(self, driver: SqlDriver | SafeSqlDriver) -> None:
+        """Refuse what needs HypoPG where it is not installed, saying how to get it on this platform."""
+        is_hypopg_installed, hypopg_message = await check_hypopg_installation_status(driver, platform=self._detect_platform)
+        if not is_hypopg_installed:
+            raise ExtensionRequiredError("hypopg", hypopg_message)
 
     async def _check_context(self) -> None:
         """Have the server refuse a bad context once, before any query depends on it."""
@@ -332,10 +392,7 @@ class PgDebug:
             if analyze:
                 raise InvalidArgumentError("Cannot use analyze and hypothetical indexes together.")
 
-            is_hypopg_installed, hypopg_message = await check_hypopg_installation_status(driver)
-            if not is_hypopg_installed:
-                raise ExtensionRequiredError("hypopg", hypopg_message)
-
+            await self._require_hypopg(driver)
             return await explain_tool.explain_with_hypothetical_indexes(sql, hypothetical_indexes)
         if analyze:
             return await explain_tool.explain_analyze(sql)
@@ -539,7 +596,8 @@ class PgDebug:
             first. Empty means nothing measurable is wrong, which is not the
             same as optimal.
         """
-        return await ConfigurationReviewer(await self.sql_driver()).review()
+        reviewer = ConfigurationReviewer(await self.sql_driver(), platform=await self._detect_platform())
+        return await reviewer.review()
 
     # -- Partitioning --------------------------------------------------------
 
@@ -774,14 +832,20 @@ class PgDebug:
             raise InvalidArgumentError(f"Unknown index tuning method: {method}. Valid values are: dta, llm.")
 
         driver = await self.sql_driver()
+        advisor: IndexTuningBase
         if method == "dta":
-            return TextPresentation(driver, DatabaseTuningAdvisor(driver))
+            advisor = DatabaseTuningAdvisor(driver)
+        else:
+            # Here rather than at the top: the method needs the llm extra, and
+            # importing it without the extra raises MissingDependencyError.
+            from .index.llm import LLMOptimizerTool
 
-        # Here rather than at the top: the method needs the llm extra, and
-        # importing it without the extra raises MissingDependencyError.
-        from .index.llm import LLMOptimizerTool
+            advisor = LLMOptimizerTool(driver, model=llm_model or self.llm_model)
 
-        return TextPresentation(driver, LLMOptimizerTool(driver, model=llm_model or self.llm_model))
+        # The advisor checks for HypoPG as well, but it does not know the
+        # platform, which decides how to get HypoPG where it is missing.
+        await self._require_hypopg(driver)
+        return TextPresentation(driver, advisor)
 
 
 __all__ = [
