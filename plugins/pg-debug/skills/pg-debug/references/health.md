@@ -100,7 +100,10 @@ takes two snapshots and reports the difference — the live workload, with
 `mean_exec_time` recomputed over the interval. A few seconds is enough on a
 busy server; on a quiet one, sample longer or you will rank noise.
 
-Needs `pg_stat_statements`. Query text comes back normalized (`$1` for
+Needs `pg_stat_statements` in the database you connected to, in any schema
+(Supabase's `extensions` is found even with a `--search-path` that leaves it
+out). Only that database's statements are ranked, though the extension records
+every database's. Query text comes back normalized (`$1` for
 literals), which is what you feed to `tune-queries`. As a role without
 `pg_read_all_stats` only its own statements are ranked, since other roles'
 queryid is withheld; the command says on stderr how many ran.

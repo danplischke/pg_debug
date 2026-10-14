@@ -85,7 +85,9 @@ async def test_a_workload_with_nothing_usable_says_why():
 @pytest.mark.asyncio
 async def test_an_empty_workload_is_not_a_failure():
     """Nothing in pg_stat_statements over the thresholds is an answer, not an error."""
-    advisor = DatabaseTuningAdvisor(answering({**ANALYZED, "pg_stat_statements": []}))
+    advisor = DatabaseTuningAdvisor(
+        answering({**ANALYZED, "FROM pg_extension e": [Row({"schema": "public", "version": "1.10"})], "pg_stat_statements": []})
+    )
 
     with hypopg(installed=True):
         session = await advisor.analyze_workload()

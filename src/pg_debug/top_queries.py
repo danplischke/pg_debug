@@ -13,14 +13,14 @@ from .db import TRANSACTION_CONTROL as _TRANSACTION_CONTROL
 from .db import SafeSqlDriver
 from .db import SqlDriver
 from .db import workload_only as _workload_only
-from .db.extensions import check_extension
-from .db.extensions import get_postgres_version
+from .db.statements import PG_STAT_STATEMENTS
+from .db.statements import THIS_DATABASE
+from .db.statements import StatementStatistics
+from .db.statements import locate_pg_stat_statements
 from .errors import ExtensionRequiredError
 from .errors import InvalidArgumentError
 
 logger = logging.getLogger(__name__)
-
-PG_STAT_STATEMENTS = "pg_stat_statements"
 
 
 install_pg_stat_statements_message = (
@@ -45,6 +45,7 @@ install_pg_stat_statements_message = (
 _WITHHELD_IDENTITY = (
     "userid",
     "dbid",
+    "toplevel",
     "calls",
     "total_exec_time",
     "rows",
@@ -75,53 +76,14 @@ class QuerySample:
         return asdict(self)
 
 
-@dataclass
-class PgStatStatementsColumns:
-    """Column names for pg_stat_statements view, which vary by PostgreSQL version."""
-
-    total_time: str
-    mean_time: str
-    stddev_time: str
-    wal_bytes_select: str  # Full SELECT expression (handles missing column in PG12)
-    wal_bytes_frac: str  # Full fraction expression
+def _wal_bytes(stats: StatementStatistics) -> str:
+    return "wal_bytes" if stats.has_wal else "0 AS wal_bytes"
 
 
-def _get_pg_stat_statements_columns(pg_version: int) -> PgStatStatementsColumns:
-    """Get pg_stat_statements column names based on PostgreSQL version.
-
-    PostgreSQL 13 introduced pg_stat_statements v2.0 with breaking changes:
-    - Renamed timing columns: *_time → *_exec_time (total_time → total_exec_time, etc.)
-    - Added wal_bytes column for write-ahead log tracking
-
-    This function provides version-appropriate column names to ensure compatibility
-    with both old (PG ≤ 12) and new (PG ≥ 13) versions.
-
-    See: https://www.postgresql.org/docs/13/release-13.html#id-1.11.6.11.4
-
-    Args:
-        pg_version: PostgreSQL major version number
-
-    Returns:
-        PgStatStatementsColumns with version-appropriate column names
-    """
-    if pg_version >= 13:
-        # PostgreSQL 13+ with pg_stat_statements v2.0
-        return PgStatStatementsColumns(
-            total_time="total_exec_time",
-            mean_time="mean_exec_time",
-            stddev_time="stddev_exec_time",
-            wal_bytes_select="wal_bytes",
-            wal_bytes_frac="wal_bytes / NULLIF(SUM(wal_bytes) OVER (), 0) AS total_wal_bytes_frac",
-        )
-
-    # PostgreSQL 12 and older with pg_stat_statements v1.x
-    return PgStatStatementsColumns(
-        total_time="total_time",
-        mean_time="mean_time",
-        stddev_time="stddev_time",
-        wal_bytes_select="0 AS wal_bytes",  # Column doesn't exist in PG12
-        wal_bytes_frac="0 AS total_wal_bytes_frac",
-    )
+def _wal_bytes_frac(stats: StatementStatistics) -> str:
+    if stats.has_wal:
+        return "wal_bytes / NULLIF(SUM(wal_bytes) OVER (), 0) AS total_wal_bytes_frac"
+    return "0 AS total_wal_bytes_frac"
 
 
 class TopQueriesCalc:
@@ -130,16 +92,13 @@ class TopQueriesCalc:
     def __init__(self, sql_driver: SqlDriver | SafeSqlDriver):
         self.sql_driver = sql_driver
 
-    async def _require_pg_stat_statements(self) -> None:
-        """Raise ExtensionRequiredError if pg_stat_statements is not installed."""
-        extension_status = await check_extension(
-            self.sql_driver,
-            PG_STAT_STATEMENTS,
-            include_messages=False,
-        )
-        if not extension_status.is_installed:
+    async def _require_pg_stat_statements(self) -> StatementStatistics:
+        """Find pg_stat_statements, or raise ExtensionRequiredError when it is not installed."""
+        stats = await locate_pg_stat_statements(self.sql_driver)
+        if stats is None:
             logger.warning("Extension %s is not installed", PG_STAT_STATEMENTS)
             raise ExtensionRequiredError(PG_STAT_STATEMENTS, install_pg_stat_statements_message)
+        return stats
 
     async def sample(
         self,
@@ -201,11 +160,11 @@ class TopQueriesCalc:
         if interval_seconds <= 0:
             raise InvalidArgumentError("The sampling interval must be greater than zero seconds.")
 
-        await self._require_pg_stat_statements()
+        stats = await self._require_pg_stat_statements()
 
-        before = await self._counter_snapshot()
+        before = await self._counter_snapshot(stats)
         await asyncio.sleep(interval_seconds)
-        after = await self._counter_snapshot()
+        after = await self._counter_snapshot(stats)
 
         deltas = self._diff_snapshots(self._by_statement(before), self._by_statement(after))
         return QuerySample(
@@ -215,8 +174,13 @@ class TopQueriesCalc:
 
     @staticmethod
     def _by_statement(rows: list[dict[str, Any]]) -> dict[Any, dict[str, Any]]:
-        """The rows the role is shown the identity of, keyed by it."""
-        return {(row["queryid"], row["userid"], row["dbid"]): row for row in rows if row.get("queryid") is not None}
+        """The rows the role is shown the identity of, keyed by it.
+
+        A statement run inside a function and the same statement run at top
+        level are two rows with one queryid, user and database, told apart by
+        ``toplevel`` (None before pg_stat_statements 1.9, which has one row).
+        """
+        return {(row["queryid"], row["userid"], row["dbid"], row.get("toplevel")): row for row in rows if row.get("queryid") is not None}
 
     @staticmethod
     def _withheld_that_ran(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> int:
@@ -237,10 +201,8 @@ class TopQueriesCalc:
         # An entry is made when a statement is parsed, before it has run.
         return sum(count for counters, count in ran.items() if (counters[calls] or 0) > 0)
 
-    async def _counter_snapshot(self) -> list[dict[str, Any]]:
-        """Read the raw per-query counters, one row per pg_stat_statements entry."""
-        pg_version = await get_postgres_version(self.sql_driver)
-        cols = _get_pg_stat_statements_columns(pg_version)
+    async def _counter_snapshot(self, stats: StatementStatistics) -> list[dict[str, Any]]:
+        """Read the raw per-query counters, one row per pg_stat_statements entry of this database."""
 
         # The driver marks this — and everything else it runs — so the snapshot
         # query is filtered out of its own results by _is_own_bookkeeping.
@@ -251,15 +213,17 @@ class TopQueriesCalc:
                 queryid,
                 userid,
                 dbid,
+                {"toplevel" if stats.has_toplevel else "NULL AS toplevel"},
                 query,
                 calls,
-                {cols.total_time} AS total_exec_time,
+                {stats.total_time} AS total_exec_time,
                 rows,
                 shared_blks_hit,
                 shared_blks_read,
                 shared_blks_dirtied,
-                {cols.wal_bytes_select}
-            FROM pg_stat_statements
+                {_wal_bytes(stats)}
+            FROM {stats.relation}
+            WHERE {THIS_DATABASE}
             """,
         )
         rows = await SafeSqlDriver.execute_param_query(self.sql_driver, query)
@@ -353,12 +317,7 @@ class TopQueriesCalc:
             ExtensionRequiredError: If pg_stat_statements is not installed.
         """
         logger.debug("Getting top queries by time. limit=%s, sort_by=%s", limit, sort_by)
-        await self._require_pg_stat_statements()
-
-        # Get version-appropriate column names
-        pg_version = await get_postgres_version(self.sql_driver)
-        logger.debug("PostgreSQL version: %s", pg_version)
-        cols = _get_pg_stat_statements_columns(pg_version)
+        cols = await self._require_pg_stat_statements()
 
         # Determine which column to sort by based on sort_by parameter
         order_by_column = cols.total_time if sort_by == "total" else cols.mean_time
@@ -372,8 +331,8 @@ class TopQueriesCalc:
                     {cols.total_time},
                     {cols.mean_time},
                     rows
-                FROM pg_stat_statements
-                WHERE {_workload_only()}
+                FROM {cols.relation}
+                WHERE {THIS_DATABASE} AND {_workload_only()}
                 ORDER BY {order_by_column} DESC
                 LIMIT {{}};
             """,
@@ -405,12 +364,7 @@ class TopQueriesCalc:
             ExtensionRequiredError: If pg_stat_statements is not installed.
         """
         logger.debug("Getting top resource queries with threshold %s", frac_threshold)
-        await self._require_pg_stat_statements()
-
-        # Get version-appropriate column names
-        pg_version = await get_postgres_version(self.sql_driver)
-        logger.debug("PostgreSQL version: %s", pg_version)
-        cols = _get_pg_stat_statements_columns(pg_version)
+        cols = await self._require_pg_stat_statements()
 
         query = cast(
             LiteralString,
@@ -426,7 +380,7 @@ class TopQueriesCalc:
                         shared_blks_hit,
                         shared_blks_read,
                         shared_blks_dirtied,
-                        {cols.wal_bytes_select},
+                        {_wal_bytes(cols)},
                         {cols.total_time} / NULLIF(SUM({cols.total_time}) OVER (), 0)
                             AS total_exec_time_frac,
                         (shared_blks_hit + shared_blks_read)
@@ -436,11 +390,12 @@ class TopQueriesCalc:
                             AS shared_blks_read_frac,
                         shared_blks_dirtied / NULLIF(SUM(shared_blks_dirtied) OVER (), 0)
                             AS shared_blks_dirtied_frac,
-                        {cols.wal_bytes_frac}
-                    FROM pg_stat_statements
-                    -- Before the window functions: our own queries in the
-                    -- denominator would dilute every fraction below.
-                    WHERE {_workload_only()}
+                        {_wal_bytes_frac(cols)}
+                    FROM {cols.relation}
+                    -- Before the window functions: our own queries, and
+                    -- another database's, in the denominator would dilute
+                    -- every fraction below.
+                    WHERE {THIS_DATABASE} AND {_workload_only()}
                 )
                 SELECT
                     query,

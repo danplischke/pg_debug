@@ -157,6 +157,8 @@ def advisor_with(tables, columns, keys, queries):
     advisor = PartitionAdvisor(driver, min_table_bytes=0)
 
     async def answer(query, params=None):
+        if "FROM pg_extension e" in query:
+            return [SqlDriver.RowResult(cells={"schema": "public", "version": "1.10"})]
         if "pg_stat_statements" in query:
             return [SqlDriver.RowResult(cells=row) for row in queries]
         if "indisunique" in query:

@@ -37,6 +37,9 @@ from pglast.parser import ParseError
 from ..db import SafeSqlDriver
 from ..db import SqlDriver
 from ..db import workload_only
+from ..db.statements import THIS_DATABASE
+from ..db.statements import StatementStatistics
+from ..db.statements import locate_pg_stat_statements
 from ..parsing import TableAliasVisitor
 from .predicates import extract_predicates
 from .result import PartitionCandidate
@@ -140,15 +143,18 @@ WHERE i.indisunique
   AND c.oid = ANY({}::regclass[])
 """
 
+
 # pg_debug's own catalog reads must not decide whether a table is partitioned:
 # they filter on nothing the application filters on, and there can be a lot of
 # them after a few runs.
-WORKLOAD_SQL = f"""
-SELECT query, calls, total_exec_time
-FROM pg_stat_statements
+def _workload_sql(stats: StatementStatistics) -> str:
+    return f"""
+SELECT query, calls, {stats.total_time} AS total_exec_time
+FROM {stats.relation}
 WHERE calls > 0
+  AND {THIS_DATABASE}
   AND {workload_only()}
-ORDER BY total_exec_time DESC
+ORDER BY {stats.total_time} DESC
 LIMIT {{}}
 """
 
@@ -224,7 +230,10 @@ class PartitionAdvisor:
             return [{"query": query, "weight": 1.0, "calls": 1} for query in query_list]
 
         try:
-            rows = await SafeSqlDriver.execute_param_query(self.sql_driver, cast(LiteralString, WORKLOAD_SQL), [limit])
+            stats = await locate_pg_stat_statements(self.sql_driver)
+            if stats is None:
+                return []
+            rows = await SafeSqlDriver.execute_param_query(self.sql_driver, cast(LiteralString, _workload_sql(stats)), [limit])
         except Exception as e:
             logger.debug("Could not read the workload: %s", e)
             return []

@@ -324,6 +324,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   later, or `ALTER ROLE ... INHERIT` on 15, rather than a grant that changes
   nothing. It works in restricted mode and on a standby.
 
+- `top-queries`, `tune-workload` and `partitions` read `pg_stat_statements`
+  rows of every database on the server, so another database's statements were
+  ranked as this one's workload, and the advisors tried to plan queries
+  against tables this database does not have. They now read the rows of the
+  database they are connected to. They named the view without its schema, so
+  with a `--search-path` that left out the schema it was installed in
+  (`public`, or `extensions` on Supabase) every one of them failed with
+  `relation "pg_stat_statements" does not exist`; it is now found through
+  `pg_extension`, in whatever schema it is. `tune-workload` and `partitions`
+  asked for `total_exec_time`, which `pg_stat_statements` before 1.8
+  (PostgreSQL 12) does not have, so `tune-workload` failed there and
+  `partitions` judged every table without a workload; the column names now
+  follow the extension's own version, which is what decides them after an
+  upgrade that did not run `ALTER EXTENSION pg_stat_statements UPDATE`.
+  `tune-workload` without the extension reported no recommendations, as if it
+  had looked; it now says the extension is missing. `top-queries --interval`
+  kept a statement run inside a function and the same statement run at top
+  level, which `pg_stat_statements` 1.9 records as two rows, as one, and
+  subtracted one's counters from the other's.
+
 - `top-queries --interval`, as a role without `pg_read_all_stats`, reported
   other roles' statements as one. `pg_stat_statements` shows such a role
   their counters but not their queryid, and the sample matched its snapshots

@@ -6,7 +6,7 @@ import pytest
 
 import pg_debug.top_queries as top_queries_module
 from pg_debug.db import SqlDriver
-from pg_debug.db.extensions import ExtensionStatus
+from pg_debug.db.statements import StatementStatistics
 from pg_debug.errors import ExtensionRequiredError
 from pg_debug.top_queries import PG_STAT_STATEMENTS
 from pg_debug.top_queries import TopQueriesCalc
@@ -20,12 +20,12 @@ class MockSqlRowResult:
 # Fixtures for different PostgreSQL versions
 @pytest.fixture
 def mock_pg12_driver():
-    """Create a mock for SqlDriver that simulates PostgreSQL 12."""
+    """Create a mock for SqlDriver that simulates pg_stat_statements 1.7, as PostgreSQL 12 has it."""
     driver = MagicMock(spec=SqlDriver)
 
-    # Set up the version mock directly on the mock driver
-    with patch.object(top_queries_module, "get_postgres_version", autospec=True) as mock_version:
-        mock_version.return_value = 12
+    # Its columns follow the extension's version
+    with patch.object(top_queries_module, "locate_pg_stat_statements", autospec=True) as locate:
+        locate.return_value = StatementStatistics(relation="public.pg_stat_statements", version=(1, 7))
 
         # Create async mock for execute_query
         mock_execute = AsyncMock()
@@ -49,12 +49,12 @@ def mock_pg12_driver():
 
 @pytest.fixture
 def mock_pg13_driver():
-    """Create a mock for SqlDriver that simulates PostgreSQL 13."""
+    """Create a mock for SqlDriver that simulates pg_stat_statements 1.8, as PostgreSQL 13 has it."""
     driver = MagicMock(spec=SqlDriver)
 
-    # Set up the version mock directly on the mock driver
-    with patch.object(top_queries_module, "get_postgres_version", autospec=True) as mock_version:
-        mock_version.return_value = 13
+    # Its columns follow the extension's version
+    with patch.object(top_queries_module, "locate_pg_stat_statements", autospec=True) as locate:
+        locate.return_value = StatementStatistics(relation="public.pg_stat_statements", version=(1, 8))
 
         # Create async mock for execute_query
         mock_execute = AsyncMock()
@@ -82,33 +82,17 @@ def mock_pg13_driver():
         yield driver
 
 
-# Patch check_extension to return different extension statuses
 @pytest.fixture
 def mock_extension_installed():
-    """Mock check_extension to report extension is installed."""
-    with patch.object(top_queries_module, "check_extension", autospec=True) as mock_check:
-        mock_check.return_value = ExtensionStatus(
-            is_installed=True,
-            is_available=True,
-            name="pg_stat_statements",
-            message="Extension is installed",
-            default_version="1.0",
-        )
-        yield mock_check
+    """pg_stat_statements is installed: the driver fixture has found it."""
+    yield
 
 
 @pytest.fixture
 def mock_extension_not_installed():
-    """Mock check_extension to report extension is not installed."""
-    with patch.object(top_queries_module, "check_extension", autospec=True) as mock_check:
-        mock_check.return_value = ExtensionStatus(
-            is_installed=False,
-            is_available=True,
-            name="pg_stat_statements",
-            message="Extension not installed",
-            default_version=None,
-        )
-        yield mock_check
+    """pg_stat_statements is not installed in this database."""
+    with patch.object(top_queries_module, "locate_pg_stat_statements", AsyncMock(return_value=None)) as locate:
+        yield locate
 
 
 @pytest.mark.asyncio

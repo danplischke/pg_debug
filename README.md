@@ -42,7 +42,9 @@ pip install 'pg-debug[llm]'     # adds the optional LLM index tuning method
 Requires Python 3.12+ and PostgreSQL 12+.
 
 Some features need server-side extensions: index tuning and hypothetical-index plans
-need `hypopg`, and workload analysis and `top-queries` need `pg_stat_statements`. The
+need `hypopg`, and workload analysis and `top-queries` need `pg_stat_statements`,
+installed in the database you connect to and in any schema. They read the
+statements of that database, not of every database on the server. The
 library tells you which one is missing; for `hypopg` it says how to get it on the
 platform it recognised, or that the platform does not offer it.
 

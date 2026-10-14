@@ -7,6 +7,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
+from typing import LiteralString
+from typing import cast
 
 from pglast import parse_sql
 from pglast.ast import SelectStmt
@@ -18,6 +20,9 @@ from ..db import SqlDriver
 from ..db import check_hypopg_installation_status
 from ..db import split_table_reference
 from ..db import table_identifier
+from ..db.statements import PG_STAT_STATEMENTS
+from ..db.statements import THIS_DATABASE
+from ..db.statements import locate_pg_stat_statements
 from ..errors import ExtensionRequiredError
 from ..errors import IndexTuningError
 from ..errors import InvalidArgumentError
@@ -554,15 +559,29 @@ class IndexTuningBase(ABC):
         return await self._get_query_stats_direct(min_calls, min_avg_time_ms, limit)
 
     async def _get_query_stats_direct(self, min_calls: int = 50, min_avg_time_ms: float = 5.0, limit: int = 100) -> list[dict[str, Any]]:
-        """Direct implementation of query stats collection."""
-        query = """
-        SELECT queryid, query, calls, total_exec_time/calls as avg_exec_time
-        FROM pg_stat_statements
-        WHERE calls >= {}
-        AND total_exec_time/calls >= {}
-        ORDER BY total_exec_time DESC
-        LIMIT {}
-        """
+        """Direct implementation of query stats collection: this database's statements only."""
+        stats = await locate_pg_stat_statements(self.sql_driver)
+        if stats is None:
+            # Without it there is no workload to read, which an empty result
+            # would report as nothing to recommend.
+            raise ExtensionRequiredError(
+                PG_STAT_STATEMENTS,
+                "The workload is read from pg_stat_statements, which is not installed in this database. "
+                "Install it with CREATE EXTENSION pg_stat_statements and let it record the workload, "
+                "or name the queries to tune instead.",
+            )
+        query = cast(
+            LiteralString,
+            f"""
+        SELECT queryid, query, calls, {stats.total_time}/calls as avg_exec_time
+        FROM {stats.relation}
+        WHERE {THIS_DATABASE}
+        AND calls >= {{}}
+        AND {stats.total_time}/calls >= {{}}
+        ORDER BY {stats.total_time} DESC
+        LIMIT {{}}
+        """,
+        )
         result = await SafeSqlDriver.execute_param_query(
             self.sql_driver,
             query,
