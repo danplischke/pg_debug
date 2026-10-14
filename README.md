@@ -43,7 +43,8 @@ Requires Python 3.12+ and PostgreSQL 12+.
 
 Some features need server-side extensions: index tuning and hypothetical-index plans
 need `hypopg`, and workload analysis and `top-queries` need `pg_stat_statements`. The
-library tells you which one is missing and how to install it.
+library tells you which one is missing; for `hypopg` it says how to get it on the
+platform it recognised, or that the platform does not offer it.
 
 No superuser is required. Everything runs through HypoPG's functions, which are
 executable by any role; the extension's convenience *views* are not readable by
@@ -86,7 +87,7 @@ pg-debug health --type index,vacuum
 pg-debug column-stats orders             # why the planner estimates what it does
 
 pg-debug config                          # settings vs what the server is doing
-pg-debug config --exit-code              # fails on a durability setting that is off
+pg-debug config --exit-code              # fails on a durability setting that is off (Neon's fsync = off is a note)
 
 pg-debug partitions                      # is any table worth partitioning?
 pg-debug partitions --min-size 500MB --min-pruning-share 0.7
@@ -113,11 +114,11 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | --- | --- |
 | `-d, --database-url URL` | Connection URL. Defaults to `$DATABASE_URI`, then `$DATABASE_URL`. |
 | `--access-mode {unrestricted,restricted}` | `unrestricted` (default) runs any statement; `restricted` allows read-only statements only. |
-| `--timeout SECONDS` | Statement timeout for every statement. Defaults to none in unrestricted mode and 30 in restricted mode. |
+| `--timeout SECONDS` | Statement timeout for every statement. Defaults to none in unrestricted mode and 30 in restricted mode. On an Aurora DSQL host, which refuses `statement_timeout`, it is kept on pg-debug's side instead, with a warning. |
 | `--search-path SCHEMAS` | Schema search path for every statement, e.g. `reporting,public`. |
 | `--llm-model MODEL` | Model for the `llm` tuning method. Defaults to `$PG_DEBUG_LLM_MODEL`, then `gpt-4o`. |
 | `--json` | Emit raw JSON instead of formatted text. |
-| `-v, --verbose` | Log at INFO, or DEBUG when repeated. |
+| `-v, --verbose` | Log at INFO, or DEBUG when repeated; the text of a statement that failed is logged at DEBUG. |
 | `--version` | Print the version and exit. |
 
 ### Commands
@@ -168,7 +169,12 @@ names, the rule and the table, the setting — and never the numbers, so a
 bloated index is the same finding at 31% and at 34%. A finding that goes away
 simply stops being listed. The file is JSON, one finding per line in a stable
 order, meant to live in the repository next to the workflow that reads it. In
-JSON output each finding carries `"baseline": "known"` or `"new"`.
+JSON output each finding carries `"baseline": "known"` or `"new"`. A check that
+could not run is neither: `--save-baseline` writes nothing from a run in which
+one could not run, and names it, since a baseline without it would fail as new
+on whatever it finds once it runs; against a baseline, the report says how many
+checks were not compared. A session left idle in a transaction is recorded by
+its role, database and application name, never its pid.
 
 `scan` reports tables read sequentially far more than through an index, from
 `pg_stat_user_tables` — no extension needed. It argues in bytes rather than
@@ -460,7 +466,8 @@ role. So pg-debug keeps each piece of state in the transaction that needs it:
 
 - `--timeout`, `--search-path` and the query context are set with
   `set_config(..., true)` inside each statement's transaction, and end with
-  it. Nothing is set for the session.
+  it. Nothing is set for the session. On an Aurora DSQL host, which refuses
+  `statement_timeout`, the timeout is kept on pg-debug's side instead.
 - `index-use` turns sequential scans off for the forced plan's transaction
   alone, rather than with a `SET` before it and a `RESET` after, which could
   reach three backends.
@@ -470,6 +477,9 @@ role. So pg-debug keeps each piece of state in the transaction that needs it:
 - pg-debug prepares no statement on the server. psycopg would otherwise
   prepare one it had run five times, which fails behind a pooler that does not
   support prepared statements (`prepared statement "_pg3_0" already exists`).
+- On a `SQL_ASCII` database pg-debug asks for UTF-8 as a startup parameter,
+  which the pooler keeps for pg-debug's connections alone, never with a `SET`
+  that would stay on a backend.
 
 The tests run every command that keeps state through PgBouncer in transaction
 mode with prepared statements off and round robin on, which sends each
@@ -489,8 +499,11 @@ pg-debug model --exit-code               # fails only on a high-severity finding
 ```
 
 Exit status is `0` on success, `1` on error, `2` on a usage error, and `3` for
-`health --exit-code` when a check reports a problem or `model --exit-code` when
-a high-severity finding is reported.
+`health --exit-code` when a check that ran found a problem or `model --exit-code`
+when a high-severity finding is reported. `health` prints every check's result
+and exits `1` when any check could not run, unless `--exit-code` found a problem
+among the checks that did; with `--save-baseline` such a run saves nothing and
+exits `1`.
 
 `python -m pg_debug` works the same as the `pg-debug` command.
 
@@ -569,8 +582,9 @@ context = QueryContext.from_file("pg-debug.toml")
 | `analyze_workload_indexes(...)` / `analyze_query_indexes(queries, ...)` | `dict` with `summary`, `recommendations`, `query_impact` |
 
 Each `HealthCheckResult` carries `healthy`, a text `summary`, the flagged
-`findings` (one dict per object) and the `metrics` behind the verdict, and has
-`to_dict()` for serialization.
+`findings` (one dict per object), the `metrics` behind the verdict and, for a
+check that could not run, the `error` that stopped it (with `healthy` false and
+no findings), and has `to_dict()` for serialization.
 
 Each `PlanFinding` carries its `issue`, `severity`, the `node_type` and
 `relation` it is about, a `summary` and `detail`, `cost_ms` and
@@ -584,7 +598,10 @@ Each `ModelFinding` carries its `rule`, `confidence` (`proven` or `candidate`),
 run), an optional `verify` query for candidates, and `impact_bytes` where the
 cost is a size. It has `to_dict()` for serialization.
 
-Failures raise instead of returning error strings. All exceptions derive from
+Failures raise instead of returning error strings, with one exception: in
+`analyze_db_health()` a check that fails (a statement timeout behind a lock, a
+permission it lacks) comes back with `error` set, and the other checks still
+run. All exceptions derive from
 `PgDebugError`: `ConnectionFailedError`, `NotConnectedError`,
 `InvalidArgumentError`, `ExtensionRequiredError` (carries the missing
 `extension` name), `ExplainPlanError`, `IndexTuningError`, `QueryError`,
@@ -723,6 +740,13 @@ runs on pganalyze's
   `MAX_NUM_INDEX_TUNING_QUERIES` (10) queries. `analyze_workload_indexes`
   (`tune-workload`) selects from `pg_stat_statements` instead: up to 100
   queries with at least 50 calls and a mean execution time of 5 ms or more.
+- A `SQL_ASCII` database stores bytes in no declared encoding. Unless an
+  encoding is named for the connection (`client_encoding` in the URL,
+  `PGCLIENTENCODING`, `options`, a service file, or `ALTER DATABASE`/`ALTER
+  ROLE ... SET client_encoding`), pg-debug reads its text as UTF-8. A value
+  that is not UTF-8 fails the command with `invalid byte sequence for encoding
+  "UTF8"`, and the error says to name the encoding the data is really in, e.g.
+  `?client_encoding=LATIN1`.
 
 ### Environment variables
 

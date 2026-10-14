@@ -358,8 +358,9 @@ recommendations.
 
 Two things routinely surprise people:
 
-- **Requires HypoPG.** Without it, tuning fails with a message explaining how
-  to install it (`ExtensionRequiredError` from Python). `top-queries` and `tune-workload` additionally need
+- **Requires HypoPG.** Without it, tuning fails with a message saying how to
+  get it on this platform, or that the platform does not offer it
+  (`ExtensionRequiredError` from Python). `top-queries` and `tune-workload` additionally need
   `pg_stat_statements`. No superuser is needed — pg_debug uses HypoPG's
   functions, which any role can execute, not its views, which are private to
   the role that created the extension.

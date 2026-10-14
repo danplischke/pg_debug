@@ -191,9 +191,14 @@ pg-debug --access-mode restricted execute "SELECT
 ```
 
 The role names tell PlanetScale, Cloud SQL, AlloyDB and Tiger Cloud apart.
-Aurora DSQL answers `SELECT * FROM sys.dsql_major_version()`, run without
-restricted mode or `--timeout`; restricted mode is expected to fail there
-(see the cautions below). These signals come from each platform's
+Aurora DSQL answers `SELECT sys.dsql_major_version()`, run in unrestricted
+mode: restricted mode refuses it, because its allowlist does not know the
+function. DSQL's hosts are `<cluster>.dsql.<region>.on.aws`, or through
+PrivateLink `<cluster>.dsql-<id>.<region>.on.aws`, or a
+`vpce-….dsql-<id>.<region>.vpce.amazonaws.com` endpoint with
+`-c amzn-cluster-id=<cluster>` in the connection's options. Databricks
+Lakebase's hosts are `instance-<id>.database.cloud.databricks.com` or an
+`ep-<id>` name under `databricks.com`. These signals come from each platform's
 documentation or source code and none has been probed on a live platform, so
 read an all-false row as "not recognised", not as "self-hosted".
 
@@ -222,7 +227,8 @@ member of it.
 | Crunchy Bridge | `postgres` is a real superuser |
 
 Without `pg_read_all_stats`, other roles' sessions and query text are hidden
-from pg-debug, and only the index advisor says so. Check before relaying an
+from pg-debug, and only the index advisor, `health --type connection` and
+`health --type replication` say so. Check before relaying an
 empty or short `activity`, `locks` or `top-queries`:
 
 ```bash
@@ -303,25 +309,36 @@ seconds, that fires ends the connection.
 
 ### What pg-debug misreads on managed platforms
 
-pg-debug does not detect the platform, so some of its findings are wrong
-there. Correct them when relaying.
+pg-debug recognises the platform from the URL's host and options and from the
+server's own settings, functions and roles, and uses it for three things only:
+Neon's `fsync = off` below, the HypoPG advice, and the timeout on Aurora DSQL.
+Its other findings do not know the platform, and some are wrong there. Correct
+them when relaying.
 
-**Neon's `fsync = off`.** `config` reports it as HIGH. Neon fixes it: a commit
-is acknowledged once a quorum of safekeepers holds its WAL, so local fsync is
-not what makes it durable. Say so instead of relaying the finding.
-`config --exit-code` fails on it on every Neon database, so a CI gate there
-needs a `--baseline` that records it.
+**Neon's `fsync = off`.** Neon fixes it: a commit is acknowledged once a
+quorum of safekeepers holds its WAL, so local fsync is not what makes it
+durable. Where the server has the `neon.timeline_id` setting or the host is
+under `neon.tech`, `config` reports it as a low note that names that signal
+and does not fail `--exit-code`. A `neon_superuser` role alone is not taken as
+enough: then it stays HIGH and says why. If the server is Neon all the same,
+say so instead of relaying it, and gate with a `--baseline` that records it.
+If the low note appears on a server that is not Neon, the recognition was
+wrong and `fsync = off` is the risk it is anywhere.
 
 **Neon's `walproposer` row.** Neon's `pg_stat_replication` holds a row with
 `application_name = 'walproposer'`, the compute's link to its safekeepers,
 which Neon's own checks filter out. `health --type replication` leaves it out
 too; a build from before that counted it as a connected replica.
 
-**Connection thresholds.** `health --type connection` flags 500 connections in
-total or 100 idle in transaction, whatever `max_connections` is, while
-Supabase's recommended `max_connections` runs from 60 to 500 and Neon's from
-104 to 4,000. Judge the count against the server's own limit; behind a pooler
-it counts the pooler's server connections, not its clients:
+**Connection thresholds.** `health --type connection` judges client backends
+against the slots ordinary roles can use (`max_connections` less
+`superuser_reserved_connections` and, from 16, `reserved_connections`) and
+flags 80%; its `connections_in_use` finding carries each number. Behind a
+pooler it counts the pooler's server connections, not its clients. A build
+from before flagged 500 connections or 100 idle in transaction whatever
+`max_connections` was, while Supabase's recommended `max_connections` runs
+from 60 to 500 and Neon's from 104 to 4,000; with such a build, judge the
+count yourself:
 
 ```bash
 pg-debug execute "SELECT count(*) AS client_backends,
@@ -464,10 +481,13 @@ concurrency with no locks: a conflict fails at commit (SQLSTATE 40001) rather
 than waiting, so there is no blocking to trace. A transaction may modify at
 most 3,000 rows. It has no `pg_stat_activity`, `pg_locks`, cumulative
 statistics views or `pg_stat_statements`, and no extensions, so no HypoPG
-(`pg_stats` is there). It refuses `statement_timeout` at any scope, so
-`--timeout` and restricted mode, which always sets one, should fail there
-with `setting configuration parameter "statement_timeout" not supported`.
-`explain` should work in unrestricted mode without `--timeout`, but pg-debug's
+(`pg_stats` is there). It refuses `statement_timeout` at any scope. When the
+URL names a DSQL endpoint (its host, a PrivateLink host, or `amzn-cluster-id`
+in the connection's options), pg-debug does not set it, and bounds each
+statement on its own side instead, with a warning: when that bound passes it
+sends PostgreSQL's cancel request, and whether DSQL acts on it has not been
+tried, nor whether restricted mode's read-only transactions work there.
+`explain` should work in unrestricted mode, but pg-debug's
 plan rules do not know DSQL's own nodes (`Storage Scan`, `Storage Lookup`,
 `B-Tree Scan`), so read those yourself. Both are read from DSQL's
 documentation; pg-debug has not been run against it. `activity`, `locks`,
@@ -494,11 +514,16 @@ On Azure, add `hypopg` to the `azure.extensions` server parameter first
 (`SHOW azure.extensions` lists what is allowed), and do not create it in
 `pg_catalog`: Azure's autonomous tuning drops a copy installed there.
 
-pg-debug's own hint is wrong on managed platforms. Where HypoPG is offered but
-not created, it names an `execute_query` tool that does not exist (the
-command is `pg-debug execute`); where it is not offered, it says to install
-the package with `apt-get` or `yum`, which no managed platform lets the user
-do. Ignore it there, and say plainly that the platform does not offer HypoPG.
+pg-debug's hint follows the platform it recognised, and names the signal it
+recognised it by. Where the server lists HypoPG it gives the command above and
+asks for the owner's go-ahead; on Azure it puts the allowlist first, with what
+`azure.extensions` allows now, and the `pg_catalog` warning, whether or not
+the server lists HypoPG yet; on Cloud SQL, Databricks Lakebase, Tiger Cloud,
+Prisma Postgres and Aurora DSQL it says the platform does not offer HypoPG and
+what still works. On a server it does not recognise it still gives package
+instructions, which apply only to a server the user administers; if the
+platform is managed after all, ignore them and check its list of supported
+extensions.
 
 Where HypoPG is not offered, pg-debug cannot simulate an index. `explain`,
 `diagnose` and `index-use` still work, and the plan is the evidence there is.

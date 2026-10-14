@@ -8,7 +8,7 @@ Reading `health`, `top-queries` and `config`, and putting them in CI with a base
 pg-debug health                          # everything
 pg-debug health --type index,vacuum      # a subset
 pg-debug --json health                   # structured, for scripts
-pg-debug health --exit-code              # exit 3 if anything is unhealthy (CI)
+pg-debug health --exit-code              # exit 3 if a check finds a problem, 1 if one could not run (CI)
 pg-debug health --save-baseline b.json   # accept today's findings
 pg-debug health --exit-code --baseline b.json   # then fail only on new ones
 ```
@@ -17,22 +17,31 @@ pg-debug health --exit-code --baseline b.json   # then fail only on new ones
 baseline holds what each finding is about, not its numbers, so it survives a
 bloat percentage drifting; a finding that disappears is simply not listed.
 Suggest it whenever a user wants to put one of these checks in CI against a
-database that already has findings.
+database that already has findings. A run in which a check could not run saves
+no baseline and exits 1: run it again once the lock or permission that stopped
+the check is gone.
 
 Checks: `index` (invalid, duplicate, bloated, unused), `table` (heap bloat),
-`connection`, `vacuum` (transaction ID wraparound, autovacuum backlog, and what
+`connection` (client backends against `max_connections` less its
+reservations, flagged at 80%, and each session idle in a transaction for a
+minute or more, named with its pid, role, database, application and last
+statement), `vacuum` (transaction ID wraparound, autovacuum backlog, and what
 is holding the vacuum horizon), `sequence` (approaching
 maximum), `replication`, `buffer` (cache hit rates), `constraint` (invalid
 constraints), `statistics` (never analyzed or drifted), `scan` (tables read
 sequentially far more than through an index, charged in bytes read), `all`.
 
 In JSON each check has `healthy`, `summary`, `findings` (the flagged objects)
-and `metrics` (the numbers and thresholds behind the verdict). Filter on
-`healthy` rather than parsing prose:
+and `metrics` (the numbers and thresholds behind the verdict). A check that
+could not run (a statement timeout behind a lock, a permission it lacks) also
+has `error`, with `healthy` false and no findings; relay it as not checked,
+not as a problem found. Filter on `healthy` rather than parsing prose:
 
 ```bash
 pg-debug --json health | jq 'to_entries | map(select(.value.healthy == false))'
 ```
+
+That also selects checks with an `error`.
 
 `table` estimates bloat from `pg_stats` and `pg_class`, so it needs no
 extension, and reports a table only when it wastes at least 100 MB *and* at
@@ -97,7 +106,7 @@ literals), which is what you feed to `tune-queries`.
 ```bash
 pg-debug config              # settings judged against what this server is doing
 pg-debug --json config
-pg-debug config --exit-code  # exit 3 on a durability setting that is off
+pg-debug config --exit-code  # exit 3 on a durability setting that is off; Neon's fsync is a note (platforms.md)
 ```
 
 Every finding is argued from a counter, and the `evidence` field carries it —

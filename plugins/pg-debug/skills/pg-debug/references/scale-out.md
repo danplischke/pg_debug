@@ -314,10 +314,10 @@ engine lacks.
   at commit with SQLSTATE 40001. It caps a transaction at 3,000 modified rows,
   refuses `statement_timeout`, supports no extensions, and has no
   `pg_stat_activity`, `pg_locks` or statistics views. EXPLAIN works there;
-  activity, lock and health questions cannot be answered from SQL. pg-debug
-  sets a statement timeout in each transaction whenever one is configured
-  (restricted mode, or `--timeout`), so expect every statement to fail on
-  DSQL with either. That is inferred from DSQL's documentation and untested;
+  activity, lock and health questions cannot be answered from SQL. Where the
+  host or the connection's options name DSQL, pg-debug does not set
+  `statement_timeout`; it bounds each statement on its own side and warns
+  that this is weaker. That rests on DSQL's documentation and is untested;
   [platforms.md](platforms.md) says what to run there instead.
 - **CockroachDB** does not support session-scoped advisory locks:
   `pg_advisory_lock` errors and `pg_try_advisory_lock` always returns true.

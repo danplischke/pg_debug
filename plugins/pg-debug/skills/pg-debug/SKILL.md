@@ -41,6 +41,11 @@ export DATABASE_URI=postgresql://user:pass@host:5432/dbname
 
 `-d/--database-url` overrides it. `$DATABASE_URL` works as a fallback.
 
+If a command fails with `invalid byte sequence for encoding "UTF8"` and the
+error says the database is `SQL_ASCII`, the database holds bytes in another
+encoding. Add that encoding to the URL (`?client_encoding=LATIN1`) rather than
+working around it.
+
 **When exploring a database you do not own, add `--access-mode restricted`.**
 It parses every statement, rejects anything that is not read-only, runs it in a
 read-only transaction and applies a 30 second timeout. It is the difference
@@ -70,11 +75,14 @@ tables, and `--role` needs the connecting role to be a member of that role.
 Without `pg_read_all_stats`, which `pg_monitor` includes, other roles'
 sessions and query text are hidden, and mostly without a word.
 
-On a managed platform, identify it before relaying a finding: pg-debug does not
-detect it. It reports the `fsync = off` that Neon runs with as HIGH, judges
-connections against fixed thresholds whatever `max_connections` is, and most
-counter-based findings do not say when their counters started, while a Neon
-suspend, a failover or a point-in-time restore starts them again from zero.
+On a managed platform, identify it before relaying a finding. pg-debug
+recognises the platform from the URL's host and the server's own settings and
+roles, and uses it for three things only: the `fsync = off` Neon runs with (a
+low note there, when the `neon.timeline_id` setting or a `neon.tech` host says
+Neon), the advice on getting HypoPG, and keeping the timeout on its own side
+on an Aurora DSQL host, which refuses `statement_timeout`. Most counter-based
+findings still do not say when their counters started, while a Neon suspend, a
+failover or a point-in-time restore starts them again from zero.
 Connecting also wakes a scale-to-zero compute (Neon, Aurora serverless), and
 its first timings run cold. [platforms.md](references/platforms.md) has the
 endpoints, roles and cautions for each platform.
@@ -136,7 +144,8 @@ pg-debug --json explain - < slow.sql | jq '.Plan."Total Cost"'
 
 Exit status: `0` success, `1` error, `2` usage error, `3` when an
 `--exit-code` gate (`health`, `config`, `model`, `check-migration`) found what
-it gates on.
+it gates on. `health` also exits `1` when a check could not run, unless its
+gate found a problem among the checks that did.
 
 ## Answering well
 

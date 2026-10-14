@@ -14,11 +14,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   use, how to tell a build that works through a pooler from one that does
   not, which role to connect as, how long the counters behind a finding have
   been counting, which settings Neon, Supabase, RDS, Aurora, Cloud SQL,
-  AlloyDB and Azure fix or re-tune, where pg-debug misreads them today
-  (Neon's `fsync = off` reported HIGH, fixed connection thresholds), and when
-  the evidence lives outside SQL. A new `scale-out.md` covers replicas, slots and logical replication,
-  and answers "should we shard?" from what the server shows, starting from
-  "not yet". `schema.md` adds pruning, lock slots and the DDL that maintains
+  AlloyDB and Azure fix or re-tune, where pg-debug still misreads them (a
+  cache hit ratio with a second cache tier behind it, the platform's own
+  queries in the workload), and when the evidence lives outside SQL. A new
+  `scale-out.md` covers replicas, slots and logical replication, and answers
+  "should we shard?" from what the server shows, starting from "not yet". `schema.md` adds pruning, lock slots and the DDL that maintains
   partitions; `incidents.md` adds the DDL lock queue, multixact member
   exhaustion, collation changes after an OS upgrade and reading waits from
   one snapshot; `slow-queries.md` adds the planner pitfalls no rule names yet:
@@ -141,6 +141,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- A statement that failed was logged at ERROR with its full text, so a
+  `health` run with six checks timing out behind a lock printed close to 300
+  lines of pg-debug's own SQL to stderr, and restricted mode logged each
+  failure a second time. Each failure is now one line, and the statement is
+  logged at debug (`-vv`).
+
 - `--timeout`, restricted mode's default timeout and `--search-path` are set
   inside each statement's transaction, with `set_config(..., true)`, instead
   of with `SET` on each pooled connection; see the fix below for why.
@@ -195,6 +201,132 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `pg_debug.index.llm_settings`, and `pg_debug.index.llm` still has them.
 
 ### Fixed
+
+- One health check that failed ended the whole `health` run. A lock on one
+  table (a migration holding ACCESS EXCLUSIVE, say) timed out the first index
+  check, and `health` printed only `canceling statement due to statement
+  timeout` and exited 1, though most checks never read that table. Each check
+  now runs on its own. One that fails is listed in its place as `Could not
+  run:` with the server's reason, the others report as usual, stderr names
+  the checks that could not run, and the exit status is 1, because a run that
+  did not look everywhere cannot pass. With `--exit-code`, a problem found by
+  a check that ran still exits 3: it stands whatever the missing checks would
+  have said. In JSON and in `HealthCheckResult` such a check has `healthy:
+  false` and an `error`, and `analyze_db_health()` returns it rather than
+  raising. A check that could not run is not a finding: against a baseline it
+  is neither known nor new, and the line after the report says how many
+  checks were not compared instead of "nothing new". `--save-baseline` writes
+  nothing from such a run, names the checks and exits 1: a baseline without
+  them would fail as new on whatever they find once they run, and written
+  over an accepted one it would throw away what the team had accepted. When
+  the database cannot be reached at all, the checks after it are reported as
+  not attempted rather than each waiting out the 30-second connection
+  timeout.
+
+- `health --type connection` flagged 500 connections, or 100 idle in
+  transaction, whatever `max_connections` was, and counted every process in
+  `pg_stat_activity`, the server's own included. On a server with
+  `max_connections` 100 it could never fire; on a 4,000-connection Neon
+  compute it fired at an eighth of capacity. It now counts client backends
+  against the slots an ordinary role can use (`max_connections` less
+  `superuser_reserved_connections` and, from PostgreSQL 16,
+  `reserved_connections`) and flags 80% of them, a judgment it states. Idle
+  in transaction is judged by how long rather than how many: a session idle
+  in a transaction for a minute or more is flagged, because it keeps its
+  locks, even the share lock of a plain read, which queues DDL and everything
+  behind it. Each verdict is now a finding with its evidence:
+  `connections_in_use` carries the counts, and each such session is an
+  `idle_in_transaction` finding with its pid, role, database, application
+  name, how long it has been idle and the start of its last statement. The
+  two verdicts once shared one baseline entry, so accepting a forgotten psql
+  session also accepted running out of connections; they are now apart, and a
+  session is known by its role, database and application name rather than
+  its pid, which changes every time the job reconnects. The metrics
+  `total_connections`, `idle_connections`, `max_total_connections` and
+  `max_idle_connections` give way to `client_connections`,
+  `available_connections`, `in_use_percent`, `long_idle_in_transaction` and
+  the settings they come from. A role without `pg_read_all_stats` cannot see
+  the type or state of other roles' backends; the check counts those with a
+  database as possible clients, says when they could change the verdict, and
+  says "none of the visible ones" rather than "none" are idle in transaction.
+
+- On a database created with `ENCODING 'SQL_ASCII'`, `health`, `config`,
+  `activity`, `vacuum-progress` and `top-queries` failed with "a bytes-like
+  object is required, not 'str'", and `describe` and `model` with "sequence
+  item 0: expected str instance, bytes found". The other commands printed
+  every name as `b'public'`, and two answered wrongly: comparing those bytes
+  with the query's columns, `index-use` said the query restricted nothing,
+  and `tune-queries` recommended no index where a UTF8 copy of the same
+  database gets one. SQL_ASCII declares no encoding, so a client that names
+  none is sent the stored bytes, and psycopg handed them over undecoded.
+  pg-debug now reads the client encoding the server reports once connected,
+  and only when that is SQL_ASCII does it reconnect asking for UTF-8. An
+  encoding named anywhere is kept: in the URL, in `PGCLIENTENCODING`, in
+  `options` or `PGOPTIONS`, in a service file, or by `ALTER DATABASE` or
+  `ALTER ROLE ... SET client_encoding`, so LATIN1 data a database is set to
+  read as LATIN1 still reads as LATIN1; `client_encoding=auto`, which a C
+  locale turns into SQL_ASCII, counts as naming none. A SQL_ASCII server
+  converts nothing but refuses to send bytes that are not UTF-8; pg-debug
+  then says the database holds bytes that are not UTF-8 and how to name their
+  encoding (`?client_encoding=LATIN1`), rather than guessing. The encoding is
+  asked for as a startup parameter, not with a `SET`, so behind PgBouncer in
+  transaction mode other clients of pg-debug's backend still read SQL_ASCII.
+  A psycopg connection of your own given to `SqlDriver` with a SQL_ASCII
+  client encoding is refused with a `QueryError` that names
+  `client_encoding="UTF8"`, where it raised a `TypeError` or returned bytes.
+
+- A process that talked to two servers used the first one's major version
+  for both, because the version was kept once per process: a library user
+  reviewing a PostgreSQL 15 after a 17 had `config` query
+  `pg_stat_checkpointer`, which 15 does not have, and the version checks in
+  `activity`, `top-queries`, `explain` and the `scan` health check took the
+  wrong branch the same way. The version is now kept per connection pool and
+  asked again when the pool reconnects, so a server upgraded or failed over
+  behind the same URL is not remembered as the old one. The CLI talks to one
+  server per run and was not affected. The version is also read from
+  `server_version_num`: on a pre-release such as `18beta1` or `19devel`,
+  every version-gated command failed with "invalid literal for int()".
+
+- On Neon, `config` reported the `fsync = off` every Neon compute runs with
+  as HIGH, so `config --exit-code` failed on every Neon database. Neon
+  acknowledges a commit once a quorum of its safekeepers holds the commit's
+  WAL, so the compute's own fsync is not what makes it durable. pg-debug now
+  recognises the platform it runs on, from the connection URL's host and
+  options and from settings, functions and roles the platform adds, read with
+  one statement restricted mode allows. Where the server has the
+  `neon.timeline_id` setting or the host is under `neon.tech`, `fsync = off`
+  is a low note that names that signal and does not fail `--exit-code`. A
+  `neon_superuser` role alone is not enough, since any superuser can create
+  one and a dump of a Neon project's roles carries it anywhere: then the
+  finding stays HIGH and says why. None of the signals has been tried on a
+  live platform, so a server none of them matches is reported as
+  unrecognised, not as self-hosted, and a Databricks Lakebase host, built on
+  Neon, is not taken for Neon.
+
+- Where HypoPG was missing, `explain -i`, `tune-queries` and `tune-workload`
+  told the user to install it with an `execute_query` tool that does not
+  exist, and, where the server did not list it, to install a package with
+  `apt-get` or `yum`, which no managed platform allows. The message now names
+  `pg-debug execute "CREATE EXTENSION hypopg"` (`PgDebug.execute_sql` from
+  Python) and asks the user to check with the database's owner first, since
+  it changes the database. On Azure it puts the `azure.extensions` allowlist
+  first, with what it allows now, and warns against `pg_catalog`, whether or
+  not the server lists HypoPG yet. On Cloud SQL, Databricks Lakebase, Tiger
+  Cloud, Prisma Postgres and Aurora DSQL it says the platform does not offer
+  HypoPG and that `explain`, `diagnose` and `index-use` still work. Each
+  message names the signal the platform was recognised by; the package
+  instructions remain for a server pg-debug does not recognise.
+
+- On Aurora DSQL, restricted mode and `--timeout` set `statement_timeout` in
+  every transaction, which DSQL's documentation says it refuses at any scope,
+  so every statement would have failed there. When the connection URL names
+  a DSQL endpoint (a cluster's host, a PrivateLink host such as
+  `<cluster>.dsql-fnh4.<region>.on.aws` or `vpce-….vpce.amazonaws.com`, or
+  `amzn-cluster-id` in the URL's options or `PGOPTIONS`), pg-debug no longer
+  sets it: it stops waiting for a statement after the same number of seconds
+  and asks the server to cancel it, in both access modes, and warns that this
+  bound is weaker than the server's. This rests on DSQL's documentation;
+  pg-debug has not been run against DSQL.
 
 - `health --type replication` warned "Replica is not actively replicating
   from primary!" on a healthy replica. It decided from the replica's own

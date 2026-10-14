@@ -21,7 +21,9 @@ async def main():
         print(plan.to_text())              # readable summary
 
         for name, check in (await pg.analyze_db_health("index")).items():
-            if not check.healthy:
+            if check.error:
+                print(name, "could not run:", check.error)
+            elif not check.healthy:
                 print(name, check.findings)
 
         for finding in await pg.review_data_model(schema="public"):
@@ -54,7 +56,9 @@ suspended Neon compute and resets its idle timer, and any connection attempt,
 even one that fails to log in, resumes a paused Aurora serverless instance,
 which takes about 15 seconds. The first timings after a wake run cold.
 
-Failures raise rather than returning error strings. Catch `PgDebugError`, or
+Failures raise rather than returning error strings, except in
+`analyze_db_health()`, which returns a check that could not run with its
+`error` and runs the rest. Catch `PgDebugError`, or
 the specific subclass — `ConnectionFailedError`, `InvalidArgumentError`,
 `ExtensionRequiredError` (has `.extension`), `ExplainPlanError`, `QueryError`
 (a statement PostgreSQL rejected or restricted mode refused),
@@ -131,3 +135,10 @@ psycopg pool you borrow it from with `kwargs={"prepare_threshold": None}`):
 psycopg prepares a statement it has run five times, and a pooler without
 prepared-statement support fails it with
 `prepared statement "_pg3_0" already exists`.
+
+On a `SQL_ASCII` database also pass `client_encoding="UTF8"`, or the encoding
+the data is really in: `psycopg.AsyncConnection.connect(url,
+prepare_threshold=None, client_encoding="UTF8")`. Left to libpq, such a
+connection gets SQL_ASCII, psycopg returns every text column as `bytes`, and
+`SqlDriver` refuses it with a `QueryError` that says so. A `DbConnPool` makes
+this choice itself.
