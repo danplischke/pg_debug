@@ -3,11 +3,11 @@
 These read the live activity views rather than cumulative statistics, so they
 answer "what is happening" rather than "what has happened".
 
-PostgreSQL shows a role without ``pg_read_all_stats`` the other roles'
-backends, and its own processes, with everything but their pid, database, user
-and application withheld. Each reader's result says how many backends the role
-was not shown in full, and why; the server is asked once whether the role
-lacks it.
+They return what PostgreSQL shows the connecting role. Without
+``pg_read_all_stats``, which ``pg_monitor`` includes, that is other roles'
+backends, and the server's own processes, with their state, query, wait and
+timings withheld; :mod:`pg_debug.db.privileges` says what was withheld and
+why.
 """
 
 from __future__ import annotations
@@ -22,11 +22,8 @@ from .db import SafeSqlDriver
 from .db import SqlDriver
 from .db import get_postgres_version
 from .db.privileges import HIDDEN_QUERY_TEXT
-from .db.privileges import MISSING_PRIVILEGE
-from .db.privileges import StatisticsAccess
-from .db.privileges import StatisticsRows
-from .db.privileges import statistics_access
-from .db.privileges import withheld_rows
+from .db.privileges import IN_TRANSACTION
+from .db.privileges import IN_TRANSACTION_CTE
 
 logger = logging.getLogger(__name__)
 
@@ -56,18 +53,20 @@ _MODERN_VACUUM_FIELDS = """
     v.indexes_processed
 """
 
-#: The backends PostgreSQL withheld from the reading role: their number, the
-#: roles they belong to, and how many belong to none, the server's own
-#: processes. A withheld row keeps its pid, database, user and application,
-#: and has this text in place of its query.
-WITHHELD_BACKENDS_SQL = f"""
-    SELECT
-        count(*) AS withheld,
-        array_remove(array_agg(DISTINCT a.usename::text), NULL) AS roles,
-        count(*) FILTER (WHERE a.usename IS NULL) AS server_processes
-    FROM pg_stat_activity a
-    WHERE a.pid <> pg_backend_pid()
-      AND a.query = '{HIDDEN_QUERY_TEXT}'
+#: Which backends ``list_backends`` leaves out unless asked for idle ones.
+#:
+#: Auxiliary processes (checkpointer, walwriter, ...) sit in an 'Activity'
+#: wait when they have nothing to do; a NULL state with any other wait event
+#: means they are working. A backend whose details are withheld from the role
+#: has NULL for all of these, so it is judged by what is not withheld: one in
+#: a transaction is listed, as an idle one in a transaction would be, and one
+#: that shows no sign of a transaction is left out with the idle ones.
+NOT_IDLE = f"""
+    AND CASE
+        WHEN a.query = '{HIDDEN_QUERY_TEXT}' THEN {IN_TRANSACTION}
+        ELSE a.state IS DISTINCT FROM 'idle'
+         AND NOT (a.backend_type IS DISTINCT FROM 'client backend' AND a.wait_event_type = 'Activity')
+    END
 """
 
 
@@ -81,7 +80,7 @@ class ActivityInspector:
         self,
         include_idle: bool = False,
         min_duration_seconds: float | None = None,
-    ) -> StatisticsRows:
+    ) -> list[dict[str, Any]]:
         """List server processes and what they are doing.
 
         Args:
@@ -94,102 +93,24 @@ class ActivityInspector:
 
         Returns:
             One dict per backend. ``blocked_by`` holds the pids blocking it
-            (empty when it is not blocked), and the ``*_seconds`` fields give
-            the age of the current state, query and transaction. The list's
-            ``hidden`` says how many backends PostgreSQL withheld the details
-            of, and whether they are listed, or is None.
+            (empty when it is not blocked), the ``*_seconds`` fields give the
+            age of the current state, query and transaction, and
+            ``in_transaction`` says whether it is in one.
 
         Note:
             Without pg_read_all_stats, which pg_monitor includes, PostgreSQL
             shows other roles' backends, and its own processes, with no state,
             wait or timings, and ``<insufficient privilege>`` for the query.
-            Whether such a backend is idle, or how long it has been in its
-            state, cannot be told, so it is listed only with
-            ``include_idle`` and no ``min_duration_seconds``, and ``hidden``
-            counts it either way.
+            Whether such a backend is in a transaction can still be read, from
+            its transaction ID, its snapshot and its locks, so one that is in
+            a transaction is listed with the running ones and the rest are
+            left out with the idle ones. How long it has been in its state
+            cannot be read, so with ``min_duration_seconds`` it is not listed.
+            :func:`pg_debug.db.privileges.withheld_backends` says what is
+            known of each.
         """
-        access = await statistics_access(self.sql_driver)
-        backends = await self._backends(include_idle, min_duration_seconds)
-        if access.reads_all_stats:
-            return StatisticsRows(backends)
-        if include_idle and min_duration_seconds is None:
-            return await self._noting_withheld(backends, withheld_rows(backends), "of these backends", access=access)
-
-        rows = await self.sql_driver.execute_query(WITHHELD_BACKENDS_SQL)
-        cells = rows[0].cells if rows else {}
-        withheld = int(cells.get("withheld") or 0)
-        if not withheld:
-            return StatisticsRows(backends)
-        roles: list[str] = cells.get("roles") or []
-        owners = [f"of {', '.join(roles[:-1])} and {roles[-1]}" if len(roles) > 1 else f"of {roles[0]}"] if roles else []
-        if cells.get("server_processes"):
-            owners.append("of the server itself")
-        cannot_tell = (
-            "How long they have been in their state cannot be told."
-            if min_duration_seconds is not None
-            else "Whether they are running cannot be told; with --all (include_idle) they are listed."
-        )
-        hidden = (
-            f"{withheld} other backend{'s' if withheld != 1 else ''}, {', and '.join(owners)}, "
-            f"{'are' if withheld != 1 else 'is'} not listed: PostgreSQL shows "
-            f"{access.role} their pid, database, user and application but not their state, query, wait or timings, "
-            f"because it {MISSING_PRIVILEGE}. {cannot_tell}"
-        )
-        return StatisticsRows(backends, hidden=hidden, hidden_count=withheld)
-
-    async def blocked_backends(self) -> StatisticsRows:
-        """List only the backends waiting on a lock held by another backend.
-
-        Who blocks whom is read from the locks, which every role is shown, so a
-        backend whose details PostgreSQL withheld is listed when it waits, and
-        the list's ``hidden`` counts it.
-        """
-        backends = [row for row in await self._backends(include_idle=True, min_duration_seconds=None) if row.get("blocked_by")]
-        return await self._noting_withheld(backends, withheld_rows(backends), "of these backends")
-
-    async def _noting_withheld(
-        self,
-        result: list[dict[str, Any]],
-        withheld: int,
-        which: str,
-        missing: str = "state, query, wait or timings",
-        whose: str = "other roles' backends and of its own processes",
-        still: str = "",
-        access: StatisticsAccess | None = None,
-    ) -> StatisticsRows:
-        """The result, saying how many of the backends in it are listed with their details withheld.
-
-        The server is asked why only when something was withheld, so a role
-        that is shown everything pays nothing for the question.
-        """
-        if not withheld:
-            return StatisticsRows(result)
-        access = access or await statistics_access(self.sql_driver)
-        if access.reads_all_stats:
-            return StatisticsRows(result)
-        hidden = (
-            f"{withheld} {which} {'are' if withheld != 1 else 'is'} shown without {missing}. PostgreSQL shows "
-            f"{access.role} only part of {whose}, because it {MISSING_PRIVILEGE}.{still}"
-        )
-        return StatisticsRows(result, hidden=hidden, hidden_count=withheld)
-
-    async def _backends(self, include_idle: bool, min_duration_seconds: float | None) -> list[dict[str, Any]]:
-        """The rows of pg_stat_activity :meth:`list_backends` describes, as the role is shown them."""
         query_id_field = "a.query_id" if await self._has_query_id() else "NULL::bigint AS query_id"
-
-        # Auxiliary processes (checkpointer, walwriter, ...) sit in a
-        # 'Activity' wait when they have nothing to do; a NULL state with any
-        # other wait event means they are working. A backend whose details
-        # are withheld cannot be told idle or not, and is counted apart.
-        idle_filter = (
-            ""
-            if include_idle
-            else f"""
-              AND a.state IS DISTINCT FROM 'idle'
-              AND NOT (a.backend_type IS DISTINCT FROM 'client backend' AND a.wait_event_type = 'Activity')
-              AND a.query IS DISTINCT FROM '{HIDDEN_QUERY_TEXT}'
-            """
-        )
+        idle_filter = "" if include_idle else NOT_IDLE
 
         duration_filter = ""
         params: list[Any] = []
@@ -198,6 +119,7 @@ class ActivityInspector:
             params.append(min_duration_seconds)
 
         query = f"""
+            WITH {IN_TRANSACTION_CTE}
             SELECT
                 a.pid,
                 a.datname,
@@ -212,6 +134,7 @@ class ActivityInspector:
                 EXTRACT(EPOCH FROM clock_timestamp() - a.state_change)::float8 AS state_seconds,
                 EXTRACT(EPOCH FROM clock_timestamp() - a.query_start)::float8 AS query_seconds,
                 EXTRACT(EPOCH FROM clock_timestamp() - a.xact_start)::float8 AS transaction_seconds,
+                {IN_TRANSACTION} AS in_transaction,
                 {query_id_field},
                 a.query
             FROM pg_stat_activity a
@@ -224,7 +147,17 @@ class ActivityInspector:
         rows = await SafeSqlDriver.execute_param_query(self.sql_driver, query, params)
         return [row.cells for row in rows] if rows else []
 
-    async def vacuum_progress(self) -> StatisticsRows:
+    async def blocked_backends(self) -> list[dict[str, Any]]:
+        """List only the backends waiting on a lock held by another backend.
+
+        A waiter whose details PostgreSQL withholds from the role is listed
+        too: who blocks whom is read from the locks, which every role is
+        shown. The backends it waits on are in its ``blocked_by`` whether
+        their details are withheld or not.
+        """
+        return [row for row in await self.list_backends(include_idle=True) if row.get("blocked_by")]
+
+    async def vacuum_progress(self) -> list[dict[str, Any]]:
         """Report vacuums currently running, and how far along they are.
 
         Returns:
@@ -232,15 +165,14 @@ class ActivityInspector:
             phase. Counter fields differ by server version: PostgreSQL 17
             reports dead tuples in bytes and tracks index progress, older
             versions report a dead item id count and its ceiling. Fields the
-            server does not provide come back as None. The list's ``hidden``
-            says how many vacuums PostgreSQL withheld the details of, or is
-            None.
+            server does not provide come back as None.
 
         Note:
             Without pg_read_all_stats, which pg_monitor includes, the vacuums
             of other roles and of autovacuum come back with no table, phase or
-            counters. Whether one is autovacuum is then None, not False: it is
-            read from the backend's type, which is withheld with the rest.
+            counters, and ``<insufficient privilege>`` for the query. Whether
+            one is autovacuum is then None, not False: it is read from the
+            backend's type, which is withheld with the rest.
         """
         pg_version = await get_postgres_version(self.sql_driver)
         counters = _MODERN_VACUUM_FIELDS if pg_version >= VACUUM_PROGRESS_NEW_COUNTERS_MIN_VERSION else _LEGACY_VACUUM_FIELDS
@@ -273,19 +205,12 @@ class ActivityInspector:
             """
 
         rows = await self.sql_driver.execute_query(query)
-        vacuums = [row.cells for row in rows] if rows else []
-        return await self._noting_withheld(
-            vacuums,
-            withheld_rows(vacuums),
-            "of these vacuums",
-            missing="table, phase or progress",
-            whose="the vacuums of other roles and of autovacuum",
-        )
+        return [row.cells for row in rows] if rows else []
 
     async def _has_query_id(self) -> bool:
         return await get_postgres_version(self.sql_driver) >= QUERY_ID_MIN_VERSION
 
-    async def lock_tree(self) -> StatisticsRows:
+    async def lock_tree(self) -> list[dict[str, Any]]:
         """Who is blocking whom, as trees rooted at the backends that wait on nothing.
 
         ``list_backends`` says which pids block each waiter. When the database
@@ -298,14 +223,15 @@ class ActivityInspector:
         Returns:
             One dict per root, the root blocking the most backends first. Each
             node carries the backend's identity, state, how long it has been in
-            it, its query, ``blocked_by``, ``blocking`` (the nodes waiting on
-            it, nested the same way) and ``blocked_total`` (distinct backends
-            anywhere beneath it). A non-root node also carries ``waits_for``:
-            the lock type and mode it is waiting on, the relation when the
-            catalog of this database can name it (another database's shows as
-            an OID), the transaction id for a row-lock wait with the table the
-            row is in, the modes its parent holds on that target, and a
-            one-line ``description`` of all that.
+            it, whether it is in a transaction, its query, ``blocked_by``,
+            ``blocking`` (the nodes waiting on it, nested the same way) and
+            ``blocked_total`` (distinct backends anywhere beneath it). A
+            non-root node also carries ``waits_for``: the lock type and mode it
+            is waiting on, the relation when the catalog of this database can
+            name it (another database's shows as an OID), the transaction id
+            for a row-lock wait with the table the row is in, the modes its
+            parent holds on that target, and a one-line ``description`` of all
+            that.
 
             A backend waiting on several holders appears under each of them.
             Two backends waiting on each other (a deadlock, which the server
@@ -320,23 +246,16 @@ class ActivityInspector:
             Without pg_read_all_stats, which pg_monitor includes, other roles'
             backends come back with no state, wait or timings, and
             ``<insufficient privilege>`` for the query. The trees are still
-            whole, since every role is shown every lock, and the list's
-            ``hidden`` counts the backends in them shown that way.
+            whole, and a backend whose details are withheld is still in them,
+            since every role is shown every lock.
         """
-        rows = await self.sql_driver.execute_query(cast(LiteralString, LOCK_TREE_BACKENDS_SQL))
+        rows = await self.sql_driver.execute_query(LOCK_TREE_BACKENDS_SQL)
         backends = [row.cells for row in rows] if rows else []
         if not backends:
-            return StatisticsRows()
+            return []
         rows = await self.sql_driver.execute_query(cast(LiteralString, LOCK_TREE_HOLDERS_SQL))
         holders = [row.cells for row in rows] if rows else []
-        return await self._noting_withheld(
-            assemble_lock_tree(backends, holders),
-            withheld_rows(backends),
-            "of the backends in these trees",
-            missing="state, query or timings",
-            whose="other roles' backends",
-            still=" Who blocks whom is complete: it is read from pg_locks, which shows every role's locks.",
-        )
+        return assemble_lock_tree(backends, holders)
 
 
 # -- Lock wait tree ---------------------------------------------------------
@@ -346,12 +265,15 @@ class ActivityInspector:
 #: it up directly from pg_locks. The relation is named where this database's
 #: catalog can name it. A wait on another transaction is how a row lock waits,
 #: and the waiter's own granted tuple lock says which table the row is in.
-LOCK_TREE_BACKENDS_SQL = """
+#: Whether each is in a transaction is read as :data:`IN_TRANSACTION` reads
+#: it, which also answers for a backend whose state is withheld.
+LOCK_TREE_BACKENDS_SQL = f"""
     WITH involved AS (
         SELECT a.pid, pg_blocking_pids(a.pid) AS blocked_by
         FROM pg_stat_activity a
         WHERE a.pid <> pg_backend_pid()
-    )
+    ),
+    {IN_TRANSACTION_CTE}
     SELECT
         a.pid,
         a.datname,
@@ -365,6 +287,7 @@ LOCK_TREE_BACKENDS_SQL = """
         EXTRACT(EPOCH FROM clock_timestamp() - a.state_change)::float8 AS state_seconds,
         EXTRACT(EPOCH FROM clock_timestamp() - a.query_start)::float8 AS query_seconds,
         EXTRACT(EPOCH FROM clock_timestamp() - a.xact_start)::float8 AS transaction_seconds,
+        {IN_TRANSACTION} AS in_transaction,
         a.query,
         w.locktype AS waiting_locktype,
         w.mode AS waiting_mode,
@@ -430,6 +353,7 @@ _NODE_FIELDS = (
     "state_seconds",
     "query_seconds",
     "transaction_seconds",
+    "in_transaction",
     "query",
 )
 

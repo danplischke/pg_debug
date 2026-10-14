@@ -6,7 +6,8 @@ from unittest.mock import patch
 import pytest
 
 from pg_debug import cli
-from pg_debug.db.privileges import StatisticsRows
+from pg_debug.db.privileges import HIDDEN_QUERY_TEXT
+from pg_debug.db.privileges import StatisticsAccess
 from pg_debug.errors import ExtensionRequiredError
 from pg_debug.errors import IndexTuningError
 from pg_debug.health import HealthCheckResult
@@ -16,15 +17,26 @@ from pg_debug.model import RuleId
 from pg_debug.model import Severity
 from pg_debug.plans.tree import ExplainPlanArtifact
 from pg_debug.plans.tree import PlanNode
+from pg_debug.top_queries import QuerySample
+
+#: A role shown every role's activity and statements, as a superuser is.
+MONITOR = StatisticsAccess(role="monitor", reads_all_stats=True)
+#: A role without pg_read_all_stats.
+PLAIN = StatisticsAccess(role="app_user", reads_all_stats=False, remedy="GRANT pg_monitor TO app_user")
 
 
 @pytest.fixture
 def pg_client():
-    """Patch PgDebug so commands run against a mock instead of a database."""
+    """Patch PgDebug so commands run against a mock instead of a database.
+
+    The connecting role is shown everything, unless a test says otherwise.
+    """
     with patch("pg_debug.cli.PgDebug") as client_cls:
         client = client_cls.return_value
         client.__aenter__ = AsyncMock(return_value=client)
         client.__aexit__ = AsyncMock(return_value=None)
+        client.statistics_access = AsyncMock(return_value=MONITOR)
+        client.withheld_backends = AsyncMock(return_value=[])
         yield client
 
 
@@ -563,14 +575,14 @@ def test_top_queries_passes_options(pg_client):
     pg_client.get_top_queries = AsyncMock(return_value=[])
 
     assert run(["top-queries", "--sort-by", "mean_time", "--limit", "3"])[0] == 0
-    pg_client.get_top_queries.assert_awaited_once_with(sort_by="mean_time", limit=3, interval_seconds=None)
+    pg_client.get_top_queries.assert_awaited_once_with(sort_by="mean_time", limit=3)
 
 
 def test_top_queries_sampling_interval(pg_client):
-    pg_client.get_top_queries = AsyncMock(return_value=[])
+    pg_client.sample_top_queries = AsyncMock(return_value=QuerySample(queries=[]))
 
     assert run(["top-queries", "--interval", "5"])[0] == 0
-    pg_client.get_top_queries.assert_awaited_once_with(sort_by="resources", limit=10, interval_seconds=5.0)
+    pg_client.sample_top_queries.assert_awaited_once_with(5.0, sort_by="resources", limit=10)
 
 
 def test_activity_defaults(pg_client):
@@ -652,51 +664,142 @@ def test_vacuum_progress_renders_percentage(pg_client):
     assert "1m05s" in out
 
 
-#: What a role without pg_read_all_stats is told about the backends it was not shown.
-NOT_LISTED = "7 other backends, of postgres, are not listed: PostgreSQL shows app_user their pid ..."
+# -- What PostgreSQL withheld from the role ---------------------------------
 
 
-def test_activity_says_what_the_role_was_not_shown_rather_than_nothing_running(pg_client):
-    pg_client.list_activity = AsyncMock(return_value=StatisticsRows(hidden=NOT_LISTED, hidden_count=7))
+def withheld(pid, **fields):
+    """A backend as list_activity returns it to a role without pg_read_all_stats."""
+    return {"pid": pid, "datname": "shop", "usename": "postgres", "application_name": "worker", "state": None, "blocked_by": [], **fields}
+
+
+#: What list_activity returned: the role's own waiter, and the other role's
+#: backend in a transaction that it waits on.
+LISTED = [
+    {"pid": 42, "usename": "app_user", "state": "active", "blocked_by": [41], "in_transaction": True, "query": "SELECT 1"},
+    withheld(41, in_transaction=True, query=HIDDEN_QUERY_TEXT),
+]
+#: What withheld_backends returned: that backend, and an idle one.
+WITHHELD = [
+    {**withheld(41), "in_transaction": True, "locks": ["AccessExclusiveLock on public.orders"], "blocking": [42]},
+    {**withheld(43), "in_transaction": False, "locks": [], "blocking": []},
+]
+
+
+def test_activity_lists_a_withheld_backend_in_a_transaction_and_says_what_it_left_out(pg_client):
+    """The reported failure: "(nothing running)" while another role's query held a lock."""
+    pg_client.list_activity = AsyncMock(return_value=LISTED)
+    pg_client.statistics_access = AsyncMock(return_value=PLAIN)
+    pg_client.withheld_backends = AsyncMock(return_value=WITHHELD)
 
     code, out, err = run(["activity"])
 
     assert code == 0
-    assert out.strip() == f"(nothing running that this role can see)\n\n{NOT_LISTED}"
-    assert err == ""
+    (row,) = [line for line in out.splitlines() if line.startswith("41")]
+    assert "in a transaction" in row
+    assert "holds AccessExclusiveLock on public.orders; blocking 42; database shop, application worker" in row
+    assert err.startswith("pg-debug: 1 of these backends, of postgres, is in a transaction")
+    assert "1 other backend, of postgres, is not listed: it shows no sign of a transaction" in err
+    assert err.rstrip().endswith("GRANT pg_monitor TO app_user grants it.")
 
 
-def test_activity_json_stays_an_array_and_says_what_was_withheld_beside_it(pg_client):
-    """Scripts read the array with `jq '.[]'`; the note goes to standard error."""
-    pg_client.list_activity = AsyncMock(return_value=StatisticsRows([{"pid": 5, "query": "<insufficient privilege>"}], hidden=NOT_LISTED))
+def test_activity_json_prints_the_rows_as_returned_and_the_note_on_standard_error(pg_client):
+    """Scripts read the array with `jq '.[]'`."""
+    pg_client.list_activity = AsyncMock(return_value=LISTED)
+    pg_client.statistics_access = AsyncMock(return_value=PLAIN)
+    pg_client.withheld_backends = AsyncMock(return_value=WITHHELD)
 
     code, out, err = run(["--json", "activity"])
 
     assert code == 0
-    assert json.loads(out) == [{"pid": 5, "query": "<insufficient privilege>"}]
-    assert err == f"pg-debug: {NOT_LISTED}\n"
+    assert json.loads(out) == LISTED
+    assert err.startswith("pg-debug: 1 of these backends, of postgres, is in a transaction")
 
 
-def test_top_queries_say_how_many_texts_were_withheld(pg_client):
-    note = "1 of these queries is another role's: pg_stat_statements shows app_user its text as <insufficient privilege> ..."
-    pg_client.get_top_queries = AsyncMock(return_value=StatisticsRows([{"query": "<insufficient privilege>", "calls": 3}], hidden=note))
+def test_activity_asks_a_role_shown_everything_nothing_more(pg_client):
+    pg_client.list_activity = AsyncMock(return_value=[LISTED[0]])
 
-    code, out, _ = run(["top-queries"])
+    code, out, err = run(["activity"])
 
     assert code == 0
-    assert out.rstrip().endswith(f"(1 row)\n\n{note}")
+    assert "SELECT 1" in out
+    assert err == ""
+    pg_client.statistics_access.assert_awaited_once()
+    pg_client.withheld_backends.assert_not_awaited()
 
 
-def test_a_withheld_vacuum_shows_blank_progress_rather_than_none(pg_client):
-    pg_client.vacuum_progress = AsyncMock(
-        return_value=StatisticsRows([{"pid": 7, "heap_blks_total": None, "heap_blks_scanned": None}], hidden="1 of these vacuums ...")
-    )
+@pytest.mark.parametrize("argv", [["activity", "--all"], ["activity", "--blocked"]])
+def test_activity_asks_nothing_when_the_rows_show_nothing_withheld(pg_client, argv):
+    """With --all every backend is listed; with --blocked and nothing blocked, nothing is withheld that matters."""
+    pg_client.list_activity = AsyncMock(return_value=[] if "--blocked" in argv else [LISTED[0]])
 
-    code, out, _ = run(["vacuum-progress"])
+    assert run(argv)[0] == 0
+    pg_client.statistics_access.assert_not_awaited()
+
+
+def test_activity_blocked_describes_a_withheld_blocker(pg_client):
+    pg_client.list_activity = AsyncMock(return_value=[LISTED[0]])
+    pg_client.statistics_access = AsyncMock(return_value=PLAIN)
+    pg_client.withheld_backends = AsyncMock(return_value=WITHHELD)
+
+    code, _, err = run(["activity", "--blocked"])
+
+    assert code == 0
+    assert "Pid 41 (postgres@shop worker), which blocks 42, is in a transaction and holds AccessExclusiveLock on public.orders" in err
+
+
+def test_locks_say_which_backends_in_the_trees_are_withheld(pg_client):
+    pg_client.lock_tree = AsyncMock(return_value=[{**withheld(41, in_transaction=True, query=HIDDEN_QUERY_TEXT), "blocked_total": 0, "blocking": []}])
+    pg_client.statistics_access = AsyncMock(return_value=PLAIN)
+
+    code, out, err = run(["locks"])
+
+    assert code == 0
+    assert out.startswith("pid 41: in a transaction; state, query and wait withheld (postgres@shop worker)")
+    assert err.startswith("pg-debug: 1 of the backends in these trees, of postgres, is shown without state")
+
+
+def test_vacuum_progress_says_which_vacuums_are_withheld(pg_client):
+    pg_client.vacuum_progress = AsyncMock(return_value=[{"pid": 7, "heap_blks_total": None, "heap_blks_scanned": None, "query": HIDDEN_QUERY_TEXT}])
+    pg_client.statistics_access = AsyncMock(return_value=PLAIN)
+
+    code, out, err = run(["vacuum-progress"])
 
     assert code == 0
     assert "None" not in out
-    assert out.rstrip().endswith("1 of these vacuums ...")
+    assert err.startswith("pg-debug: 1 of these vacuums is shown without table, phase or progress")
+
+
+def test_top_queries_say_how_many_texts_were_withheld(pg_client):
+    queries = [{"query": HIDDEN_QUERY_TEXT, "calls": 3}, {"query": "SELECT 1", "calls": 1}]
+    pg_client.get_top_queries = AsyncMock(return_value=queries)
+    pg_client.statistics_access = AsyncMock(return_value=PLAIN)
+
+    code, out, err = run(["--json", "top-queries"])
+
+    assert code == 0
+    assert json.loads(out) == queries
+    assert err.startswith("pg-debug: 1 of these queries is another role's: pg_stat_statements shows app_user its counters but not its text.")
+
+
+def test_a_sample_says_how_many_statements_it_could_not_rank(pg_client):
+    ranked = [{"queryid": 1, "query": "SELECT 1", "calls": 3}]
+    pg_client.sample_top_queries = AsyncMock(return_value=QuerySample(queries=ranked, withheld=4))
+    pg_client.statistics_access = AsyncMock(return_value=PLAIN)
+
+    code, out, err = run(["--json", "top-queries", "--interval", "2", "--sort-by", "total_time"])
+
+    assert code == 0
+    assert json.loads(out) == ranked
+    assert err.startswith("pg-debug: 4 statements of other roles ran during the interval and are not ranked")
+
+
+def test_a_sample_with_nothing_withheld_asks_nothing_more(pg_client):
+    pg_client.sample_top_queries = AsyncMock(return_value=QuerySample(queries=[{"queryid": 1, "query": "SELECT 1"}]))
+
+    code, _, err = run(["top-queries", "--interval", "2"])
+
+    assert (code, err) == (0, "")
+    pg_client.statistics_access.assert_not_awaited()
 
 
 def test_column_stats_renders_both_sections(pg_client):

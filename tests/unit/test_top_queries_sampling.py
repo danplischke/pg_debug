@@ -8,7 +8,9 @@ import pytest
 
 from pg_debug.db import QUERY_MARKER
 from pg_debug.db import SqlDriver
+from pg_debug.db.privileges import HIDDEN_QUERY_TEXT
 from pg_debug.errors import InvalidArgumentError
+from pg_debug.top_queries import QuerySample
 from pg_debug.top_queries import TopQueriesCalc
 
 
@@ -23,7 +25,12 @@ def snapshot(*entries):
         "shared_blks_dirtied": 0,
         "wal_bytes": 0,
     }
-    return {(entry["queryid"], 10, 20): {**defaults, **entry} for entry in entries}
+    return {(entry["queryid"], 10, 20): {"userid": 10, "dbid": 20, **defaults, **entry} for entry in entries}
+
+
+def rows(*entries):
+    """Build a snapshot as _counter_snapshot reads it: one row per pg_stat_statements entry."""
+    return list(snapshot(*entries).values())
 
 
 def entry(queryid, query, **counters):
@@ -177,8 +184,8 @@ async def test_sample_rejects_a_non_positive_interval():
 async def test_sample_waits_between_snapshots():
     calc = TopQueriesCalc(MagicMock(spec=SqlDriver))
     snapshots = [
-        snapshot(entry(1, "SELECT 1", calls=1, total_exec_time=1.0)),
-        snapshot(entry(1, "SELECT 1", calls=5, total_exec_time=9.0)),
+        rows(entry(1, "SELECT 1", calls=1, total_exec_time=1.0)),
+        rows(entry(1, "SELECT 1", calls=5, total_exec_time=9.0)),
     ]
 
     with (
@@ -191,3 +198,67 @@ async def test_sample_waits_between_snapshots():
     sleep.assert_awaited_once_with(2.5)
     assert result["calls"] == 4
     assert result["total_exec_time"] == 8.0
+
+
+# -- Statements whose queryid is withheld -------------------------------------
+
+
+def withheld(userid=10, **counters):
+    """Another role's statement, as pg_stat_statements shows it to a role without pg_read_all_stats."""
+    return {**snapshot(entry(None, HIDDEN_QUERY_TEXT, **counters))[(None, 10, 20)], "userid": userid}
+
+
+async def measure(before, after, **kwargs) -> QuerySample:
+    calc = TopQueriesCalc(MagicMock(spec=SqlDriver))
+    with (
+        patch.object(TopQueriesCalc, "_require_pg_stat_statements", AsyncMock()),
+        patch.object(TopQueriesCalc, "_counter_snapshot", AsyncMock(side_effect=[before, after])),
+        patch("pg_debug.top_queries.asyncio.sleep", AsyncMock()),
+    ):
+        return await calc.measure(1, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_statements_whose_queryid_is_withheld_are_counted_rather_than_ranked_as_one():
+    """The reported failure: keyed by (queryid, userid, dbid), every withheld
+    statement of a role in a database was one key, so the ranking showed one
+    row with one statement's counters, and took a cumulative total for
+    activity during the interval."""
+    before = [withheld(calls=100, total_exec_time=500.0), withheld(calls=7, total_exec_time=2.0), *rows(entry(1, "SELECT 1", calls=1))]
+    after = [withheld(calls=130, total_exec_time=650.0), withheld(calls=9, total_exec_time=3.0), *rows(entry(1, "SELECT 1", calls=3))]
+
+    sample = await measure(before, after, sort_by="total")
+
+    assert [row["queryid"] for row in sample.queries] == [1]
+    assert sample.withheld == 2
+
+
+@pytest.mark.asyncio
+async def test_withheld_statements_that_did_not_run_are_not_counted():
+    """One that did not run is in both snapshots with the same counters."""
+    idle = [withheld(calls=5, total_exec_time=1.5), withheld(userid=11, calls=5, total_exec_time=1.5)]
+
+    assert (await measure(idle, list(idle))).withheld == 0
+
+
+@pytest.mark.asyncio
+async def test_a_withheld_statement_new_in_the_interval_is_counted_once_it_has_run():
+    """An entry is made when a statement is parsed, before it has run."""
+    sample = await measure([], [withheld(calls=1, total_exec_time=0.3), withheld(calls=0)])
+
+    assert sample.withheld == 1
+
+
+@pytest.mark.asyncio
+async def test_a_withheld_statement_evicted_during_the_interval_is_not_counted():
+    sample = await measure([withheld(calls=4), withheld(calls=9)], [withheld(calls=9)])
+
+    assert sample.withheld == 0
+
+
+@pytest.mark.asyncio
+async def test_a_role_shown_everything_has_nothing_left_out():
+    sample = await measure(rows(entry(1, "SELECT 1", calls=1)), rows(entry(1, "SELECT 1", calls=4)))
+
+    assert sample == QuerySample(queries=sample.queries, withheld=0)
+    assert sample.queries[0]["calls"] == 3

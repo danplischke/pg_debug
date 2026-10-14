@@ -18,8 +18,9 @@ from .db import SafeSqlDriver
 from .db import SqlDriver
 from .db import check_hypopg_installation_status
 from .db import obfuscate_password
+from .db import privileges
 from .db.driver import check_statement_timeout
-from .db.privileges import StatisticsRows
+from .db.privileges import StatisticsAccess
 from .errors import ConnectionFailedError
 from .errors import ExtensionRequiredError
 from .errors import InvalidArgumentError
@@ -55,6 +56,7 @@ from .platform import detect_platform
 from .schema import ObjectType
 from .schema import SchemaInspector
 from .statistics import StatisticsInspector
+from .top_queries import QuerySample
 from .top_queries import TopQueriesCalc
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,11 @@ DEFAULT_RESTRICTED_TIMEOUT = 30
 
 TuningMethod = Literal["dta", "llm"]
 SortBy = Literal["resources", "mean_time", "total_time"]
+
+
+def _check_sort_by(sort_by: str) -> None:
+    if sort_by not in ("resources", "mean_time", "total_time"):
+        raise InvalidArgumentError("Invalid sort criteria. Please use 'resources', 'mean_time' or 'total_time'.")
 
 
 class AccessMode(str, Enum):
@@ -650,7 +657,7 @@ class PgDebug:
         include_idle: bool = False,
         min_duration_seconds: float | None = None,
         blocked_only: bool = False,
-    ) -> StatisticsRows:
+    ) -> list[dict[str, Any]]:
         """Report what the server is doing right now.
 
         Args:
@@ -664,20 +671,23 @@ class PgDebug:
 
         Returns:
             One dict per backend, including ``blocked_by`` (the pids blocking
-            it) and the age of its state, query and transaction. The list's
-            ``hidden`` says how many backends PostgreSQL showed the connecting
-            role only in part, for want of ``pg_read_all_stats``, or is None.
+            it), ``in_transaction``, and the age of its state, query and
+            transaction. A role without ``pg_read_all_stats`` is shown other
+            roles' backends without their state, query, wait or timings: the
+            ones in a transaction are listed with the running ones, and
+            :meth:`statistics_access` and :meth:`withheld_backends` say what
+            was withheld.
         """
         inspector = ActivityInspector(await self.sql_driver())
         if blocked_only:
             return await inspector.blocked_backends()
         return await inspector.list_backends(include_idle=include_idle, min_duration_seconds=min_duration_seconds)
 
-    async def vacuum_progress(self) -> StatisticsRows:
+    async def vacuum_progress(self) -> list[dict[str, Any]]:
         """Report running vacuums and how far along they are."""
         return await ActivityInspector(await self.sql_driver()).vacuum_progress()
 
-    async def lock_tree(self) -> StatisticsRows:
+    async def lock_tree(self) -> list[dict[str, Any]]:
         """Report who is blocking whom, as trees rooted at the backends that wait on nothing.
 
         Returns:
@@ -724,7 +734,7 @@ class PgDebug:
         sort_by: SortBy = "resources",
         limit: int = 10,
         interval_seconds: float | None = None,
-    ) -> StatisticsRows:
+    ) -> list[dict[str, Any]]:
         """Report the most expensive queries recorded by pg_stat_statements.
 
         Args:
@@ -741,27 +751,85 @@ class PgDebug:
                 workload; sampling measures what is running now.
 
         Returns:
-            One dict of statistics per query. The list's ``hidden`` says how
-            many came without their text, other roles' queries hidden from a
-            role without ``pg_read_all_stats``, or is None.
+            One dict of statistics per query. A role without
+            ``pg_read_all_stats`` is shown other roles' statements with
+            ``<insufficient privilege>`` for their text; a sample leaves them
+            out, and :meth:`sample_top_queries` says how many ran.
 
         Raises:
             InvalidArgumentError: If ``sort_by`` is not a valid criterion, or
                 the interval is not positive.
             ExtensionRequiredError: If pg_stat_statements is not installed.
         """
-        if sort_by not in ("resources", "mean_time", "total_time"):
-            raise InvalidArgumentError("Invalid sort criteria. Please use 'resources', 'mean_time' or 'total_time'.")
-
-        top_queries_tool = TopQueriesCalc(sql_driver=await self.sql_driver())
-
         if interval_seconds is not None:
-            sample_sort = {"resources": "resources", "mean_time": "mean", "total_time": "total"}[sort_by]
-            return await top_queries_tool.sample(interval_seconds, sort_by=sample_sort, limit=limit)  # type: ignore[arg-type]
+            return (await self.sample_top_queries(interval_seconds, sort_by=sort_by, limit=limit)).queries
+
+        _check_sort_by(sort_by)
+        top_queries_tool = TopQueriesCalc(sql_driver=await self.sql_driver())
 
         if sort_by == "resources":
             return await top_queries_tool.get_top_resource_queries()
         return await top_queries_tool.get_top_queries_by_time(limit=limit, sort_by="mean" if sort_by == "mean_time" else "total")
+
+    async def sample_top_queries(
+        self,
+        interval_seconds: float,
+        sort_by: SortBy = "resources",
+        limit: int = 10,
+    ) -> QuerySample:
+        """Measure the most expensive queries over an interval, and say what the ranking left out.
+
+        Takes the arguments :meth:`get_top_queries` takes with
+        ``interval_seconds``, and ranks the same way.
+
+        Returns:
+            A :class:`~pg_debug.top_queries.QuerySample`: ``queries``, the
+            ranking ``get_top_queries`` returns, and ``withheld``, how many of
+            other roles' statements ran during the interval and are not in it.
+            pg_stat_statements shows a role without ``pg_read_all_stats``
+            their counters but not their queryid, so they cannot be followed
+            from one snapshot to the next.
+
+        Raises:
+            InvalidArgumentError: If ``sort_by`` is not a valid criterion, or
+                the interval is not positive.
+            ExtensionRequiredError: If pg_stat_statements is not installed.
+        """
+        _check_sort_by(sort_by)
+        sample_sort = {"resources": "resources", "mean_time": "mean", "total_time": "total"}[sort_by]
+        top_queries_tool = TopQueriesCalc(sql_driver=await self.sql_driver())
+        return await top_queries_tool.measure(interval_seconds, sort_by=sample_sort, limit=limit)  # type: ignore[arg-type]
+
+    # -- What the statistics views withhold ----------------------------------
+
+    async def statistics_access(self) -> StatisticsAccess:
+        """Whether the connecting role is shown every role's activity and statements.
+
+        Without ``pg_read_all_stats``, which ``pg_monitor`` includes,
+        PostgreSQL shows a role other roles' backends without their state,
+        query, wait or timings, and their statements without their text.
+        ``list_activity``, ``lock_tree``, ``vacuum_progress`` and
+        ``get_top_queries`` return what it showed.
+
+        Returns:
+            A :class:`~pg_debug.db.privileges.StatisticsAccess`: the role,
+            whether it is shown everything, whether it is a member of
+            ``pg_read_all_stats`` that does not inherit its privileges, and
+            the statement that would show it everything.
+        """
+        return await privileges.statistics_access(await self.sql_driver())
+
+    async def withheld_backends(self) -> list[dict[str, Any]]:
+        """The backends whose details PostgreSQL withholds from the connecting role, and what it still shows of them.
+
+        Returns:
+            One dict per backend, with its pid, database, user and
+            application, whether it is in a transaction, how many transactions
+            old its snapshot is, the locks it holds, and the pids waiting on
+            it. Empty for a role shown everything. See
+            :func:`pg_debug.db.privileges.withheld_backends`.
+        """
+        return await privileges.withheld_backends(await self.sql_driver())
 
     # -- Index tuning --------------------------------------------------------
 

@@ -12,6 +12,7 @@ from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from typing import Any
@@ -23,8 +24,10 @@ from ..baseline import Key
 from ..baseline import Partition
 from ..baseline import describe_key
 from ..baseline import health_finding_key
+from ..db.privileges import is_withheld
 
 if TYPE_CHECKING:
+    from ..db.privileges import StatisticsAccess
     from ..plans.tree import ExplainPlanArtifact
 
 MAX_CELL_WIDTH = 60
@@ -137,16 +140,10 @@ def _cell(value: Any, max_width: int = MAX_CELL_WIDTH) -> str:
     return text
 
 
-def _with_hidden(text: str, result: Any) -> str:
-    """The rendering, then what PostgreSQL withheld from the role that read the result, if anything."""
-    hidden = getattr(result, "hidden", None)
-    return f"{text}\n\n{hidden}" if hidden else text
-
-
 def render_rows(rows: Sequence[Mapping[str, Any]], empty: str = "(no rows)", max_width: int = MAX_CELL_WIDTH) -> str:
     """Render a list of uniform dicts as an aligned text table."""
     if not rows:
-        return _with_hidden(empty, rows)
+        return empty
 
     columns: list[str] = []
     for row in rows:
@@ -163,7 +160,7 @@ def render_rows(rows: Sequence[Mapping[str, Any]], empty: str = "(no rows)", max
     ]
     lines.extend("  ".join(row[i].ljust(widths[i]) for i in range(len(columns))).rstrip() for row in cells)
     lines.append(f"\n({len(rows)} row{'s' if len(rows) != 1 else ''})")
-    return _with_hidden("\n".join(lines), rows)
+    return "\n".join(lines)
 
 
 def render_mapping(mapping: Mapping[str, Any], empty: str = "(nothing to report)") -> str:
@@ -187,24 +184,63 @@ def format_duration(seconds: Any) -> str:
     return f"{int(seconds // 3600)}h{int(seconds % 3600 // 60):02d}m"
 
 
+#: How wide a cell of the activity table may be. What PostgreSQL still shows
+#: of a backend it withheld the details of is not cut to it: the locks it holds
+#: are the reason it is listed.
+ACTIVITY_CELL_WIDTH = 80
+
+
 def render_activity(rows: Sequence[Mapping[str, Any]]) -> str:
-    """Render backends as a scannable table, keeping the query text wide."""
+    """Render backends as a scannable table, keeping the query text wide.
+
+    A backend whose state, query and wait PostgreSQL withheld from the role
+    reads as in a transaction or not, with what is still shown of it in place
+    of the query: the locks it holds, the backends waiting on it, its database
+    and application, when the rows carry them.
+    """
     if not rows:
-        return _with_hidden("(nothing running that this role can see)" if getattr(rows, "hidden", None) else "(nothing running)", rows)
+        return "(nothing running)"
 
     projected = [
         {
             "pid": row.get("pid"),
             "user": row.get("usename"),
-            "state": row.get("state") or row.get("backend_type"),
+            "state": _withheld_state(row) if is_withheld(row) else row.get("state") or row.get("backend_type"),
             "wait": ":".join(p for p in (row.get("wait_event_type"), row.get("wait_event")) if p),
             "for": format_duration(row.get("state_seconds")),
             "blocked_by": ",".join(str(pid) for pid in row.get("blocked_by") or []),
-            "query": row.get("query"),
+            "query": _withheld_details(row) if is_withheld(row) else row.get("query"),
         }
         for row in rows
     ]
-    return _with_hidden(render_rows(projected, max_width=80), rows)
+    cells = [
+        {column: value if column == "query" and is_withheld(row) else _cell(value, ACTIVITY_CELL_WIDTH) for column, value in shown.items()}
+        for row, shown in zip(rows, projected, strict=True)
+    ]
+    return render_rows(cells, max_width=0)
+
+
+def _withheld_state(row: Mapping[str, Any]) -> str:
+    """What can still be said of a withheld backend's state: whether it is in a transaction."""
+    in_transaction = row.get("in_transaction")
+    if in_transaction is None:
+        return ""
+    return "in a transaction" if in_transaction else "not in a transaction"
+
+
+def _withheld_details(row: Mapping[str, Any]) -> str:
+    """What PostgreSQL still shows of a backend whose state, query and wait it withheld."""
+    parts = ["state, query and wait withheld"]
+    if row.get("locks"):
+        parts.append(f"holds {', '.join(row['locks'])}")
+    if row.get("blocking"):
+        parts.append(f"blocking {', '.join(str(pid) for pid in row['blocking'])}")
+    where = ", ".join(
+        f"{label} {value}" for label, value in (("database", row.get("datname")), ("application", row.get("application_name"))) if value
+    )
+    if where:
+        parts.append(where)
+    return "; ".join(parts)
 
 
 def render_lock_tree(roots: Sequence[Mapping[str, Any]]) -> str:
@@ -216,19 +252,25 @@ def render_lock_tree(roots: Sequence[Mapping[str, Any]]) -> str:
     for root in roots:
         _lock_tree_lines(root, 0, lines)
         lines.append("")
-    return _with_hidden("\n".join(lines).rstrip(), roots)
+    return "\n".join(lines).rstrip()
 
 
 def _lock_tree_lines(node: Mapping[str, Any], depth: int, lines: list[str]) -> None:
     indent = "  " * depth
-    state = node.get("state") or node.get("backend_type") or "?"
     parts = [f"{indent}pid {node.get('pid')}:"]
     waits_for = node.get("waits_for")
     if waits_for:
         parts.append(f"waits for {waits_for.get('description')};")
-    parts.append(f"{state} for {format_duration(node.get('state_seconds'))}")
-    if node.get("transaction_seconds") is not None and state != "active":
-        parts.append(f"in a transaction open {format_duration(node.get('transaction_seconds'))}")
+    if is_withheld(node):
+        # Every role is shown every lock, so the backend is in the tree; its
+        # state and timings are withheld, and only whether it is in a
+        # transaction can be said.
+        parts.append("; ".join(filter(None, [_withheld_state(node), "state, query and wait withheld"])))
+    else:
+        state = node.get("state") or node.get("backend_type") or "?"
+        parts.append(f"{state} for {format_duration(node.get('state_seconds'))}")
+        if node.get("transaction_seconds") is not None and state != "active":
+            parts.append(f"in a transaction open {format_duration(node.get('transaction_seconds'))}")
     who = f"{node.get('usename') or '?'}@{node.get('datname') or '?'}"
     if node.get("application_name"):
         who += f" {node['application_name']}"
@@ -239,7 +281,7 @@ def _lock_tree_lines(node: Mapping[str, Any], depth: int, lines: list[str]) -> N
         parts.append("[deadlock: waits on something that waits on it]")
     lines.append(" ".join(parts))
 
-    query = " ".join(str(node.get("query") or "").split())
+    query = "" if is_withheld(node) else " ".join(str(node.get("query") or "").split())
     if query:
         lines.append(f"{indent}    {query[:MAX_QUERY_WIDTH]}{'…' if len(query) > MAX_QUERY_WIDTH else ''}")
 
@@ -261,7 +303,8 @@ def render_vacuum_progress(rows: Sequence[Mapping[str, Any]]) -> str:
             "table": ".".join(p for p in (row.get("schema"), row.get("table")) if p),
             "phase": row.get("phase"),
             "scanned": f"{row.get('percent_scanned')}%" if row.get("percent_scanned") is not None else "",
-            # Withheld from a role without pg_read_all_stats, and blank then.
+            # Withheld, with the table and phase, from a role without
+            # pg_read_all_stats: blank rather than "None/None".
             "heap_blks": f"{row.get('heap_blks_scanned')}/{row.get('heap_blks_total')}" if row.get("heap_blks_total") is not None else "",
             "index_passes": row.get("index_vacuum_count"),
             "running": format_duration(row.get("running_seconds")),
@@ -269,7 +312,7 @@ def render_vacuum_progress(rows: Sequence[Mapping[str, Any]]) -> str:
         }
         for row in rows
     ]
-    return _with_hidden(render_rows(projected), rows)
+    return render_rows(projected)
 
 
 def render_column_stats(result: Mapping[str, Any]) -> str:
@@ -572,8 +615,256 @@ def _partition_candidate_lines(candidate: Any) -> list[str]:
     return lines
 
 
+# -- What PostgreSQL withheld from the role ---------------------------------
+#
+# A role without pg_read_all_stats is shown other roles' backends and
+# statements, and the server's own processes, without their details. The
+# library returns the rows as the server showed them. The command says what was
+# withheld, and why, on standard error in both outputs, so that --json keeps
+# printing the array scripts read.
+
+
+@dataclass(frozen=True)
+class Shown:
+    """A command's rows as PostgreSQL showed them to the connecting role, and what it withheld.
+
+    Attributes:
+        rows: The rows as the library returned them, which ``--json`` prints.
+        text: The rows the text renders when it has more to show than
+            ``rows``: a withheld backend with the locks it holds and the
+            backends waiting on it. None renders ``rows``.
+        note: What was withheld and why, for standard error, or None.
+    """
+
+    rows: Any
+    text: Any = None
+    note: str | None = None
+
+
+def _series(items: Iterable[Any]) -> str:
+    """``1``, ``1 and 2``, ``1, 2 and 3``."""
+    listed = [str(item) for item in items]
+    return listed[0] if len(listed) == 1 else f"{', '.join(listed[:-1])} and {listed[-1]}"
+
+
+#: How many roles a note names before it counts the rest.
+NAMED_ROLES = 4
+
+
+def _owners(rows: Iterable[Mapping[str, Any]]) -> str:
+    """Whose backends these are: their roles, and the server itself for its own processes, which have none."""
+    users = [row.get("usename") for row in rows]
+    names = sorted({str(user) for user in users if user})
+    if len(names) > NAMED_ROLES + 1:
+        names = [*names[:NAMED_ROLES], f"{len(names) - NAMED_ROLES} other roles"]
+    owners = [f"of {_series(names)}"] if names else []
+    if any(not user for user in users):
+        owners.append("of the server itself")
+    return (", and " if len(names) > 1 else " and ").join(owners)
+
+
+def _is(count: int) -> str:
+    return "is" if count == 1 else "are"
+
+
+def withheld_because(access: StatisticsAccess) -> str:
+    """Why PostgreSQL withholds other roles' statistics from the role, and the statement that would show it them."""
+    remedy = access.remedy or f"GRANT pg_monitor TO {access.role}"
+    if access.member:
+        # Granting it pg_monitor again would change nothing: from PostgreSQL
+        # 15 the server asks for the privileges, not the membership.
+        return (
+            f"{access.role} is a member of pg_read_all_stats but does not inherit its privileges, which PostgreSQL 15 "
+            f"and later ask for; {remedy} makes it inherit them"
+        )
+    return f"{access.role} lacks pg_read_all_stats, which pg_monitor includes; {remedy} grants it"
+
+
+def _noting(access: StatisticsAccess, sentences: Sequence[str]) -> str | None:
+    if not sentences:
+        return None
+    return " ".join([*sentences, f"That is because {withheld_because(access)}."])
+
+
+def note_withheld_backends(
+    access: StatisticsAccess,
+    rows: Sequence[Mapping[str, Any]],
+    withheld: Sequence[Mapping[str, Any]],
+    *,
+    include_idle: bool = False,
+    min_duration: float | None = None,
+    blocked_only: bool = False,
+) -> str | None:
+    """What ``activity`` could not show of the backends PostgreSQL withheld the details of, and why.
+
+    Args:
+        access: Whether the role is shown everything, and if not, why not.
+        rows: The backends listed, as ``list_activity`` returned them.
+        withheld: Every backend withheld from the role, as
+            ``withheld_backends`` returned them.
+        include_idle: Whether idle backends were asked for.
+        min_duration: How long backends had to be in their state to be listed.
+        blocked_only: Whether only backends waiting on a lock were asked for.
+    """
+    listed = [row for row in rows if is_withheld(row)]
+    listed_pids = {row.get("pid") for row in listed}
+    unlisted = [backend for backend in withheld if backend.get("pid") not in listed_pids]
+    sentences: list[str] = []
+
+    if blocked_only:
+        if listed:
+            sentences.append(f"{len(listed)} of these backends, {_owners(listed)}, {_is(len(listed))} shown without state, query, wait or timings.")
+        # A blocker that does not wait itself is not listed; one whose
+        # details are withheld is described here rather than left a pid.
+        waited_on = {pid for row in rows for pid in row.get("blocked_by") or []}
+        sentences.extend(_withheld_blocker(backend) for backend in unlisted if backend.get("pid") in waited_on)
+        return _noting(access, sentences)
+
+    if min_duration is not None:
+        # How long a withheld backend has been in its state is withheld with
+        # the state, so none can be listed as having been in it that long.
+        if withheld:
+            count = len(withheld)
+            sentence = (
+                f"{count} other backend{'s' if count != 1 else ''}, {_owners(withheld)}, {_is(count)} not listed: how long "
+                f"{'it has' if count == 1 else 'they have'} been in {'its' if count == 1 else 'their'} state is withheld."
+            )
+            in_transaction = [backend.get("pid") for backend in withheld if backend.get("in_transaction")]
+            if in_transaction:
+                sentence += f" {'Pid' if len(in_transaction) == 1 else 'Pids'} {_series(in_transaction)} {_is(len(in_transaction))} in a transaction."
+            sentences.append(sentence)
+        return _noting(access, sentences)
+
+    if include_idle:
+        if listed:
+            count = len(listed)
+            quiet = sum(1 for row in listed if not row.get("in_transaction"))
+            sentence = f"{count} of these backends, {_owners(listed)}, {_is(count)} shown without state, query, wait or timings"
+            if not quiet:
+                sentence += ", in a transaction." if count == 1 else ", all in a transaction."
+            elif quiet == count:
+                sentence += (
+                    "; it shows no sign of a transaction, and whether it is running cannot be told."
+                    if count == 1
+                    else "; none shows a sign of a transaction, and whether they are running cannot be told."
+                )
+            else:
+                sentence += (
+                    f". {count - quiet} {_is(count - quiet)} in a transaction; for the other {quiet}, which show"
+                    f"{'s' if quiet == 1 else ''} no sign of one, whether {'it is' if quiet == 1 else 'they are'} running "
+                    "cannot be told."
+                )
+            sentences.append(sentence)
+        return _noting(access, sentences)
+
+    if listed:
+        count = len(listed)
+        their = "its" if count == 1 else "their"
+        sentences.append(
+            f"{count} of these backends, {_owners(listed)}, {_is(count)} in a transaction, and PostgreSQL shows {access.role} "
+            f"{their} locks but not {their} state, query, wait or timings."
+        )
+    # Ones that entered a transaction between the two reads are neither
+    # listed nor quiet, and are left to the next run.
+    quiet = [backend for backend in unlisted if not backend.get("in_transaction")]
+    if quiet:
+        count = len(quiet)
+        sentence = (
+            f"{count} other backend{'s' if count != 1 else ''}, {_owners(quiet)}, {_is(count)} not listed: "
+            f"{'it shows' if count == 1 else 'they show'} no sign of a transaction, and whether {'it is' if count == 1 else 'they are'} "
+            f"running cannot be told; --all lists {'it' if count == 1 else 'them'}."
+        )
+        blockers = [backend for backend in quiet if backend.get("blocking")]
+        if blockers:
+            # A session-level advisory lock outlives the transaction that took it.
+            sentence += " Even so, " + "; ".join(f"{backend.get('pid')} blocks {_series(backend['blocking'])}" for backend in blockers) + "."
+        sentences.append(sentence)
+    return _noting(access, sentences)
+
+
+def _withheld_blocker(backend: Mapping[str, Any]) -> str:
+    """A sentence on a withheld backend others wait on, with what PostgreSQL still shows of it."""
+    who = f"{backend.get('usename') or 'the server'}@{backend.get('datname') or '?'}"
+    if backend.get("application_name"):
+        who += f" {backend['application_name']}"
+    state = "in a transaction" if backend.get("in_transaction") else "not in a transaction"
+    holds = f" and holds {', '.join(backend['locks'])}" if backend.get("locks") else ""
+    return (
+        f"Pid {backend.get('pid')} ({who}), which blocks {_series(backend.get('blocking') or [])}, is {state}{holds}; "
+        "its state, query and wait are withheld."
+    )
+
+
+def note_withheld_lock_tree(access: StatisticsAccess, roots: Sequence[Mapping[str, Any]]) -> str | None:
+    """What ``locks`` could not show of the backends in its trees, and why."""
+    withheld = {node.get("pid"): node for node in lock_tree_nodes(roots) if is_withheld(node)}
+    if not withheld:
+        return None
+    count = len(withheld)
+    return _noting(
+        access,
+        [
+            f"{count} of the backends in these trees, {_owners(withheld.values())}, {_is(count)} shown without state, query, "
+            "wait or timings; who blocks whom is complete, since pg_locks shows every role's locks."
+        ],
+    )
+
+
+def lock_tree_nodes(nodes: Iterable[Mapping[str, Any]]) -> Iterable[Mapping[str, Any]]:
+    """Every node of these lock trees, each root before the backends waiting on it."""
+    for node in nodes:
+        yield node
+        yield from lock_tree_nodes(node.get("blocking") or [])
+
+
+def note_withheld_vacuums(access: StatisticsAccess, rows: Sequence[Mapping[str, Any]]) -> str | None:
+    """What ``vacuum-progress`` could not show of the vacuums it lists, and why."""
+    count = sum(1 for row in rows if is_withheld(row))
+    if not count:
+        return None
+    return _noting(
+        access,
+        [
+            f"{count} of these vacuums {_is(count)} shown without table, phase or progress, and whether "
+            f"{'it is' if count == 1 else 'they are'} autovacuum cannot be told."
+        ],
+    )
+
+
+def note_withheld_queries(access: StatisticsAccess, rows: Sequence[Mapping[str, Any]]) -> str | None:
+    """What ``top-queries`` could not show of the statements it lists, and why."""
+    count = sum(1 for row in rows if is_withheld(row))
+    if not count:
+        return None
+    its = "its" if count == 1 else "their"
+    whose = "is another role's" if count == 1 else "are other roles'"
+    return _noting(access, [f"{count} of these queries {whose}: pg_stat_statements shows {access.role} {its} counters but not {its} text."])
+
+
+def note_withheld_sample(access: StatisticsAccess, withheld: int, sort_by: str) -> str | None:
+    """What ``top-queries --interval`` left out of its ranking, and why."""
+    if not withheld:
+        return None
+    its = "its" if withheld == 1 else "their"
+    sentence = (
+        f"{withheld} statement{'s' if withheld != 1 else ''} of other roles ran during the interval and {_is(withheld)} not "
+        f"ranked: pg_stat_statements shows {access.role} neither {its} text nor {its} queryid, so {its} counters cannot be "
+        "followed from one snapshot to the next."
+    )
+    if sort_by == "resources":
+        sentence += " The resource shares are of the ranked statements alone."
+    return _noting(access, [sentence])
+
+
 __all__ = [
+    "Shown",
     "format_duration",
+    "lock_tree_nodes",
+    "note_withheld_backends",
+    "note_withheld_lock_tree",
+    "note_withheld_queries",
+    "note_withheld_sample",
+    "note_withheld_vacuums",
     "render_activity",
     "render_column_stats",
     "render_configuration_review",
@@ -591,4 +882,5 @@ __all__ = [
     "render_rows",
     "render_vacuum_progress",
     "to_json",
+    "withheld_because",
 ]

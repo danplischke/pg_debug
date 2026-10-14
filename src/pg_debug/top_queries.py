@@ -1,5 +1,7 @@
 import asyncio
 import logging
+from collections import Counter
+from dataclasses import asdict
 from dataclasses import dataclass
 from typing import Any
 from typing import Literal
@@ -13,11 +15,6 @@ from .db import SqlDriver
 from .db import workload_only as _workload_only
 from .db.extensions import check_extension
 from .db.extensions import get_postgres_version
-from .db.privileges import HIDDEN_QUERY_TEXT
-from .db.privileges import MISSING_PRIVILEGE
-from .db.privileges import StatisticsRows
-from .db.privileges import statistics_access
-from .db.privileges import withheld_rows
 from .errors import ExtensionRequiredError
 from .errors import InvalidArgumentError
 
@@ -40,6 +37,42 @@ install_pg_stat_statements_message = (
     "monitoring. It adds overhead by tracking statistics, "
     "but this is usually negligible unless under extreme load."
 )
+
+
+#: What pg_stat_statements still shows of a statement whose queryid and text it
+#: withholds from the role: by these, a statement that did not run between two
+#: snapshots is found in both.
+_WITHHELD_IDENTITY = (
+    "userid",
+    "dbid",
+    "calls",
+    "total_exec_time",
+    "rows",
+    "shared_blks_hit",
+    "shared_blks_read",
+    "shared_blks_dirtied",
+    "wal_bytes",
+)
+
+
+@dataclass(frozen=True)
+class QuerySample:
+    """Query activity measured over an interval, and what the measurement had to leave out.
+
+    Attributes:
+        queries: The ranking, as :meth:`TopQueriesCalc.sample` returns it.
+        withheld: How many of other roles' statements ran during the interval
+            and are not in ``queries``: pg_stat_statements withholds their
+            queryid and text from a role without pg_read_all_stats, so their
+            counters cannot be followed from one snapshot to the next. 0 for a
+            role shown everything.
+    """
+
+    queries: list[dict[str, Any]]
+    withheld: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass
@@ -108,33 +141,12 @@ class TopQueriesCalc:
             logger.warning("Extension %s is not installed", PG_STAT_STATEMENTS)
             raise ExtensionRequiredError(PG_STAT_STATEMENTS, install_pg_stat_statements_message)
 
-    async def _noting_hidden_text(self, queries: list[dict[str, Any]]) -> StatisticsRows:
-        """The queries, saying how many of them pg_stat_statements showed without their text.
-
-        It shows a role the text of its own statements only, unless the role
-        holds pg_read_all_stats. The server is asked which once, and only when
-        some text was withheld, so a role that is shown everything pays
-        nothing for the question.
-        """
-        withheld = withheld_rows(queries)
-        if not withheld:
-            return StatisticsRows(queries)
-        access = await statistics_access(self.sql_driver)
-        if access.reads_all_stats:
-            return StatisticsRows(queries)
-        whose, their = ("are other roles'", "their") if withheld != 1 else ("is another role's", "its")
-        hidden = (
-            f"{withheld} of these queries {whose}: pg_stat_statements shows {access.role} {their} text as "
-            f"{HIDDEN_QUERY_TEXT}, because it {MISSING_PRIVILEGE}."
-        )
-        return StatisticsRows(queries, hidden=hidden, hidden_count=withheld)
-
     async def sample(
         self,
         interval_seconds: float,
         sort_by: Literal["resources", "mean", "total"] = "total",
         limit: int = 10,
-    ) -> StatisticsRows:
+    ) -> list[dict[str, Any]]:
         """Measure query activity over an interval instead of since the last reset.
 
         pg_stat_statements counters are cumulative, so the usual ranking is
@@ -155,12 +167,36 @@ class TopQueriesCalc:
         Returns:
             One dict per query that ran during the interval, with the counters
             accumulated over it. ``mean_exec_time`` is recomputed from the
-            interval, not carried over from the cumulative view. The list's
-            ``hidden`` says how many came without their text, or is None.
+            interval, not carried over from the cumulative view. Other roles'
+            statements whose queryid pg_stat_statements withholds from the
+            role are left out; :meth:`measure` says how many ran.
 
         Raises:
             ExtensionRequiredError: If pg_stat_statements is not installed.
             InvalidArgumentError: If the interval is not positive.
+        """
+        return (await self.measure(interval_seconds, sort_by=sort_by, limit=limit)).queries
+
+    async def measure(
+        self,
+        interval_seconds: float,
+        sort_by: Literal["resources", "mean", "total"] = "total",
+        limit: int = 10,
+    ) -> QuerySample:
+        """The ranking :meth:`sample` returns, and how many statements it had to leave out.
+
+        A role without pg_read_all_stats, which pg_monitor includes, is shown
+        other roles' statements with their counters but neither their text nor
+        their queryid. Without a queryid a statement cannot be followed from
+        one snapshot to the next, so those are not ranked: subtracting one's
+        counters from another's would report activity no statement had. They
+        are counted instead: a statement that did not run is in both snapshots
+        with the same counters, so the ones in the second snapshot that the
+        first has no exact match for are the ones that ran. The resource
+        shares of the ranked statements are shares of the ranked statements.
+
+        Takes the same arguments, and raises the same errors, as
+        :meth:`sample`.
         """
         if interval_seconds <= 0:
             raise InvalidArgumentError("The sampling interval must be greater than zero seconds.")
@@ -171,11 +207,38 @@ class TopQueriesCalc:
         await asyncio.sleep(interval_seconds)
         after = await self._counter_snapshot()
 
-        deltas = self._diff_snapshots(before, after)
-        return await self._noting_hidden_text(self._rank(deltas, sort_by=sort_by, limit=limit))
+        deltas = self._diff_snapshots(self._by_statement(before), self._by_statement(after))
+        return QuerySample(
+            queries=self._rank(deltas, sort_by=sort_by, limit=limit),
+            withheld=self._withheld_that_ran(before, after),
+        )
 
-    async def _counter_snapshot(self) -> dict[Any, dict[str, Any]]:
-        """Read the raw per-query counters, keyed by query identity."""
+    @staticmethod
+    def _by_statement(rows: list[dict[str, Any]]) -> dict[Any, dict[str, Any]]:
+        """The rows the role is shown the identity of, keyed by it."""
+        return {(row["queryid"], row["userid"], row["dbid"]): row for row in rows if row.get("queryid") is not None}
+
+    @staticmethod
+    def _withheld_that_ran(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> int:
+        """How many of the statements whose queryid is withheld ran between the two snapshots.
+
+        One that did not run is in both with the same user, database and
+        counters, so it cancels out; one that ran, or is new, is in the second
+        with counters no row of the first has. The count can only fall short,
+        and only by a statement whose counters after the interval equal, to the
+        microsecond of execution time, another's before it.
+        """
+
+        def withheld(rows: list[dict[str, Any]]) -> Counter[tuple[Any, ...]]:
+            return Counter(tuple(row.get(field) for field in _WITHHELD_IDENTITY) for row in rows if row.get("queryid") is None)
+
+        ran = withheld(after) - withheld(before)
+        calls = _WITHHELD_IDENTITY.index("calls")
+        # An entry is made when a statement is parsed, before it has run.
+        return sum(count for counters, count in ran.items() if (counters[calls] or 0) > 0)
+
+    async def _counter_snapshot(self) -> list[dict[str, Any]]:
+        """Read the raw per-query counters, one row per pg_stat_statements entry."""
         pg_version = await get_postgres_version(self.sql_driver)
         cols = _get_pg_stat_statements_columns(pg_version)
 
@@ -200,7 +263,7 @@ class TopQueriesCalc:
             """,
         )
         rows = await SafeSqlDriver.execute_param_query(self.sql_driver, query)
-        return {(r.cells["queryid"], r.cells["userid"], r.cells["dbid"]): dict(r.cells) for r in rows} if rows else {}
+        return [dict(r.cells) for r in rows] if rows else []
 
     @staticmethod
     def _is_own_bookkeeping(query: Any) -> bool:
@@ -217,7 +280,12 @@ class TopQueriesCalc:
 
     @staticmethod
     def _diff_snapshots(before: dict[Any, dict[str, Any]], after: dict[Any, dict[str, Any]]) -> list[dict[str, Any]]:
-        """Subtract two snapshots, keeping only queries that ran in between."""
+        """Subtract two snapshots, keeping only queries that ran in between.
+
+        The snapshots are keyed by statement, as :meth:`_by_statement` keys
+        them: a statement whose queryid is withheld is not one statement in
+        either, has no delta, and is counted by :meth:`_withheld_that_ran`.
+        """
         counters = ("calls", "total_exec_time", "rows", "shared_blks_hit", "shared_blks_read", "shared_blks_dirtied", "wal_bytes")
         deltas: list[dict[str, Any]] = []
 
@@ -269,7 +337,7 @@ class TopQueriesCalc:
 
         return deltas[:limit]
 
-    async def get_top_queries_by_time(self, limit: int = 10, sort_by: Literal["total", "mean"] = "mean") -> StatisticsRows:
+    async def get_top_queries_by_time(self, limit: int = 10, sort_by: Literal["total", "mean"] = "mean") -> list[dict[str, Any]]:
         """Reports the slowest SQL queries based on execution time.
 
         Args:
@@ -279,8 +347,7 @@ class TopQueriesCalc:
 
         Returns:
             One dict per query with its query text, call count, total and mean
-            execution time, and row count. The list's ``hidden`` says how many
-            came without their text, or is None.
+            execution time, and row count.
 
         Raises:
             ExtensionRequiredError: If pg_stat_statements is not installed.
@@ -319,9 +386,9 @@ class TopQueriesCalc:
         )
         slow_queries = [row.cells for row in slow_query_rows] if slow_query_rows else []
         logger.info("Found %s slow queries", len(slow_queries))
-        return await self._noting_hidden_text(slow_queries)
+        return slow_queries
 
-    async def get_top_resource_queries(self, frac_threshold: float = 0.05) -> StatisticsRows:
+    async def get_top_resource_queries(self, frac_threshold: float = 0.05) -> list[dict[str, Any]]:
         """Reports the most time consuming queries based on a resource blend.
 
         A query is reported when it accounts for more than ``frac_threshold`` of
@@ -333,8 +400,6 @@ class TopQueriesCalc:
 
         Returns:
             One dict per query with its execution, buffer and WAL statistics.
-            The list's ``hidden`` says how many came without their text, or is
-            None.
 
         Raises:
             ExtensionRequiredError: If pg_stat_statements is not installed.
@@ -411,4 +476,4 @@ class TopQueriesCalc:
         )
         resource_queries = [row.cells for row in slow_query_rows] if slow_query_rows else []
         logger.info("Found %s resource-intensive queries", len(resource_queries))
-        return await self._noting_hidden_text(resource_queries)
+        return resource_queries

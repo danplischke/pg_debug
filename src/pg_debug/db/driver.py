@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import functools
 import logging
 import re
+import time
 from collections.abc import AsyncIterator
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import LiteralString
+from typing import Self
 from urllib.parse import urlparse
 from urllib.parse import urlunparse
 
@@ -22,6 +26,8 @@ from psycopg.sql import SQL
 from psycopg.sql import Composed
 from psycopg.sql import Literal
 from psycopg_pool import AsyncConnectionPool
+from psycopg_pool import PoolClosed
+from psycopg_pool import PoolTimeout
 
 from ..errors import ConnectionFailedError
 from ..errors import InvalidArgumentError
@@ -178,18 +184,49 @@ MAX_STATEMENT_TIMEOUT = 2_147_483
 #: How long, in seconds, a pooled connection may sit unused before the pool
 #: closes it.
 #:
-#: The pool keeps none open while idle, because an open connection keeps a
-#: scale-to-zero compute awake: Aurora Serverless v2 does not pause while a
-#: client holds one, and a long-lived application that made one call would
-#: hold it for good. psycopg_pool closes idle connections one at a time, once
-#: every ``max_idle`` seconds, and only one that went unused for a whole
-#: interval: a connection is closed one to two intervals after its last use,
-#: and the five the pool can grow to within six. At 30 seconds that is three
-#: minutes, inside the five minutes that are the shortest pause delay Aurora
-#: offers. A caller that comes back less often reconnects each time, which
-#: costs a connection's setup; the CLI closes its pool when the command ends,
-#: and is not affected either way.
+#: The pool keeps none open while idle (``min_size=0``), because an open
+#: connection keeps a scale-to-zero compute awake: Aurora Serverless v2 does
+#: not pause while a client holds one, and a long-lived application that made
+#: one call would hold it for good. psycopg_pool closes idle connections one
+#: at a time, once every ``max_idle`` seconds, and only one that went unused
+#: for a whole interval: a connection is closed one to two intervals after its
+#: last use, and the five the pool can grow to within six. At 30 seconds that
+#: is three minutes, inside the five minutes that are the shortest pause delay
+#: Aurora offers. The CLI closes its pool when the command ends, and is not
+#: affected either way.
+#:
+#: What it costs a long-lived client: a call after an idle spell connects
+#: again, which adds a connection's setup to it (and the wake of a paused
+#: compute), and it needs the server to accept a new connection. That is least
+#: likely when a diagnosis is most wanted: with ``max_connections`` or the
+#: role's connection limit reached, a client that held its connection could
+#: still ask what holds the others, and one that let it go is refused. The
+#: refusal is reported at once, with the server's reason, rather than after
+#: the pool's 30-second wait (see :meth:`DbConnPool.connection`). A shorter
+#: wait would not do it: a resuming compute holds the first connection
+#: attempt open while it starts, which on Aurora takes seconds to tens of
+#: seconds, and a refusal arrives at once anyway.
 POOL_MAX_IDLE = 30.0
+
+
+def _reporting_connection(on_failure: Callable[[Exception], None]) -> type[psycopg.AsyncConnection[Any]]:
+    """psycopg's connection class, telling ``on_failure`` why an attempt to connect failed.
+
+    psycopg_pool connects in a task of its own and only logs a failure, while
+    a caller waiting for the connection waits on until its timeout and is
+    told then only that none came.
+    """
+
+    class ReportingConnection(psycopg.AsyncConnection[Any]):
+        @classmethod
+        async def connect(cls, conninfo: str = "", **kwargs: Any) -> Self:
+            try:
+                return await super().connect(conninfo, **kwargs)
+            except Exception as error:
+                on_failure(error)
+                raise
+
+    return ReportingConnection
 
 
 def check_statement_timeout(seconds: int | None) -> None:
@@ -298,6 +335,12 @@ class DbConnPool:
         self.reads_sql_ascii_as_utf8 = False
         self._is_valid = False
         self._last_error = None
+        # Connections borrowed through connection() and not yet returned.
+        self._borrowed = 0
+        # When the pool's last attempt to connect failed, and why.
+        self._refusal: tuple[float, Exception] | None = None
+        # A pool being closed because no connection could come to its waiters.
+        self._abandoning: asyncio.Task[None] | None = None
 
     async def pool_connect(self, connection_url: str | None = None) -> AsyncConnectionPool:
         """Initialize connection pool with retry logic."""
@@ -315,6 +358,7 @@ class DbConnPool:
         # Close any existing pool before creating a new one
         await self.close()
 
+        asked_at = time.monotonic()
         try:
             pool, encoding = await self._open(url)
             # Decided from what the server reports once connected, not from
@@ -333,13 +377,94 @@ class DbConnPool:
             self._last_error = None
             return pool
         except Exception as e:
+            # A refused first connection fails the wait as it would a later
+            # one; what the server said is the reason, not the wait's end.
+            cause = self._refusal_since(asked_at) or e
             self._is_valid = False
-            self._last_error = str(e)
+            self._last_error = str(cause)
 
             # Clean up failed pool
             await self.close()
 
-            raise ConnectionFailedError(f"Could not connect to database: {obfuscate_password(str(e))}") from e
+            raise ConnectionFailedError(f"Could not connect to database: {obfuscate_password(str(cause))}") from e
+
+    @asynccontextmanager
+    async def connection(self) -> AsyncIterator[Any]:
+        """Borrow a connection from the pool for the length of the block.
+
+        The pool keeps no connection while idle (see :data:`POOL_MAX_IDLE`),
+        so a borrow after an idle spell waits for the pool to connect. When
+        that attempt fails and no connection in use can come back instead,
+        the wait ends at once, with what the server said; otherwise the pool
+        tries again, and the wait ends after the pool's timeout.
+
+        Raises:
+            ConnectionFailedError: If no connection could be had: with the
+                server's reason when an attempt to connect failed, and saying
+                so when the pool's connections were all in use or an attempt
+                was still under way when the wait ran out.
+        """
+        pool = await self.pool_connect()
+        asked_at = time.monotonic()
+        borrowed = False
+        try:
+            async with pool.connection() as connection:
+                borrowed = True
+                self._borrowed += 1
+                try:
+                    yield connection
+                finally:
+                    self._borrowed -= 1
+        except (PoolTimeout, PoolClosed) as e:
+            if borrowed:
+                raise
+            raise self._no_connection(pool, e, asked_at) from e
+
+    def _no_connection(self, pool: AsyncConnectionPool, error: Exception, asked_at: float) -> ConnectionFailedError:
+        """Why a borrow got no connection, as the error pg_debug raises."""
+        refusal = self._refusal_since(asked_at)
+        if refusal is not None:
+            return ConnectionFailedError(f"Could not connect to database: {obfuscate_password(str(refusal))}")
+        if isinstance(error, PoolTimeout):
+            waited = f"{pool.timeout:.0f} seconds"
+            if self._borrowed >= pool.max_size:
+                return ConnectionFailedError(f"No pooled connection came free within {waited}: all {self._borrowed} are in use.")
+            return ConnectionFailedError(f"Could not connect to database within {waited}: the attempt to connect had not finished.")
+        return ConnectionFailedError(f"Could not connect to database: {obfuscate_password(str(error))}")
+
+    def _refusal_since(self, moment: float) -> Exception | None:
+        """Why the pool's last attempt to connect failed, if it failed after this moment."""
+        if self._refusal is not None and self._refusal[0] >= moment:
+            return self._refusal[1]
+        return None
+
+    def _connect_failed(self, built: list[AsyncConnectionPool], error: Exception) -> None:
+        """Hear from the pool's connection class that an attempt to connect failed.
+
+        psycopg_pool tries again later and leaves a caller waiting until its
+        timeout. When the pool has no connection to give, none in use to come
+        back, and a caller waiting, the next attempt is all that caller waits
+        for, and a refusal now is usually a refusal then: too many
+        connections, a role or database that does not exist, a password that
+        is wrong. So the pool is closed, which fails the waiting caller at
+        once; :meth:`connection` gives it this error as the reason, and the
+        next call starts a new pool.
+        """
+        self._refusal = (time.monotonic(), error)
+        pool = built[0] if built else None
+        if pool is None or pool is not self.pool or self._borrowed:
+            return
+        stats = pool.get_stats()
+        if stats.get("pool_available", 0) or not stats.get("requests_waiting", 0):
+            return
+        self._is_valid = False
+        self._abandoning = asyncio.ensure_future(self._abandon(pool))
+
+    async def _abandon(self, pool: AsyncConnectionPool) -> None:
+        try:
+            await pool.close()
+        except Exception as e:
+            logger.warning("Error closing a connection pool that could not connect: %s", e)
 
     async def _open(self, conninfo: str) -> tuple[AsyncConnectionPool, str | None]:
         """Open the pool on a connection string, test it, and return it with the client encoding it reports.
@@ -353,12 +478,15 @@ class DbConnPool:
         PgBouncer keeps one for each client, and sets it on whichever backend
         serves that client.
         """
+        # The pool, once built, for the connection class to report on.
+        built: list[AsyncConnectionPool] = []
         self.pool = AsyncConnectionPool(
             conninfo=conninfo,
             # None kept open while the client is idle: see POOL_MAX_IDLE.
             min_size=0,
             max_size=5,
             max_idle=POOL_MAX_IDLE,
+            connection_class=_reporting_connection(functools.partial(self._connect_failed, built)),
             open=False,  # Don't connect immediately, let's do it explicitly
             # psycopg prepares a statement on the server once it has run
             # five times on a connection. Behind a transaction pooler the
@@ -370,6 +498,7 @@ class DbConnPool:
             # often enough for preparing them to save anything.
             kwargs={"prepare_threshold": None},
         )
+        built.append(self.pool)
 
         # Open the pool explicitly
         await self.pool.open()
@@ -383,6 +512,9 @@ class DbConnPool:
 
     async def close(self) -> None:
         """Close the connection pool."""
+        if self._abandoning is not None:
+            await self._abandoning
+            self._abandoning = None
         if self.pool:
             try:
                 # Close the pool
@@ -515,9 +647,8 @@ class SqlDriver:
             yield self
             return
 
-        pool = await self.conn.pool_connect()
         try:
-            async with pool.connection() as connection:
+            async with self.conn.connection() as connection:
                 self._pinned_connection = connection
                 try:
                     yield self
@@ -605,8 +736,7 @@ class SqlDriver:
             # Handle connection pool vs direct connection
             if self.is_pool:
                 # For pools, get a connection from the pool
-                pool = await self.conn.pool_connect()
-                async with pool.connection() as connection:
+                async with self.conn.connection() as connection:
                     return await self._execute_with_connection(
                         connection, query, params, force_readonly=force_readonly, in_context=in_context, cleanup=cleanup
                     )
@@ -849,8 +979,7 @@ class SqlDriver:
             if self._pinned_connection is not None:
                 return await self._execute_rolled_back(self._pinned_connection, query, params, in_context=in_context)
             if self.is_pool:
-                pool = await self.conn.pool_connect()
-                async with pool.connection() as connection:
+                async with self.conn.connection() as connection:
                     return await self._execute_rolled_back(connection, query, params, in_context=in_context)
             return await self._execute_rolled_back(self.conn, query, params, in_context=in_context)
         except psycopg.Error as e:

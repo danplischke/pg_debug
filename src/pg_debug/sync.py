@@ -24,7 +24,7 @@ from .client import TuningMethod
 from .configuration import ConfigFinding
 from .context import QueryContext
 from .db import DbConnPool
-from .db.privileges import StatisticsRows
+from .db.privileges import StatisticsAccess
 from .health import HealthCheckResult
 from .health import HealthType
 from .index_use import IndexUse
@@ -40,6 +40,7 @@ from .plans import PlanFinding
 from .plans import PlanInput
 from .plans.tree import ExplainPlanArtifact
 from .schema import ObjectType
+from .top_queries import QuerySample
 
 T = TypeVar("T")
 
@@ -262,7 +263,7 @@ class SyncPgDebug:
         include_idle: bool = False,
         min_duration_seconds: float | None = None,
         blocked_only: bool = False,
-    ) -> StatisticsRows:
+    ) -> list[dict[str, Any]]:
         """Report what the server is doing right now."""
         return self._call(
             self._client.list_activity,
@@ -271,11 +272,11 @@ class SyncPgDebug:
             blocked_only=blocked_only,
         )
 
-    def vacuum_progress(self) -> StatisticsRows:
+    def vacuum_progress(self) -> list[dict[str, Any]]:
         """Report running vacuums and how far along they are."""
         return self._call(self._client.vacuum_progress)
 
-    def lock_tree(self) -> StatisticsRows:
+    def lock_tree(self) -> list[dict[str, Any]]:
         """Report who is blocking whom, root blockers first."""
         return self._call(self._client.lock_tree)
 
@@ -293,9 +294,28 @@ class SyncPgDebug:
         sort_by: SortBy = "resources",
         limit: int = 10,
         interval_seconds: float | None = None,
-    ) -> StatisticsRows:
+    ) -> list[dict[str, Any]]:
         """Report the most expensive queries recorded by pg_stat_statements."""
         return self._call(self._client.get_top_queries, sort_by=sort_by, limit=limit, interval_seconds=interval_seconds)
+
+    def sample_top_queries(
+        self,
+        interval_seconds: float,
+        sort_by: SortBy = "resources",
+        limit: int = 10,
+    ) -> QuerySample:
+        """Measure the most expensive queries over an interval, and say what the ranking left out."""
+        return self._call(self._client.sample_top_queries, interval_seconds, sort_by=sort_by, limit=limit)
+
+    # -- What the statistics views withhold ----------------------------------
+
+    def statistics_access(self) -> StatisticsAccess:
+        """Whether the connecting role is shown every role's activity and statements."""
+        return self._call(self._client.statistics_access)
+
+    def withheld_backends(self) -> list[dict[str, Any]]:
+        """The backends whose details PostgreSQL withholds from the connecting role, and what it still shows of them."""
+        return self._call(self._client.withheld_backends)
 
     # -- Index tuning --------------------------------------------------------
 

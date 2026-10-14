@@ -3,15 +3,27 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
+from collections.abc import Iterable
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 from typing import Any
 
+from ..db.privileges import is_withheld
+from .render import Shown
+from .render import lock_tree_nodes
+from .render import note_withheld_backends
+from .render import note_withheld_lock_tree
+from .render import note_withheld_queries
+from .render import note_withheld_sample
+from .render import note_withheld_vacuums
 from .streams import read_sql
 from .streams import read_sql_or_file
 from .streams import read_stdin
 
 if TYPE_CHECKING:
     from ..client import PgDebug
+    from ..db.privileges import StatisticsAccess
 
 
 async def cmd_schemas(pg: PgDebug, args: argparse.Namespace) -> Any:
@@ -58,19 +70,62 @@ async def cmd_column_stats(pg: PgDebug, args: argparse.Namespace) -> Any:
 
 
 async def cmd_activity(pg: PgDebug, args: argparse.Namespace) -> Any:
-    return await pg.list_activity(
+    rows = await pg.list_activity(
         include_idle=args.include_idle,
         min_duration_seconds=args.min_duration,
         blocked_only=args.blocked,
     )
+    # Whether something was withheld shows in the rows only when every
+    # backend is listed. Otherwise the server is asked, once; a role shown
+    # everything is asked nothing more.
+    if args.blocked and not rows:
+        return rows
+    if args.include_idle and args.min_duration is None and not args.blocked and not any(is_withheld(row) for row in rows):
+        return rows
+    access = await pg.statistics_access()
+    if access.reads_all_stats:
+        return rows
+    withheld = await pg.withheld_backends()
+    by_pid = {backend.get("pid"): backend for backend in withheld}
+    # The text fills in what the server still shows of a withheld backend;
+    # --json prints the rows as the library returned them.
+    text = [
+        {**row, "locks": by_pid[row["pid"]].get("locks"), "blocking": by_pid[row["pid"]].get("blocking")}
+        if is_withheld(row) and row.get("pid") in by_pid
+        else row
+        for row in rows
+    ]
+    note = note_withheld_backends(access, rows, withheld, include_idle=args.include_idle, min_duration=args.min_duration, blocked_only=args.blocked)
+    return Shown(rows, text=text, note=note)
 
 
 async def cmd_locks(pg: PgDebug, args: argparse.Namespace) -> Any:
-    return await pg.lock_tree()
+    roots = await pg.lock_tree()
+    return await _noting(pg, roots, lock_tree_nodes(roots), note_withheld_lock_tree)
 
 
 async def cmd_vacuum_progress(pg: PgDebug, args: argparse.Namespace) -> Any:
-    return await pg.vacuum_progress()
+    vacuums = await pg.vacuum_progress()
+    return await _noting(pg, vacuums, vacuums, note_withheld_vacuums)
+
+
+async def _noting(
+    pg: PgDebug,
+    result: Any,
+    rows: Iterable[Mapping[str, Any]],
+    note: Callable[[StatisticsAccess, Any], str | None],
+) -> Any:
+    """The result, with what PostgreSQL withheld of its rows from the role and why.
+
+    The server is asked why only when a row shows it withheld something, so a
+    role that is shown everything is asked nothing more.
+    """
+    if not any(is_withheld(row) for row in rows):
+        return result
+    access = await pg.statistics_access()
+    if access.reads_all_stats:
+        return result
+    return Shown(result, note=note(access, result))
 
 
 async def cmd_health(pg: PgDebug, args: argparse.Namespace) -> Any:
@@ -103,7 +158,16 @@ async def cmd_model(pg: PgDebug, args: argparse.Namespace) -> Any:
 
 
 async def cmd_top_queries(pg: PgDebug, args: argparse.Namespace) -> Any:
-    return await pg.get_top_queries(sort_by=args.sort_by, limit=args.limit, interval_seconds=args.interval)
+    if args.interval is None:
+        queries = await pg.get_top_queries(sort_by=args.sort_by, limit=args.limit)
+        return await _noting(pg, queries, queries, note_withheld_queries)
+    sample = await pg.sample_top_queries(args.interval, sort_by=args.sort_by, limit=args.limit)
+    if not sample.withheld:
+        return sample.queries
+    access = await pg.statistics_access()
+    if access.reads_all_stats:
+        return sample.queries
+    return Shown(sample.queries, note=note_withheld_sample(access, sample.withheld, args.sort_by))
 
 
 async def cmd_tune_workload(pg: PgDebug, args: argparse.Namespace) -> Any:

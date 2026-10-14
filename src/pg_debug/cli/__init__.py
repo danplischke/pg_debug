@@ -34,6 +34,7 @@ from .parser import build_parser
 from .parser import parse_index_spec
 from .parser import parse_size
 from .parser import split_index_columns
+from .render import Shown
 from .render import render_baseline_trailer
 from .render import render_incomplete_health_run
 from .render import to_json
@@ -96,6 +97,12 @@ async def run(args: argparse.Namespace) -> int:
     ) as pg:
         result = await args.func(pg, args)
 
+    # What PostgreSQL withheld from the role goes to standard error in both
+    # outputs: --json keeps printing the rows the library returned, as the
+    # array scripts read.
+    shown = result if isinstance(result, Shown) else Shown(result)
+    result = shown.rows
+
     # Health checks that could not run. A baseline of such a run would hold
     # nothing for them, so it is not saved: the refusal is said, with them,
     # once the report is printed.
@@ -112,12 +119,9 @@ async def run(args: argparse.Namespace) -> int:
         baseline = Baseline.load(args.baseline, args.command)
         split = partition(args.command, result, baseline)
 
-    print(format_result(args, result, baseline))
-    hidden = getattr(result, "hidden", None)
-    if hidden and args.json:
-        # The rows stay the array a script reads. What PostgreSQL withheld
-        # from the role goes beside them, as the text puts it under them.
-        print(f"{PROG}: {hidden}", file=sys.stderr)
+    print(format_result(args, result if args.json or shown.text is None else shown.text, baseline))
+    if shown.note:
+        print(f"{PROG}: {shown.note}", file=sys.stderr)
     if split is not None and not args.json:
         print(render_baseline_trailer(args.baseline, split, could_not_run=len(could_not_run)))
 

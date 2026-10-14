@@ -2,13 +2,21 @@ import json
 from datetime import datetime
 from decimal import Decimal
 
+from pg_debug.cli.render import note_withheld_backends
+from pg_debug.cli.render import note_withheld_lock_tree
+from pg_debug.cli.render import note_withheld_queries
+from pg_debug.cli.render import note_withheld_sample
+from pg_debug.cli.render import note_withheld_vacuums
+from pg_debug.cli.render import render_activity
 from pg_debug.cli.render import render_index_recommendations
 from pg_debug.cli.render import render_lock_tree
 from pg_debug.cli.render import render_mapping
 from pg_debug.cli.render import render_object_details
 from pg_debug.cli.render import render_rows
+from pg_debug.cli.render import render_vacuum_progress
 from pg_debug.cli.render import to_json
-from pg_debug.db.privileges import StatisticsRows
+from pg_debug.db.privileges import HIDDEN_QUERY_TEXT
+from pg_debug.db.privileges import StatisticsAccess
 
 
 def test_to_json_handles_database_types():
@@ -202,16 +210,187 @@ def test_an_empty_lock_tree_says_so():
     assert render_lock_tree([]) == "(nothing is blocked)"
 
 
-def test_a_lock_tree_ends_with_what_the_role_was_not_shown():
-    note = "2 of the backends in these trees are shown without state, query or timings. ..."
-    tree = StatisticsRows(
-        [{"pid": 41, "usename": "postgres", "datname": "app", "query": "<insufficient privilege>", "blocked_total": 0, "blocking": []}],
-        hidden=note,
+# -- What PostgreSQL withheld from the role ---------------------------------
+
+PLAIN = StatisticsAccess(role="app_user", reads_all_stats=False, remedy="GRANT pg_monitor TO app_user")
+NOINHERIT = StatisticsAccess(role="app_user", reads_all_stats=False, member=True, remedy="GRANT pg_monitor TO app_user WITH INHERIT TRUE")
+LOCKS = ["AccessExclusiveLock on public.orders", "ExclusiveLock on advisory lock 42"]
+
+
+def withheld(pid, **fields):
+    """A backend as PostgreSQL shows it to a role without pg_read_all_stats."""
+    return {
+        "pid": pid,
+        "datname": "shop",
+        "usename": "postgres",
+        "application_name": "worker",
+        "state": None,
+        "backend_type": None,
+        "blocked_by": [],
+        "in_transaction": True,
+        "query": HIDDEN_QUERY_TEXT,
+        **fields,
+    }
+
+
+def test_a_withheld_backend_reads_as_in_a_transaction_with_what_is_still_shown():
+    text = render_activity([withheld(41, locks=LOCKS, blocking=[42, 43])])
+
+    (row,) = [line for line in text.splitlines() if line.startswith("41")]
+    assert "in a transaction" in row
+    # Not cut at the table's cell width: the locks are why it is listed.
+    assert row.endswith(
+        "state, query and wait withheld; holds AccessExclusiveLock on public.orders, ExclusiveLock on advisory lock 42; "
+        "blocking 42, 43; database shop, application worker"
+    )
+    assert HIDDEN_QUERY_TEXT not in text
+
+
+def test_a_withheld_backend_outside_a_transaction_says_so():
+    text = render_activity([withheld(41, in_transaction=False, application_name="")])
+
+    assert "not in a transaction" in text
+    assert text.splitlines()[2].endswith("state, query and wait withheld; database shop")
+
+
+def test_visible_backends_render_as_before():
+    row = {"pid": 7, "usename": "app", "state": "active", "state_seconds": 1.5, "blocked_by": [], "query": "SELECT " + "x, " * 60 + "1"}
+
+    text = render_activity([row])
+
+    assert "active" in text
+    assert "…" in text, "a long query is still cut to the cell width"
+
+
+def test_a_withheld_blocker_in_the_lock_tree_reads_as_such():
+    tree = [
+        {
+            **withheld(41),
+            "blocked_total": 1,
+            "blocking": [
+                {
+                    **withheld(42, usename="app", application_name=""),
+                    "waits_for": {"description": "AccessShareLock on public.orders (41 holds AccessExclusiveLock)"},
+                    "blocked_total": 0,
+                    "blocking": [],
+                }
+            ],
+        }
+    ]
+
+    lines = render_lock_tree(tree).splitlines()
+
+    assert lines == [
+        "pid 41: in a transaction; state, query and wait withheld (postgres@shop worker) blocking 1",
+        "  pid 42: waits for AccessShareLock on public.orders (41 holds AccessExclusiveLock); "
+        "in a transaction; state, query and wait withheld (app@shop)",
+    ]
+
+
+def test_a_withheld_vacuum_shows_blank_progress_rather_than_none():
+    text = render_vacuum_progress([{"pid": 7, "phase": None, "heap_blks_total": None, "heap_blks_scanned": None, "query": HIDDEN_QUERY_TEXT}])
+
+    assert "None" not in text
+
+
+def test_activity_says_which_backends_it_lists_withheld_and_which_it_leaves_out():
+    rows = [withheld(41), {"pid": 50, "usename": "app_user", "state": "active", "query": "SELECT 1"}]
+    backends = [
+        withheld(41, locks=LOCKS, blocking=[]),
+        withheld(60, in_transaction=False, usename="svc"),
+        withheld(61, in_transaction=False, usename=None),
+        withheld(62, in_transaction=False, blocking=[63]),
+    ]
+
+    note = note_withheld_backends(PLAIN, rows, backends)
+
+    assert note == (
+        "1 of these backends, of postgres, is in a transaction, and PostgreSQL shows app_user its locks but not its state, "
+        "query, wait or timings. 3 other backends, of postgres and svc, and of the server itself, are not listed: they "
+        "show no sign of a transaction, and whether they are running cannot be told; --all lists them. Even so, 62 blocks "
+        "63. That is because app_user lacks pg_read_all_stats, which pg_monitor includes; GRANT pg_monitor TO app_user "
+        "grants it."
     )
 
-    assert render_lock_tree(tree).endswith(f"<insufficient privilege>\n\n{note}")
+
+def test_cannot_be_told_is_kept_for_the_backends_with_no_sign_of_a_transaction():
+    rows = [withheld(41), withheld(42, in_transaction=False), withheld(43, in_transaction=False)]
+
+    note = note_withheld_backends(PLAIN, rows, rows, include_idle=True)
+
+    assert note is not None
+    assert note.startswith(
+        "3 of these backends, of postgres, are shown without state, query, wait or timings. 1 is in a transaction; for the "
+        "other 2, which show no sign of one, whether they are running cannot be told."
+    )
 
 
-def test_rows_with_nothing_withheld_render_as_before():
-    assert render_rows(StatisticsRows([{"a": 1}])) == render_rows([{"a": 1}])
-    assert render_rows(StatisticsRows()) == "(no rows)"
+def test_a_minimum_duration_names_the_withheld_backends_in_a_transaction():
+    backends = [withheld(41), withheld(42, in_transaction=False, usename=None)]
+
+    note = note_withheld_backends(PLAIN, [], backends, min_duration=30)
+
+    assert note is not None
+    assert note.startswith(
+        "2 other backends, of postgres and of the server itself, are not listed: how long they have been in their state "
+        "is withheld. Pid 41 is in a transaction."
+    )
+
+
+def test_a_withheld_blocker_of_the_blocked_backends_is_described_rather_than_left_a_pid():
+    rows = [{"pid": 42, "usename": "app_user", "state": "active", "blocked_by": [41], "query": "SELECT 1"}]
+    backends = [withheld(41, locks=LOCKS[:1], blocking=[42]), withheld(60, in_transaction=False)]
+
+    note = note_withheld_backends(PLAIN, rows, backends, blocked_only=True)
+
+    assert note is not None
+    assert note.startswith(
+        "Pid 41 (postgres@shop worker), which blocks 42, is in a transaction and holds AccessExclusiveLock on "
+        "public.orders; its state, query and wait are withheld."
+    )
+    assert "60" not in note
+
+
+def test_a_member_that_does_not_inherit_is_told_so_and_how_to_inherit():
+    note = note_withheld_backends(NOINHERIT, [], [withheld(41, in_transaction=False)])
+
+    assert note is not None
+    assert note.endswith(
+        "That is because app_user is a member of pg_read_all_stats but does not inherit its privileges, which "
+        "PostgreSQL 15 and later ask for; GRANT pg_monitor TO app_user WITH INHERIT TRUE makes it inherit them."
+    )
+    assert "lacks" not in note
+
+
+def test_nothing_withheld_is_no_note():
+    assert note_withheld_backends(PLAIN, [{"pid": 1, "query": "SELECT 1"}], []) is None
+    assert note_withheld_lock_tree(PLAIN, [{"pid": 1, "query": "SELECT 1", "blocking": []}]) is None
+    assert note_withheld_vacuums(PLAIN, []) is None
+    assert note_withheld_queries(PLAIN, [{"query": "SELECT 1"}]) is None
+    assert note_withheld_sample(PLAIN, 0, "total_time") is None
+
+
+def test_a_lock_tree_says_it_is_whole():
+    tree = [{**withheld(41), "blocking": [{**withheld(42, usename="svc"), "blocking": []}]}]
+
+    note = note_withheld_lock_tree(PLAIN, tree)
+
+    assert note is not None
+    assert note.startswith(
+        "2 of the backends in these trees, of postgres and svc, are shown without state, query, wait or timings; who "
+        "blocks whom is complete, since pg_locks shows every role's locks."
+    )
+
+
+def test_vacuums_and_queries_say_how_many_were_withheld():
+    assert (note_withheld_vacuums(PLAIN, [{"query": HIDDEN_QUERY_TEXT}]) or "").startswith(
+        "1 of these vacuums is shown without table, phase or progress, and whether it is autovacuum cannot be told."
+    )
+    assert (note_withheld_queries(PLAIN, [{"query": HIDDEN_QUERY_TEXT}] * 2) or "").startswith(
+        "2 of these queries are other roles': pg_stat_statements shows app_user their counters but not their text."
+    )
+    assert (note_withheld_sample(PLAIN, 3, "resources") or "").startswith(
+        "3 statements of other roles ran during the interval and are not ranked: pg_stat_statements shows app_user "
+        "neither their text nor their queryid, so their counters cannot be followed from one snapshot to the next. "
+        "The resource shares are of the ranked statements alone."
+    )
