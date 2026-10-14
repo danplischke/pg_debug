@@ -1,18 +1,25 @@
 """Utilities for working with PostgreSQL extensions."""
 
 import logging
+import weakref
 from dataclasses import dataclass
 from typing import Literal
 
 from ..errors import QueryError
+from .driver import DbConnPool
 from .driver import SqlDriver
 from .restricted import SafeSqlDriver
 
 logger = logging.getLogger(__name__)
 
-# Single global PostgreSQL version cache
-# TODO: If we support multiple connections in the future, this should be connection-specific
-_POSTGRES_VERSION = None
+#: The major version of each server asked, kept for as long as the pool or the
+#: connection that reached it. One process can hold clients of servers of
+#: different versions, and a version kept once for the process sent the
+#: second of them to the first one's catalog views: PostgreSQL 17's
+#: pg_stat_checkpointer to a 15. A pool that reconnects opens a new psycopg
+#: pool, so a server upgraded or failed over behind the same URL is asked
+#: again rather than remembered.
+_server_versions: weakref.WeakKeyDictionary[object, int] = weakref.WeakKeyDictionary()
 
 
 @dataclass
@@ -27,14 +34,31 @@ class ExtensionStatus:
 
 
 def reset_postgres_version_cache() -> None:
-    """Reset the PostgreSQL version cache. Primarily used for testing."""
-    global _POSTGRES_VERSION
-    _POSTGRES_VERSION = None
+    """Forget the version of every server asked so far. Primarily used for testing."""
+    _server_versions.clear()
+
+
+def _server_of(sql_driver: SqlDriver) -> object | None:
+    """What stands for the server a driver reaches: its open pool, or the connection it was given.
+
+    Restricted mode wraps the driver that holds the connection, and a driver
+    made by ``with_context`` shares it, so all of them share one entry. None
+    while nothing is open yet: the version is then asked and not kept.
+    """
+    while isinstance(sql_driver, SafeSqlDriver):
+        sql_driver = sql_driver.sql_driver
+    conn = getattr(sql_driver, "conn", None)
+    if isinstance(conn, DbConnPool):
+        return conn.pool
+    return conn
 
 
 async def get_postgres_version(sql_driver: SqlDriver) -> int:
     """
     Get the major PostgreSQL version as an integer.
+
+    Asked once per server, and kept for as long as the pool or connection that
+    reached it.
 
     Args:
         sql_driver: An instance of SqlDriver to execute queries
@@ -43,10 +67,9 @@ async def get_postgres_version(sql_driver: SqlDriver) -> int:
         The major PostgreSQL version as an integer (e.g., 16 for PostgreSQL 16.2)
         Returns 0 if the version cannot be determined
     """
-    # Check if we have a cached version
-    global _POSTGRES_VERSION
-    if _POSTGRES_VERSION is not None:
-        return _POSTGRES_VERSION
+    server = _server_of(sql_driver)
+    if server is not None and server in _server_versions:
+        return _server_versions[server]
 
     try:
         rows = await sql_driver.execute_query("SHOW server_version")
@@ -58,13 +81,14 @@ async def get_postgres_version(sql_driver: SqlDriver) -> int:
         # Extract the major version (before the first dot)
         major_version = version_string.split(".")[0]
         version = int(major_version)
-
-        # Cache the version globally
-        _POSTGRES_VERSION = version
-
-        return version
     except Exception as e:
         raise QueryError(f"Error determining PostgreSQL version: {e}") from e
+
+    # Read again: the query may have been what opened the pool.
+    server = _server_of(sql_driver)
+    if server is not None:
+        _server_versions[server] = version
+    return version
 
 
 async def check_postgres_version_requirement(sql_driver: SqlDriver, min_version: int, feature_name: str) -> tuple[bool, str]:

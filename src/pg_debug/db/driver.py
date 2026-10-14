@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
+import os
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -16,6 +17,8 @@ from urllib.parse import urlparse
 from urllib.parse import urlunparse
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict
+from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg.sql import SQL
 from psycopg.sql import Composed
@@ -188,6 +191,36 @@ def build_transaction_setup(
     return SQL(QUERY_MARKER + " SELECT ") + SQL(", ").join(calls)
 
 
+def _text_as_utf8(url: str) -> str:
+    """The connection URL, asking for text in UTF-8 unless it or the environment names an encoding.
+
+    Left to libpq, the client encoding is the database's, and on a SQL_ASCII
+    database that is no encoding at all: the server sends the bytes it stores,
+    and psycopg returns text columns as ``bytes`` and encodes statements as
+    ASCII. Commands that read the server version failed, the others printed
+    names as ``b'...'`` or, comparing those bytes with names, missed the
+    columns a query filters on; a query with a non-ASCII literal could not be
+    sent at all.
+
+    A server in any other encoding converts its text to UTF-8, which decodes
+    to the same strings its own encoding did. A SQL_ASCII server converts
+    nothing, but checks that what it sends is valid UTF-8, and refuses the
+    statement, naming the byte, when it is not: nothing is decoded on a guess.
+    An encoding named in the URL's ``client_encoding`` or in
+    ``PGCLIENTENCODING`` is kept, so data stored in LATIN1 can be read as
+    LATIN1; SQL_ASCII names no encoding, so naming it is the same as naming
+    none.
+
+    It is a startup parameter, not a ``SET``: PgBouncer keeps it for each
+    client and sets it on whichever backend serves that client.
+    """
+    named = conninfo_to_dict(url).get("client_encoding") or os.environ.get("PGCLIENTENCODING")
+    # PostgreSQL ignores case and punctuation in encoding names.
+    if named and re.sub(r"[^a-z0-9]", "", str(named).lower()) != "sqlascii":
+        return url
+    return make_conninfo(url, client_encoding="UTF8")
+
+
 class DbConnPool:
     """Database connection manager using psycopg's connection pool."""
 
@@ -238,7 +271,7 @@ class DbConnPool:
         try:
             # Configure connection pool with appropriate settings
             self.pool = AsyncConnectionPool(
-                conninfo=url,
+                conninfo=_text_as_utf8(url),
                 min_size=1,
                 max_size=5,
                 open=False,  # Don't connect immediately, let's do it explicitly
