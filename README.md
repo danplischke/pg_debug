@@ -91,6 +91,10 @@ pg-debug column-stats orders             # why the planner estimates what it doe
 pg-debug config                          # settings vs what the server is doing
 pg-debug config --exit-code              # fails on a durability setting that is off (on Neon and Lakebase, fsync and full_page_writes off are notes)
 
+pg-debug upgrade-check --to 18           # what stops pg_upgrade, and what it leaves undone
+pg-debug security                        # pg_hba.conf, ssl, superusers, PUBLIC CREATE, row-level security, minor version
+pg-debug security --exit-code --baseline security-baseline.json
+
 pg-debug partitions                      # is any table worth partitioning?
 pg-debug partitions --min-size 500MB --min-pruning-share 0.7
 
@@ -140,6 +144,8 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `column-stats TABLE` | — |
 | `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--min-window-days DAYS` (default 7: how long the index counters must have counted before an index is called unused), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
 | `config` | `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
+| `upgrade-check` | `--to VERSION` (default 18, the newest major pg-debug knows was released), `--exit-code`, `--baseline FILE`, `--save-baseline FILE`. Reads what `pg_upgrade` refuses (columns of `regproc`, `regprocedure`, `regoper`, `regoperator`, `regconfig`, `regdictionary`, `regnamespace`, `regcollation`, or a domain, array, composite or range over one; prepared transactions; a `data_checksums` setting the target's initdb default does not share, since 18 enables them), what it carries across incomplete (logical slots and subscriptions from a server before 17; extended statistics, which 18 does not preserve, and before 18 no statistics at all), extensions behind their default version, and roles with MD5 passwords (superuser only: for another role that check says it could not tell). Column types, extensions and statistics are read from the connected database only; the report names the others |
+| `security` | `--exit-code`, `--baseline FILE`, `--save-baseline FILE`. Reads `pg_hba_file_rules` for `trust`, `password` without SSL, `md5`, and rules open to every address (superuser only: for another role that check says it could not tell); `ssl = off`; `password_encryption = md5`; schemas where PUBLIC holds CREATE; superuser and BYPASSRLS roles that can log in; tables with row-level security and no policy; tables without row-level security, granted to other roles, in a schema whose other tables have it (a candidate); and the server's minor version and end of support against releases known on the date the report states |
 | `partitions` | `--min-size SIZE` (default 1GB, accepts `500MB`/`2GB`), `--min-pruning-share SHARE` (default 0.5), `--limit N` (default 200) |
 | `check-migration SQL` | a file path, inline SQL, or `-` for stdin; `--offline`, `--exit-code` |
 | `model` | `-s, --schema SCHEMA`, `-r, --rule RULES` (comma-separated, default `all`), `--proven-only`, `--min-rows N` (default 1000), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
@@ -338,7 +344,21 @@ holding a snapshot, or holding a transaction id because it has written.
 `model` reviews the data model rather than the running server, and needs no
 extension. Its rules are `unindexed_foreign_key`, `foreign_key_type_mismatch`,
 `missing_primary_key`, `column_order_padding`, `naive_timestamp`,
-`blank_padded_char`, `nullable_never_null`, `low_cardinality_text` and `all`.
+`blank_padded_char`, `nullable_never_null`, `low_cardinality_text`,
+`json_column`, `primary_key_overflow`, `mostly_null_index` and `all`.
+
+`primary_key_overflow` reads the last value of the sequence behind a
+single-column `smallint` or `integer` primary key, serial or identity, and
+reports it from half the values used (high from 80%); a key widened to
+`bigint` whose serial sequence is still `AS integer` is judged by the
+sequence. Its remediation widens the referencing integer columns too.
+`json_column` is a candidate, since only the workload knows whether anything
+relies on the key order, whitespace or duplicate keys `jsonb` does not keep;
+its `verify` query counts the rows with a duplicate top-level key.
+`mostly_null_index` is a candidate from `pg_stats.null_frac`: a plain btree
+whose leading column is at least half NULL, which a partial index
+`WHERE column IS NOT NULL` would serve for every condition that cannot be true
+of a NULL.
 
 Each finding carries a confidence. A **proven** finding is read from the
 catalog and cannot be wrong: a foreign key either has an index behind it or it
@@ -496,16 +516,19 @@ SQL arguments accept `-` to read the statement from stdin:
 pg-debug --json explain - < slow_query.sql | jq '.Plan."Total Cost"'
 ```
 
-`health` and `model` can gate a CI job on the result:
+`health` and `model` can gate a CI job on the result, and so can `config`,
+`upgrade-check` and `security`:
 
 ```bash
 pg-debug health --type index,vacuum --exit-code
 pg-debug model --exit-code               # fails only on a high-severity finding
+pg-debug security --exit-code            # the same; a check that could not tell is printed, not failed
 ```
 
 Exit status is `0` on success, `1` on error, `2` on a usage error, and `3` for
-`health --exit-code` when a check that ran found a problem or `model --exit-code`
-when a high-severity finding is reported. `health` prints every check's result
+`health --exit-code` when a check that ran found a problem or `model`, `config`,
+`upgrade-check` or `security --exit-code` when a high-severity finding is
+reported. `health` prints every check's result
 and exits `1` when any check could not run, unless `--exit-code` found a problem
 among the checks that did; with `--save-baseline` such a run saves nothing and
 exits `1`.
@@ -583,6 +606,8 @@ context = QueryContext.from_file("pg-debug.toml")
 | `review_data_model(rules="all", schema=None, min_rows=1000, proven_only=False)` | `list[ModelFinding]` — most severe first |
 | `check_migration(sql)` | `list[StatementReview]` — most severe first |
 | `review_configuration()` | `list[ConfigFinding]` — most severe first |
+| `check_upgrade(to=None)` | `AuditReport` — `findings` most severe first, and `checks`: what each check examined, or why it could not tell |
+| `audit_security()` | `AuditReport` — the same, for the security checks |
 | `suggest_partitions(sql=None, min_table_bytes=1GB, min_pruning_share=0.5, limit=200)` | `list[PartitionCandidate]` — recommended first, then by size |
 | `get_top_queries(sort_by="resources", limit=10, interval_seconds=None)` | `list[dict]` — one per query; a sample leaves out other roles' statements whose queryid is withheld |
 | `sample_top_queries(interval_seconds, sort_by="resources", limit=10)` | `QuerySample` — `queries`, and `withheld`, how many other roles' statements ran and could not be ranked |
@@ -606,6 +631,15 @@ Each `ModelFinding` carries its `rule`, `confidence` (`proven` or `candidate`),
 `detail`, the `evidence` behind it, `remediation` (SQL statements, ready to
 run), an optional `verify` query for candidates, and `impact_bytes` where the
 cost is a size. It has `to_dict()` for serialization.
+
+An `AuditReport` carries the `command`, the `server_version`, the
+`target_version` of an upgrade check, its `findings`, one `CheckOutcome` per
+check (`check`, `status` of `clear`, `found`, `unknown` or `not_applicable`,
+what it `examined`, and the `reason` it could not tell or did not apply), and
+`notes`; `unknown` lists the checks that could not tell. Each `AuditFinding`
+carries its `check`, the `subject` a baseline knows it by, `severity`,
+`confidence`, `summary`, `detail`, `remediation`, `evidence`, and a `verify`
+query for a candidate. Both have `to_dict()`.
 
 Failures raise instead of returning error strings, with one exception: in
 `analyze_db_health()` a check that fails (a statement timeout behind a lock, a

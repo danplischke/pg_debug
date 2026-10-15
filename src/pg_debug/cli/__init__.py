@@ -15,6 +15,7 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 
+from ..baseline import AUDIT_COMMANDS
 from ..baseline import Baseline
 from ..baseline import Partition
 from ..baseline import partition
@@ -137,6 +138,11 @@ async def run(args: argparse.Namespace) -> int:
 
     if args.command == "check-migration" and getattr(args, "exit_code", False):
         return UNHEALTHY_EXIT_CODE if any(review.severity is Severity.HIGH for review in result) else 0
+
+    if args.command in AUDIT_COMMANDS and getattr(args, "exit_code", False):
+        # A check that could not tell fails nothing: it is said in the report,
+        # and a role that may never read pg_hba.conf would otherwise never pass.
+        return UNHEALTHY_EXIT_CODE if any(finding.severity is Severity.HIGH for finding in result.findings) else 0
 
     if args.command == "model" and getattr(args, "exit_code", False):
         # Only high severity fails a build. The rest is advice, and a gate that

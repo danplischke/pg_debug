@@ -146,6 +146,14 @@ async def cmd_config(pg: PgDebug, args: argparse.Namespace) -> Any:
     return await pg.review_configuration()
 
 
+async def cmd_upgrade_check(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.check_upgrade(to=args.to)
+
+
+async def cmd_security(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.audit_security()
+
+
 async def cmd_partitions(pg: PgDebug, args: argparse.Namespace) -> Any:
     return await pg.suggest_partitions(
         min_table_bytes=args.min_table_bytes,

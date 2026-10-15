@@ -25,6 +25,10 @@ DOCUMENTS = (REPOSITORY / "README.md", *sorted((REPOSITORY / "plugins" / "pg-deb
 PUBLIC_NAMES = [
     "AccessMode",
     "ActivityInspector",
+    "AuditFinding",
+    "AuditReport",
+    "CheckOutcome",
+    "CheckStatus",
     "Confidence",
     "ConfigFinding",
     "ConfigurationReviewer",
@@ -69,6 +73,7 @@ PUBLIC_NAMES = [
     "RuleId",
     "SafeSqlDriver",
     "SchemaInspector",
+    "SecurityAuditor",
     "Severity",
     "SqlDriver",
     "StatementReview",
@@ -76,6 +81,7 @@ PUBLIC_NAMES = [
     "Strategy",
     "SyncPgDebug",
     "TopQueriesCalc",
+    "UpgradeChecker",
     "__version__",
     "diagnose_plan",
     "resolve_database_url",
@@ -97,9 +103,11 @@ CLI_COMMANDS = [
     "objects",
     "partitions",
     "schemas",
+    "security",
     "top-queries",
     "tune-queries",
     "tune-workload",
+    "upgrade-check",
     "vacuum-progress",
 ]
 

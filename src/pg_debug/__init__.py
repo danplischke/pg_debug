@@ -24,6 +24,12 @@ from typing import TYPE_CHECKING
 from typing import Any
 
 from .activity import ActivityInspector
+from .audit import AuditFinding
+from .audit import AuditReport
+from .audit import CheckOutcome
+from .audit import CheckStatus
+from .audit import SecurityAuditor
+from .audit import UpgradeChecker
 from .client import DATABASE_URL_ENV_VARS
 from .client import AccessMode
 from .client import PgDebug
@@ -98,6 +104,10 @@ __all__ = [
     "MAX_NUM_INDEX_TUNING_QUERIES",
     "AccessMode",
     "ActivityInspector",
+    "AuditFinding",
+    "AuditReport",
+    "CheckOutcome",
+    "CheckStatus",
     "Confidence",
     "ConfigFinding",
     "ConfigurationReviewer",
@@ -140,6 +150,7 @@ __all__ = [
     "RuleId",
     "SafeSqlDriver",
     "SchemaInspector",
+    "SecurityAuditor",
     "Severity",
     "SqlDriver",
     "StatementReview",
@@ -147,6 +158,7 @@ __all__ = [
     "Strategy",
     "SyncPgDebug",
     "TopQueriesCalc",
+    "UpgradeChecker",
     "__version__",
     "diagnose_plan",
     "resolve_database_url",

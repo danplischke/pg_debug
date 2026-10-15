@@ -24,6 +24,7 @@ import humanize
 from ..baseline import Baseline
 from ..baseline import Key
 from ..baseline import Partition
+from ..baseline import audit_finding_key
 from ..baseline import describe_key
 from ..baseline import health_finding_key
 from ..db.privileges import is_withheld
@@ -495,6 +496,69 @@ def render_configuration_review(findings: Sequence[Any]) -> str:
     lines.append("")
     lines.append(f"{len(findings)} setting{'' if len(findings) == 1 else 's'} worth looking at")
     return "\n".join(lines).strip("\n")
+
+
+#: How each check outcome reads in the list of what was examined.
+_CHECK_STATUS_LABELS = {"clear": "clear", "found": "found", "unknown": "unknown", "not_applicable": "n/a"}
+
+
+def render_audit_report(report: Any) -> str:
+    """Render an upgrade check or a security audit: the findings, then what each check examined.
+
+    The list of checks is the half that is easy to skip and must not be: a
+    check that could not look is printed as such, and the last line says how
+    many could not tell, so an empty list of findings never reads as a pass
+    it was not.
+    """
+    if report.command == "upgrade-check":
+        heading = f"Upgrade from PostgreSQL {report.server_version} to {report.target_version}"
+    else:
+        heading = f"Security audit of PostgreSQL {report.server_version}"
+    lines: list[str] = [heading]
+
+    for finding in report.findings:
+        lines.append("")
+        marker = "" if finding.confidence.value == "proven" else "  (candidate)"
+        lines.append(f"[{finding.severity.value}] {finding.check}: {finding.subject}{marker}")
+        lines.append(f"    {finding.summary}")
+        lines.append(f"    {finding.detail}")
+        if finding.verify:
+            lines.append(f"    verify: {finding.verify}")
+        for statement in finding.remediation:
+            lines.append(f"    {statement}")
+
+    lines.append("")
+    lines.append("Checks:")
+    for outcome in report.checks:
+        label = _CHECK_STATUS_LABELS.get(outcome.status.value, outcome.status.value)
+        lines.append(f"  {label:<8} {outcome.check}: {outcome.reason or outcome.examined}")
+    for note in report.notes:
+        lines.append("")
+        lines.append(note)
+
+    lines.append("")
+    if report.findings:
+        counts: dict[str, int] = {}
+        for finding in report.findings:
+            counts[finding.severity.value] = counts.get(finding.severity.value, 0) + 1
+        by_severity = ", ".join(f"{count} {severity}" for severity, count in counts.items())
+        found = f"{len(report.findings)} finding{'' if len(report.findings) == 1 else 's'} ({by_severity})"
+    else:
+        found = "No findings"
+    unknown = [outcome.check for outcome in report.unknown]
+    if unknown:
+        found += f"; {len(unknown)} check{' could' if len(unknown) == 1 else 's could'} not tell ({', '.join(unknown)}), so this is not a clean bill."
+    else:
+        found += "."
+    lines.append(found)
+    return "\n".join(lines)
+
+
+def audit_report_json(report: Any, baseline: Baseline | None) -> dict[str, Any]:
+    """The report as JSON, each finding marked ``known`` or ``new`` when there is a baseline."""
+    payload = report.to_dict()
+    payload["findings"] = [_with_baseline(finding.to_dict(), audit_finding_key(finding), baseline) for finding in report.findings]
+    return payload
 
 
 def render_migration_review(reviews: Sequence[Any]) -> str:

@@ -111,6 +111,7 @@ and answering the question.
 | Are the server's settings right? | `pg-debug config` | [health.md](references/health.md) |
 | Is the schema built well? | `pg-debug model` | [schema.md](references/schema.md) |
 | Is this migration safe to run? | `pg-debug check-migration <file>` | [schema.md](references/schema.md) |
+| Can we upgrade to the next major version? Is the server secure? | `pg-debug upgrade-check --to 18`, `pg-debug security` | [schema.md](references/schema.md) |
 | Should this table be partitioned? | `pg-debug partitions` | [schema.md](references/schema.md) |
 | Partition maintenance: pruning, attach and detach, pg_partman | `pg-debug explain "<query>"` against the partitioned table | [schema.md](references/schema.md) |
 | What tables, columns and indexes exist? | `pg-debug schemas`, `objects`, `describe` | below |
@@ -147,7 +148,7 @@ pg-debug --json explain - < slow.sql | jq '.Plan."Total Cost"'
 ```
 
 Exit status: `0` success, `1` error, `2` usage error, `3` when an
-`--exit-code` gate (`health`, `config`, `model`, `check-migration`) found what
+`--exit-code` gate (`health`, `config`, `model`, `upgrade-check`, `security`, `check-migration`) found what
 it gates on. `health` also exits `1` when a check could not run, unless its
 gate found a problem among the checks that did.
 

@@ -4,7 +4,10 @@ import json
 
 import pytest
 
+from pg_debug.audit import AuditFinding
+from pg_debug.audit import AuditReport
 from pg_debug.baseline import Baseline
+from pg_debug.baseline import audit_finding_key
 from pg_debug.baseline import config_finding_key
 from pg_debug.baseline import describe_key
 from pg_debug.baseline import health_finding_key
@@ -229,3 +232,53 @@ def test_keys_describe_themselves():
     assert describe_key({"rule": "missing_primary_key", "schema": "public", "table": "events", "columns": []}) == "missing_primary_key: public.events"
     assert describe_key({"setting": "work_mem"}) == "finding: work_mem"
     assert describe_key({"check": "Connection health"}) == "Connection health"
+
+
+# -- Audits -----------------------------------------------------------------
+
+
+def audit_report(*findings, command="security"):
+    return AuditReport(command=command, server_version="16.4", findings=list(findings))
+
+
+def audit_finding(check="ssl", subject="ssl", severity=Severity.MEDIUM):
+    return AuditFinding(check=check, subject=subject, severity=severity, confidence=Confidence.PROVEN, summary="...", detail="...")
+
+
+def test_an_audit_finding_is_known_by_its_check_and_subject():
+    assert audit_finding_key(audit_finding("hba_rules", "host all all 0.0.0.0/0.0.0.0 trust")) == {
+        "check": "hba_rules",
+        "subject": "host all all 0.0.0.0/0.0.0.0 trust",
+    }
+
+
+def test_an_audit_baseline_round_trips_and_fails_only_on_new_high_findings(tmp_path):
+    accepted = audit_report(audit_finding("privileged_roles", "role postgres", Severity.LOW), command="upgrade-check")
+    path = tmp_path / "upgrade.json"
+    Baseline.of("upgrade-check", accepted).save(path)
+    baseline = Baseline.load(path, "upgrade-check")
+
+    later = audit_report(
+        audit_finding("privileged_roles", "role postgres", Severity.LOW),
+        audit_finding("prepared_transactions", "transaction t1", Severity.HIGH),
+        audit_finding("extension_versions", "extension hstore", Severity.LOW),
+        command="upgrade-check",
+    )
+    split = partition("upgrade-check", later, baseline)
+
+    assert split.known == [{"check": "privileged_roles", "subject": "role postgres"}]
+    assert [k["subject"] for k in split.new] == ["transaction t1", "extension hstore"]
+    assert split.new_failures == 1
+
+
+def test_a_security_baseline_is_refused_by_upgrade_check(tmp_path):
+    path = tmp_path / "security.json"
+    Baseline.of("security", audit_report(audit_finding())).save(path)
+
+    with pytest.raises(InvalidArgumentError, match="not `pg-debug upgrade-check`"):
+        Baseline.load(path, "upgrade-check")
+
+
+def test_an_audit_key_describes_its_subject():
+    assert describe_key({"check": "ssl", "subject": "ssl"}) == "ssl: ssl"
+    assert describe_key({"check": "privileged_roles", "subject": "role app"}) == "privileged_roles: role app"

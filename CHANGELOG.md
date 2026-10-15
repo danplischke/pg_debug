@@ -167,6 +167,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   immediate shutdown, a failover or a restore moves; not the server's uptime,
   since a clean restart keeps the counters.
 
+- `pg-debug upgrade-check [--to VERSION]` and `pg-debug security`, with
+  `PgDebug.check_upgrade()` and `audit_security()`. Before, what stands in
+  the way of a major upgrade came out of `pg_upgrade --check`, run with the
+  new binaries installed beside the old cluster, and nothing in pg-debug read
+  `pg_hba.conf`, roles or row-level security. `upgrade-check` reads, from a
+  connection, what `pg_upgrade` 18 refuses (`reg*` columns, also inside a
+  domain, array, composite or range; prepared transactions; a
+  `data_checksums` setting that differs from the target's initdb default,
+  which 18 turned on), what it carries across incomplete (logical slots and
+  subscriptions from a server before 17; extended statistics, which 18 does
+  not preserve), extensions behind their default version, and MD5
+  passwords. `security` reads `pg_hba_file_rules` (`trust`, cleartext
+  `password`, `md5`, rules open to every address), `ssl`,
+  `password_encryption`, schemas where PUBLIC may CREATE, superuser and
+  BYPASSRLS login roles, tables with row-level security and no policy,
+  tables without it beside tables that have it (a candidate), and the minor
+  version and end of support against releases known on a stated date, which
+  ages. Each report lists what every check examined, and a check that could
+  not read what it needs (`pg_authid` and `pg_hba_file_rules` are a
+  superuser's) says so instead of passing. Both are read-only, run in
+  restricted mode, and take `--exit-code` (high severity),
+  `--baseline` and `--save-baseline`, knowing a finding by its check and
+  subject. They are commands rather than health checks because neither is
+  about how the server is running: one depends on the target version, and
+  both answer to a different reader and schedule.
+
+- `model` has three more rules. `primary_key_overflow` reads the sequence
+  behind a `smallint` or `integer` primary key, serial or identity (found
+  through `pg_depend`, since an identity column has no `nextval` default),
+  and reports it from half its values used, high from 80%; a `bigint` key
+  whose serial sequence is still `AS integer` is judged by the sequence, and
+  the remediation widens the referencing integer columns too. `json_column`
+  flags `json` where `jsonb` would do, as a candidate with a query that
+  counts rows with a duplicate top-level key, the one thing the conversion
+  changes. `mostly_null_index` flags a plain btree whose leading column
+  `pg_stats` puts at least half NULL, as a candidate for a partial index
+  `WHERE column IS NOT NULL`, which serves every condition that cannot be
+  true of a NULL.
+
 ### Changed
 
 - A statement that failed was logged at ERROR with its full text, so a
@@ -613,6 +652,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `pg-debug diagnose ./slow.sql` ran the literal text `./slow.sql` as the
   query. The README had promised a file path since the command appeared;
   it now reads one, as `check-migration` does.
+
+- The sequence health check judged a `smallserial` column against
+  `bigint`'s limit, so one at 32,000 of its 32,767 values looked as though it
+  had barely started. Every type but `integer` was taken for `bigint`; it now
+  uses the limit of the column's own type.
 
 ## [0.2.0] - 2026-10-06
 

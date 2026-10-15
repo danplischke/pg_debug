@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from .. import __version__
+from ..audit.versions import NEWEST_MAJOR
 from ..baseline import config_finding_key
 from ..baseline import model_finding_key
 from ..client import DATABASE_URL_ENV_VARS
@@ -38,15 +39,19 @@ from .commands import cmd_model
 from .commands import cmd_objects
 from .commands import cmd_partitions
 from .commands import cmd_schemas
+from .commands import cmd_security
 from .commands import cmd_top_queries
 from .commands import cmd_tune_queries
 from .commands import cmd_tune_workload
+from .commands import cmd_upgrade_check
 from .commands import cmd_vacuum_progress
 from .render import as_is
+from .render import audit_report_json
 from .render import health_checks_json
 from .render import marked_against
 from .render import plan_document
 from .render import render_activity
+from .render import render_audit_report
 from .render import render_column_stats
 from .render import render_configuration_review
 from .render import render_health_checks
@@ -409,6 +414,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_baseline_arguments(config)
     config.set_defaults(func=cmd_config, render=render_configuration_review, json_payload=marked_against(config_finding_key))
+
+    upgrade_check = subparsers.add_parser("upgrade-check", help="Say what stands between this cluster and pg_upgrade to a newer major version")
+    upgrade_check.add_argument(
+        "--to",
+        type=int,
+        metavar="VERSION",
+        help=(
+            f"The major version to upgrade to (default: {NEWEST_MAJOR}, the newest pg-debug knows was released, "
+            "or the one after the server's when it already runs that)."
+        ),
+    )
+    upgrade_check.add_argument(
+        "--exit-code",
+        action="store_true",
+        help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any high-severity finding is reported, for use in CI.",
+    )
+    add_baseline_arguments(upgrade_check)
+    upgrade_check.set_defaults(func=cmd_upgrade_check, render=render_audit_report, json_payload=audit_report_json)
+
+    security = subparsers.add_parser("security", help="Audit authentication rules, roles, privileges and row-level security")
+    security.add_argument(
+        "--exit-code",
+        action="store_true",
+        help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any high-severity finding is reported, for use in CI.",
+    )
+    add_baseline_arguments(security)
+    security.set_defaults(func=cmd_security, render=render_audit_report, json_payload=audit_report_json)
 
     partitions = subparsers.add_parser("partitions", help="Say whether a table is worth partitioning, from what the workload does")
     partitions.add_argument(

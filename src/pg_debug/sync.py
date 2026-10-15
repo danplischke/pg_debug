@@ -17,6 +17,7 @@ from concurrent.futures import Future
 from typing import Any
 from typing import TypeVar
 
+from .audit import AuditReport
 from .client import AccessMode
 from .client import PgDebug
 from .client import SortBy
@@ -238,6 +239,16 @@ class SyncPgDebug:
     def review_configuration(self) -> list[ConfigFinding]:
         """Review the server's settings against what it is actually doing."""
         return self._call(self._client.review_configuration)
+
+    # -- Audits --------------------------------------------------------------
+
+    def check_upgrade(self, to: int | None = None) -> AuditReport:
+        """Say what stands between this cluster and ``pg_upgrade`` to a newer major version."""
+        return self._call(self._client.check_upgrade, to=to)
+
+    def audit_security(self) -> AuditReport:
+        """Read the server's authentication rules, roles, privileges and row-level security for what lets too much in."""
+        return self._call(self._client.audit_security)
 
     # -- Partitioning --------------------------------------------------------
 

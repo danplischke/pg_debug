@@ -1,6 +1,6 @@
 """Baselines: what a check found last time, so a gate fails only on what is new.
 
-``health``, ``model`` and ``config`` all have an ``--exit-code`` that turns
+``health``, ``model``, ``config``, ``upgrade-check`` and ``security`` all have an ``--exit-code`` that turns
 them into checks a build can run. The trouble with adopting such a check is
 the first run: an existing database has findings, some of them deliberate,
 and a gate that fails on all of them on day one is a gate that gets turned
@@ -28,6 +28,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .audit import AuditFinding
+from .audit import AuditReport
 from .configuration import ConfigFinding
 from .errors import InvalidArgumentError
 from .health import HealthCheckResult
@@ -113,6 +115,15 @@ def config_finding_key(finding: ConfigFinding) -> Key:
     return {"setting": finding.setting}
 
 
+def audit_finding_key(finding: AuditFinding) -> Key:
+    """What one audit finding is about: the check and its subject."""
+    return {"check": finding.check, "subject": finding.subject}
+
+
+#: The commands whose result is an :class:`~pg_debug.audit.AuditReport`.
+AUDIT_COMMANDS = ("upgrade-check", "security")
+
+
 @dataclass
 class Partition:
     """A result split against a baseline.
@@ -121,8 +132,8 @@ class Partition:
         new: Keys of findings the baseline does not hold.
         known: Keys it does hold.
         new_failures: How many of ``new`` would fail the gate on their own —
-            every new health finding, and the high-severity new model and
-            configuration findings.
+            every new health finding, and the high-severity new model,
+            configuration and audit findings.
     """
 
     new: list[Key] = field(default_factory=list)
@@ -219,7 +230,10 @@ def keys_of(command: str, result: Any) -> list[Key]:
         return [model_finding_key(f) for f in result]
     if command == "config":
         return [config_finding_key(f) for f in result]
-    raise InvalidArgumentError(f"`pg-debug {command}` has no baseline: only health, model and config do.")
+    if command in AUDIT_COMMANDS:
+        report: AuditReport = result
+        return [audit_finding_key(f) for f in report.findings]
+    raise InvalidArgumentError(f"`pg-debug {command}` has no baseline: only health, model, config, upgrade-check and security do.")
 
 
 def partition(command: str, result: Any, baseline: Baseline) -> Partition:
@@ -234,9 +248,14 @@ def partition(command: str, result: Any, baseline: Baseline) -> Partition:
                 split.new_failures += 1
         return split
 
-    findings: Sequence[ModelFinding | ConfigFinding] = result
+    findings: Sequence[ModelFinding | ConfigFinding | AuditFinding] = result.findings if command in AUDIT_COMMANDS else result
     for finding in findings:
-        key = model_finding_key(finding) if isinstance(finding, ModelFinding) else config_finding_key(finding)
+        if isinstance(finding, ModelFinding):
+            key = model_finding_key(finding)
+        elif isinstance(finding, AuditFinding):
+            key = audit_finding_key(finding)
+        else:
+            key = config_finding_key(finding)
         if key in baseline:
             split.known.append(key)
         else:
@@ -254,7 +273,7 @@ def describe_key(key: Mapping[str, Any]) -> str:
         parts.append(f"{schema}.{table}")
     elif table:
         parts.append(str(table))
-    for name in ("index", "name", "sequence", "column", "constraint", "slot_name", "setting", "kind", "covered_by"):
+    for name in ("index", "name", "sequence", "column", "constraint", "slot_name", "setting", "kind", "covered_by", "subject"):
         if key.get(name):
             parts.append(str(key[name]))
     # A session's identity reads as nothing without the field names.
@@ -266,10 +285,12 @@ def describe_key(key: Mapping[str, Any]) -> str:
 
 
 __all__ = [
+    "AUDIT_COMMANDS",
     "BASELINE_VERSION",
     "HEALTH_IDENTITY_KEYS",
     "Baseline",
     "Partition",
+    "audit_finding_key",
     "config_finding_key",
     "describe_key",
     "health_finding_key",
