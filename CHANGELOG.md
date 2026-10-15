@@ -167,6 +167,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   immediate shutdown, a failover or a restore moves; not the server's uptime,
   since a clean restart keeps the counters.
 
+- `pg-debug shard-readiness` (`pg.assess_shard_readiness()`, returning a
+  `ShardReadiness`). "Should we shard?" was answered by reading `config`,
+  `health --type vacuum` and a hand-summed `top-queries --interval` and
+  weighing them yourself, with no WAL rate, no working-set figure and no
+  routing key across tables. The command samples the WAL written
+  (`pg_stat_wal`, or the WAL position before PostgreSQL 14), shared buffers
+  evicted (`pg_stat_io`, 16) and checkpoints over `--interval` (10 seconds by
+  default, reported with the figures), reads the autovacuum backlog and this
+  database's `pg_stat_statements`, and answers "not yet" with each reason
+  and its figure: reads taking 80% of the recorded time (replicas), the top
+  five statements taking half (tune them), a table `partitions` would
+  partition by time (partition), a write path with no pressure (size alone),
+  no column compared by equality in half the time (no routing key). Only
+  with none standing does it say "worth evaluating", never "shard". On a
+  Citus coordinator it reads shard size skew, the top tenant's CPU share,
+  calls with no distribution key, timestamp and low-cardinality distribution
+  columns, and keys without the distribution column. The Citus checks follow
+  Citus's documentation and have not been run against a Citus cluster.
+  `pg_current_wal_lsn()` is now allowed in restricted mode.
+
+- `pg-debug history` (`pg.read_history()`, returning a `HistoryReport`).
+  The history a platform keeps beyond `pg_stat_statements` was a table of
+  views in the skill to read by hand with `execute`. The command reads Azure's
+  Query Store (from the `azure_sys` database), Aurora's
+  `aurora_stat_statements()` and `aurora_stat_plans()`, the Cloud SQL and
+  AlloyDB index advisor's recommendations, Neon's `neon_stat_file_cache`
+  beside the buffer cache hit ratio that misreads it, and `pg_qualstats` and
+  `pg_wait_sampling` where installed. Each source says how far back it goes
+  and, when capture is off, which setting says so; whether it is there is
+  read from the catalog first. The platform readers follow each platform's
+  documentation and have not been run on the platforms; `pg_qualstats` and
+  `pg_wait_sampling` were not available to test against either.
+  `aurora_stat_statements` and `aurora_stat_plans` are now allowed in
+  restricted mode.
+
 ### Changed
 
 - A statement that failed was logged at ERROR with its full text, so a

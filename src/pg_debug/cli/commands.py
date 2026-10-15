@@ -154,6 +154,14 @@ async def cmd_partitions(pg: PgDebug, args: argparse.Namespace) -> Any:
     )
 
 
+async def cmd_shard_readiness(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.assess_shard_readiness(interval_seconds=args.interval)
+
+
+async def cmd_history(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.read_history(limit=args.limit)
+
+
 async def cmd_check_migration(pg: PgDebug, args: argparse.Namespace) -> Any:
     return await pg.check_migration(read_sql_or_file(args.sql))
 

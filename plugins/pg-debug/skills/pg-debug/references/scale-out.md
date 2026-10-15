@@ -131,8 +131,8 @@ retained WAL nor `wal_status`. Read them on the primary:
 pg-debug --access-mode restricted execute \
   "SELECT slot_name, slot_type, active, wal_status, safe_wal_size, current_setting('max_slot_wal_keep_size') AS max_slot_wal_keep_size FROM pg_replication_slots"
 
-# Retained bytes need pg_current_wal_lsn() and pg_wal_lsn_diff(), which are not
-# on restricted mode's allowlist. It is only a read: say so, and run it
+# Retained bytes need pg_wal_lsn_diff(), which is not on restricted mode's
+# allowlist (pg_current_wal_lsn() is). It is only a read: say so, and run it
 # unrestricted with a timeout.
 pg-debug --timeout 10 execute \
   "SELECT slot_name, active, wal_status, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS retained_wal FROM pg_replication_slots ORDER BY pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) DESC NULLS LAST"
@@ -183,58 +183,53 @@ fixes, faster local storage and larger instances first. Notion sharded because
 VACUUM kept stalling and could not reclaim dead rows, not because the data
 reached a size.
 
+Start with `shard-readiness`. It argues the question from the reasons not to
+shard, each with the figure the server recorded, and its verdict is "not yet"
+unless none of them stands:
+
+```bash
+pg-debug --access-mode restricted shard-readiness --interval 30
+pg-debug --json shard-readiness --interval 30 | jq '.refusals[] | {reason, summary, figures}'
+```
+
 Do not shard when:
 
-- the load is reads: add replicas;
-- a handful of queries take most of the time: tune them (`top-queries`, then
-  `diagnose`);
-- the problem is retention or bulk deletes: partition (see
-  [schema.md](schema.md));
-- the data is large but the write rate is healthy;
-- no routing key covers most of the workload.
+| Refusal (`reason`) | The figure | Do instead |
+| --- | --- | --- |
+| the load is reads (`read_load`) | reads, SELECTs that lock and write nothing, take 80% or more of the recorded statement time | add replicas |
+| a few statements dominate (`few_queries_dominate`) | the top five statements take half or more of all the recorded time | tune them (`top-queries`, then `diagnose`) |
+| the problem is retention (`retention`) | `partitions` would partition a table by a time column, or the deletes against it filter on its key | partition and drop partitions (see [schema.md](schema.md)) |
+| size alone, with a healthy write rate (`healthy_write_rate`) | fewer than half of at least 10 checkpoints were requested, and autovacuum is behind on no table; the database's size and the sampled WAL rate are carried beside them | keep one primary |
+| no routing key covers most of the workload (`no_routing_key`) | no column is compared by equality in half of the recorded time | keep one primary |
+| no recorded workload (`no_workload`) | `pg_stat_statements` is not installed in the database | install it and wait for representative traffic |
+
+Each refusal carries `figures`, `instead` and `changes_if`, the figure that
+would lift it; `would_change` lists them all. Relay a "no" with its numbers.
+With nothing refusing, which means checkpoints forced by WAL volume or
+autovacuum behind, the verdict is "worth evaluating", and the figures are
+inputs to a decision the user makes, not a verdict pg-debug reached. The
+thresholds are the same judgments the other commands make (half of the time,
+as `partitions` asks of a partition key; half the checkpoints requested, as
+`config` reads them), not published limits; say so when relaying them.
 
 Nor does partitioning stand in for sharding: it "does not remove a
 single-primary write bottleneck", and it cannot let the data outgrow one
 instance.
 
-### What pg-debug can measure for the decision
+### What it measures, and what it cannot
 
-| Input | What pg-debug gives today | What it does not show |
+| Input | What `shard-readiness` reads | What it does not show |
 | --- | --- | --- |
-| Checkpoint pressure | `config` reports when requested checkpoints outnumber timed ones, once at least 10 have happened, with both counts in `evidence` | A manual `CHECKPOINT`, a backup and a shutdown count as requested too; the counts run from the last reset, and pg-debug does not yet say when that was |
-| Whether autovacuum keeps up (the Notion symptom) | `health --type vacuum`: Autovacuum backlog, and Vacuum horizon for whatever holds cleanup back | A trend; each run is one moment |
-| WAL generation rate | Roughly: the sum of per-query `wal_bytes` over a `top-queries --interval` sample | Only the queries listed, so raise `--limit`, and only the connecting role's own unless it has `pg_read_all_stats`; pg-debug does not read `pg_stat_wal`; on PostgreSQL 12 the column reads 0 |
-| Working set against memory | Nothing direct: pg-debug does not read `pg_stat_io` and does not guess at RAM | `health --type buffer` gives cache hit rates, but a block served from the OS cache or a platform's cache tier counts as a miss there, so a low rate does not show the working set outgrowing RAM |
-| A candidate routing key | `partitions` gives, per large table, the share of its recorded query time that filters on its best column (`pruning_share`) and on each other column it could split by (`evidence.alternatives`) | Each table is weighed on its own; nothing checks that one key also covers the joins between tables |
+| WAL generation rate | `pg_stat_wal.wal_bytes` (14 and later) or the WAL position, `pg_current_wal_lsn()`, before it, twice, `--interval` apart: `measurements.wal` | A short interval describes that interval only; on a standby before 14 it cannot be read at all, and on any standby it is the primary's replay, so run it against the primary |
+| Working set against `shared_buffers` | `pg_stat_io` evictions and reads in the normal context over the interval (16 and later): `measurements.io` | Whether the working set fits the machine's RAM: evictions show it does not fit `shared_buffers`, and a block served from the OS cache or a platform's cache tier counts as a read. Nothing is judged from them |
+| Checkpoint pressure | timed and requested checkpoints since the counters' window began (`pg_stat_checkpointer` from 17, `pg_stat_bgwriter` before), with the window and the counts within the interval | A manual `CHECKPOINT`, a backup and a shutdown count as requested too |
+| Whether autovacuum keeps up (the Notion symptom) | the Autovacuum backlog check: tables behind, disabled, or on a scale factor too large | A trend; each run is one moment. `health --type vacuum` adds what holds the vacuum horizon |
+| The workload's shape | this database's `pg_stat_statements` entries, the top 500 by execution time, over its own window: `measurements.workload` (`read_share`, `top_share`, `counting_since`) | Statements evicted or run before the last reset; on PostgreSQL 13 and before the window is unknown |
+| A candidate routing key | `routing_keys`: each column with the share of the recorded time that compares it by equality on any table, or names it in an `INSERT ... VALUES`, and the tables it was seen on | Whether the same-named column means the same thing on each table, and whether the joins between tables are on it |
 
-```bash
-pg-debug config
-pg-debug health --type vacuum
-pg-debug --json top-queries --interval 60 --limit 1000 | jq '[.[].wal_bytes | tonumber] | add'   # bytes in 60s
-pg-debug --json partitions --min-size 100MB
-```
-
-`top-queries` and `partitions` read `pg_stat_statements` for every database
-on the server, not only the one in the URL; on a server with several
-databases, say so beside the figures.
-
-Relay a "no" with its numbers. `config` shows the checkpoint counts only when
-it raises the finding, so when it is silent read them yourself (on PostgreSQL
-17 and later, `num_timed`, `num_requested` and `stats_reset` from
-`pg_stat_checkpointer`):
-
-```bash
-pg-debug --access-mode restricted execute \
-  "SELECT checkpoints_timed, checkpoints_req, stats_reset FROM pg_stat_bgwriter"
-```
-
-Checkpoints that come on schedule and autovacuum that keeps up are evidence
-against the write-bound primary PlanetScale's first criterion describes,
-though not proof of its absence, since neither measures disk IOPS. No column
-carrying most of a table's query time is evidence that no routing key covers
-the workload. Either is a reason for "not yet". When the numbers point the
-other way, they are inputs to a decision the user makes, not a verdict
-pg-debug reached.
+Its pressure figures come from a sample of `--interval` seconds, 10 by
+default: name the interval when relaying them, and take a longer one, or
+several, on a server whose load varies.
 
 ## Citus
 
@@ -265,8 +260,31 @@ Citus is the mature option. Its guidance:
   concurrent users, queries that return ETL-sized results rather than
   summaries, and workloads that move large amounts of data between workers.
 
-pg-debug has no Citus checks. The cluster's own views carry the evidence, and
-restricted mode allows reading them:
+On a coordinator with the `citus` extension, `shard-readiness` reads the
+cluster's own views and returns what it found under `citus.findings`, each
+with a severity, a confidence and its figures:
+
+- `shard_size_skew`: one node holds twice the shard bytes of another
+  (`citus_shards`); `hot_shard`: a shard three times its table's average,
+  usually one large tenant;
+- `tenant_cpu_share`: one tenant used half the CPU the tracked tenants used in
+  the last period (`citus_stat_tenants`), or `tenant_tracking_off` when
+  `citus.stat_tenants_track` is not `all`;
+- `multi_shard_calls`: half the calls in `citus_stat_statements` carry no
+  distribution key. A candidate, since queries on reference and local tables
+  have none either; its `verify` splits them by executor;
+- `timestamp_distribution_column` (proven from the catalog) and
+  `low_cardinality_distribution_column` (a candidate from sampled statistics:
+  fewer distinct values than shards);
+- `unique_key_without_distribution_column` and
+  `foreign_key_without_distribution_column`, a foreign key to another
+  distributed table; a key to a reference table needs none.
+
+A view the server refuses, such as `citus_stat_tenants` before Citus 11.3, is
+named under `citus.errors` and the rest are still read. These checks follow
+Citus's documentation and have not been run against a Citus cluster; they are
+tested against stubbed views. The views can be read directly too, and
+restricted mode allows it:
 
 ```bash
 pg-debug --access-mode restricted execute "SELECT * FROM citus_stat_tenants"

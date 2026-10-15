@@ -617,6 +617,95 @@ def _partition_candidate_lines(candidate: Any) -> list[str]:
     return lines
 
 
+def render_shard_readiness(readiness: Any) -> str:
+    """Render the shard readiness verdict: each refusal with its figure, then what was measured.
+
+    The refusals come first because they are the answer; the measurements
+    follow so that a reader can check them.
+    """
+    lines = [f"[{readiness.verdict.value}] {readiness.summary}"]
+    for refusal in readiness.refusals:
+        lines.append("")
+        lines.append(f"  do not shard: {refusal.summary}")
+        lines.append(f"    instead:    {refusal.instead}")
+        lines.append(f"    changes if: {refusal.changes_if}")
+    if readiness.pressure:
+        lines.append("")
+        lines.append("Pressing on the single primary:")
+        lines.extend(f"  {line}" for line in readiness.pressure)
+
+    measured = readiness.measurements
+    lines.append("")
+    lines.append(f"Measured over {measured.get('interval_seconds', 0):g} seconds:")
+    wal = measured.get("wal") or {}
+    if wal.get("source"):
+        lines.append(f"  WAL written:        {humanize.naturalsize(wal.get('bytes_in_interval') or 0)} ({wal['source']})")
+    io = measured.get("io") or {}
+    if io.get("source"):
+        lines.append(f"  buffers evicted:    {io.get('evictions_in_interval', 0):,}, blocks read {io.get('reads_in_interval', 0):,} (pg_stat_io)")
+    checkpoints = measured.get("checkpoints") or {}
+    if checkpoints:
+        lines.append(
+            f"  checkpoints:        {checkpoints.get('timed', 0):,} timed, {checkpoints.get('requested', 0):,} requested "
+            f"since {checkpoints.get('counting_since') or 'an unrecorded time'}"
+        )
+    autovacuum = measured.get("autovacuum") or {}
+    if autovacuum:
+        lines.append(
+            f"  autovacuum:         {'keeping up' if autovacuum.get('keeping_up') else 'behind'} ({autovacuum.get('tables_behind', 0)} tables behind)"
+        )
+    workload = measured.get("workload") or {}
+    if workload:
+        read_share, top_share = workload.get("read_share"), workload.get("top_share")
+        lines.append(
+            f"  workload:           {workload.get('statements_read', 0)} statements, counting since "
+            f"{workload.get('counting_since') or 'an unrecorded time'}"
+            + (f", {read_share:.0%} of the time in reads" if read_share is not None else "")
+            + (f", top {workload.get('top_statements')} take {top_share:.0%}" if top_share is not None else "")
+        )
+    for key in readiness.routing_keys[:3]:
+        lines.append(f"  routing key:        {key['column']} covers {key['share']:.0%} ({', '.join(key['tables'])})")
+
+    if readiness.citus is not None:
+        lines.append("")
+        lines.append(f"Citus {readiness.citus.get('version')}:")
+        findings = readiness.citus.get("findings") or []
+        if not findings:
+            lines.append("  nothing to report from its views")
+        for finding in findings:
+            lines.append(f"  [{finding.severity.value}, {finding.confidence.value}] {finding.summary}")
+            if finding.verify:
+                lines.append(f"    confirm with: {finding.verify}")
+        for name, error in (readiness.citus.get("errors") or {}).items():
+            lines.append(f"  could not read {name}: {error}")
+
+    for note in readiness.notes:
+        lines.append("")
+        lines.append(f"Note: {note}")
+    return "\n".join(lines)
+
+
+def render_history(report: Any) -> str:
+    """Render each history source: what it holds and how far back, or why it holds nothing."""
+    lines = [f"Platform: {report.platform.get('platform')} ({report.platform.get('signal')})"]
+    for source in report.sources:
+        state = "not here" if not source.present else "capture off" if source.capturing is False else "read"
+        lines.append("")
+        lines.append(f"[{state}] {source.label}")
+        if source.status:
+            lines.append(f"    {source.status}")
+        lines.append(f"    keeps: {source.retention}")
+        if source.rows:
+            lines.append(_indent(render_rows(source.rows), "    "))
+    lines.append("")
+    lines.append(report.note)
+    return "\n".join(lines)
+
+
+def _indent(text: str, prefix: str) -> str:
+    return "\n".join(prefix + line for line in text.splitlines())
+
+
 # -- What PostgreSQL withheld from the role ---------------------------------
 #
 # A role without pg_read_all_stats is shown other roles' backends and

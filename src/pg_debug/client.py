@@ -33,6 +33,8 @@ from .health import DatabaseHealthTool
 from .health import HealthCheckResult
 from .health import HealthType
 from .health.checks.index import MIN_WINDOW_DAYS
+from .history import HistoryReader
+from .history import HistoryReport
 from .index.base import MAX_NUM_INDEX_TUNING_QUERIES
 from .index.base import IndexTuningBase
 from .index.dta import DatabaseTuningAdvisor
@@ -60,6 +62,9 @@ from .platform import detect_from_url
 from .platform import detect_platform
 from .schema import ObjectType
 from .schema import SchemaInspector
+from .sharding import DEFAULT_INTERVAL_SECONDS
+from .sharding import ShardReadiness
+from .sharding import ShardReadinessAssessor
 from .statistics import StatisticsInspector
 from .top_queries import QuerySample
 from .top_queries import TopQueriesCalc
@@ -654,6 +659,62 @@ class PgDebug:
             min_pruning_share=min_pruning_share,
         )
         return await advisor.analyze(query_list=queries, limit=limit)
+
+    # -- Scale-out and kept history ------------------------------------------
+
+    async def assess_shard_readiness(self, interval_seconds: float = DEFAULT_INTERVAL_SECONDS) -> ShardReadiness:
+        """Say whether to shard, which usually means "not yet", with the figure behind each reason.
+
+        Samples the write path for ``interval_seconds`` (the WAL written, the
+        shared buffers evicted from PostgreSQL 16, the checkpoints), reads the
+        cumulative checkpoint counts and the autovacuum backlog, and weighs
+        the workload ``pg_stat_statements`` recorded: the share of time in
+        reads, in the top five statements, and on the best candidate routing
+        key. Each "do not shard" comes back as a
+        :class:`~pg_debug.sharding.Refusal` with its figure. On a Citus
+        coordinator it also reads the cluster's own views. Everything it runs
+        is a read, so it works in restricted mode.
+
+        Args:
+            interval_seconds: How long to sample. The figures describe that
+                interval, so a short one describes little; it is reported with
+                them.
+
+        Returns:
+            A :class:`~pg_debug.sharding.ShardReadiness`: the verdict
+            (``not yet`` by default, ``worth evaluating`` only when nothing
+            refuses and the write path is under pressure), the refusals, the
+            pressure, what would change the verdict, the candidate routing
+            keys and the measurements.
+
+        Raises:
+            InvalidArgumentError: If the interval is not positive.
+        """
+        return await ShardReadinessAssessor(await self.sql_driver()).assess(interval_seconds)
+
+    async def read_history(self, limit: int = 10) -> HistoryReport:
+        """Read the history the platform and the installed extensions keep, and how far back each goes.
+
+        Azure's Query Store, Aurora's ``aurora_stat_statements()`` and
+        ``aurora_stat_plans()``, the Cloud SQL and AlloyDB index advisor's
+        recommendations, and Neon's local file cache, chosen by the detected
+        platform or by the object being in this database; and, wherever they
+        are installed, ``pg_qualstats`` and ``pg_wait_sampling``. A source
+        whose capture is off says so and with which setting. The platform
+        readers follow each platform's documentation and have not been run on
+        the platforms.
+
+        Args:
+            limit: How many rows to read from each source.
+
+        Returns:
+            A :class:`~pg_debug.history.HistoryReport`, one
+            :class:`~pg_debug.history.HistorySource` per source examined.
+
+        Raises:
+            InvalidArgumentError: If the limit is below 1.
+        """
+        return await HistoryReader(await self.sql_driver(), await self._detect_platform()).read(limit=limit)
 
     # -- Live activity -------------------------------------------------------
 

@@ -46,6 +46,7 @@ from .errors import QueryError
 from .health import DatabaseHealthTool
 from .health import HealthCheckResult
 from .health import HealthType
+from .history import HistoryReport
 from .index import MAX_NUM_INDEX_TUNING_QUERIES
 from .index import DatabaseTuningAdvisor
 from .index import IndexRecommendation
@@ -74,6 +75,7 @@ from .schema import ObjectType
 from .schema import SchemaInspector
 from .severity import Confidence
 from .severity import Severity
+from .sharding import ShardReadiness
 from .statistics import StatisticsInspector
 from .sync import SyncPgDebug
 from .top_queries import TopQueriesCalc
@@ -111,6 +113,7 @@ __all__ = [
     "ExtensionRequiredError",
     "HealthCheckResult",
     "HealthType",
+    "HistoryReport",
     "IndexDefinition",
     "IndexRecommendation",
     "IndexTuningError",
@@ -141,6 +144,7 @@ __all__ = [
     "SafeSqlDriver",
     "SchemaInspector",
     "Severity",
+    "ShardReadiness",
     "SqlDriver",
     "StatementReview",
     "StatisticsInspector",

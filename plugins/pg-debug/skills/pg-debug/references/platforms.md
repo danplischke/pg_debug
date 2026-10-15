@@ -415,15 +415,36 @@ in the catalog. Name them rather than guessing around them:
 | RDS, Aurora | database load by wait event and query over time | CloudWatch Database Insights, which replaced the Performance Insights console |
 | Neon | Postgres logs | only through the Datadog or OpenTelemetry integrations (Scale plan, in beta) or Support; Neon has no `auto_explain`, so there is no logged plan for `diagnose --plan` |
 
-Where the platform keeps history that SQL can read, read it with `execute` and
-say how far back it goes:
+Where the platform keeps history that SQL can read, `pg-debug history` reads
+it and says how far back each source goes, and, when capture is off, which
+setting turns it on. It chooses the sources by the platform it detected, or by
+the object being in the database, and reads `pg_qualstats` (the predicates
+queries ran with) and `pg_wait_sampling` (what backends waited on) wherever
+they are installed. Every read is a catalog lookup first, then a SELECT, so it
+works in restricted mode:
+
+```bash
+pg-debug --access-mode restricted history
+pg-debug --json history | jq '.sources[] | {name, present, capturing, retention, status}'
+```
+
+**These readers follow each platform's documentation and have not been run
+on the platforms.** Say so when relaying what they return, and fall back to
+`execute` with the documented views below if one fails. The sources, and what
+the documentation says they keep:
 
 | Platform | What to read | How far back, and when it is there |
 | --- | --- | --- |
 | Azure | Query Store in database `azure_sys`: `query_store.qs_view`, `query_texts_view`, `pgms_wait_sampling_view`, `query_plans_view` | 7 days by default (up to 30), in 15-minute windows; opt-in, since `pg_qs.query_capture_mode` defaults to `none`; plans only with `pg_qs.store_query_plans` on |
 | Aurora | `aurora_stat_statements(true)`: `pg_stat_statements` plus storage and Optimized Reads columns; `aurora_stat_plans(true)`: one row per plan, with its `explain_plan` | the same window as `pg_stat_statements`; plans need `aurora_compute_plan_id` on |
 | AlloyDB, Cloud SQL Enterprise Plus | `google_db_advisor_recommended_indexes`, `google_db_advisor_workload_report` | AlloyDB's advisor runs about every 24 hours; Cloud SQL needs `cloudsql.enable_index_advisor`; a non-superuser sees only recommendations from its own queries |
-| Neon | `neon_stat_file_cache` | since the compute started; needs `CREATE EXTENSION neon` in the database, which is a write, so ask first |
+| Neon | `neon_stat_file_cache` | since the compute started; needs `CREATE EXTENSION neon` in the database, which is a write, so ask first; off on computes of 18 CU and above |
+| any, with the extension | `pg_qualstats_pretty`, `pg_wait_sampling_profile` | in memory since the extension's reset or the server's start; both need their library in `shared_preload_libraries` |
+
+`history` sets Neon's file cache hit ratio beside the buffer cache hit ratio,
+which counts every block the file cache served as a read. It treats the index
+advisor's recommendations as the platform's, not pg-debug's: simulate one with
+`explain --hypothetical-index` before creating it.
 
 Query Store lives in a database of its own, which any role can read, so point
 the URL at it:
@@ -434,9 +455,10 @@ pg-debug -d "postgresql://user@host:5432/azure_sys" --access-mode restricted \
 ```
 
 Microsoft's pages disagree on whether it records on read replicas, so look at
-a replica's `azure_sys` before assuming it has nothing. The `aurora_stat_*`
-functions are not on restricted mode's list of allowed functions; if it
-refuses them, ask before running them in unrestricted mode with `--timeout`.
+a replica's `azure_sys` before assuming it has nothing. `aurora_stat_statements`
+and `aurora_stat_plans` are on restricted mode's list of allowed functions; a
+build from before `history` refuses them, and then ask before running them in
+unrestricted mode with `--timeout`.
 
 ## Three platforms that need care
 
