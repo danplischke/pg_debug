@@ -27,6 +27,8 @@ without an MCP client in the loop.
 - **Migration review** — read a migration before running it and see, per statement, the lock it takes, how long it holds it, whether it rewrites the table, and a safer rewrite where one exists. Connected, it reports how big the tables actually are, which is what decides whether a rewrite is a pause or an outage.
 - **Data model review** — foreign keys with no index behind them, keys whose two sides are different types, tables with no primary key, columns ordered so alignment padding costs bytes on every row, and types that do not mean what they look like. Each finding says whether it is proven from the catalog or inferred from statistics, and carries the DDL that fixes it.
 - **Partition advice** — whether a table is worth partitioning, decided by the share of recorded query time that would still prune rather than by the table's size. It is built to say no: a 400 GB table where a third of the query time filters on a timestamp is a worse table after partitioning, and the verdict comes with the number behind it either way.
+- **Shard readiness** — whether to shard, which usually means "not yet": reads that replicas would take, a few statements that tuning would fix, old data that partitioning would drop, a write path that shows no pressure, or no routing key that covers most of the workload, each refusal with the figure behind it. The write path is sampled over an interval; on a Citus coordinator the cluster's own views are read too.
+- **Kept history** — the history a platform keeps beyond `pg_stat_statements`, where it keeps it: Azure's Query Store, Aurora's `aurora_stat_statements()` and `aurora_stat_plans()`, the Cloud SQL and AlloyDB index advisor, Neon's local file cache, and `pg_qualstats` and `pg_wait_sampling` wherever they are installed. Each says how far back it goes and when capture is off. The platform readers follow the platforms' documentation and have not been run on them.
 - **Health checks** — invalid/duplicate/bloated/unused indexes, table bloat, connection utilization, transaction ID wraparound risk, autovacuum backlog and what is holding the vacuum horizon, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints, statistics freshness, tables read sequentially far more than through an index.
 - **Top queries** — the most expensive queries recorded by `pg_stat_statements`, ranked by resource blend or by execution time, cumulatively or sampled over an interval.
 - **Index tuning** — recommend indexes for your recorded workload or for a specific set of queries, with before/after planner costs, the size HypoPG measures for each candidate, and what each one will cost to keep up to date.
@@ -94,6 +96,9 @@ pg-debug config --exit-code              # fails on a durability setting that is
 pg-debug partitions                      # is any table worth partitioning?
 pg-debug partitions --min-size 500MB --min-pruning-share 0.7
 
+pg-debug shard-readiness --interval 30   # should we shard? usually not yet, with the figures
+pg-debug history                         # Query Store, aurora_stat_*, the index advisor, Neon's file cache, pg_qualstats
+
 pg-debug check-migration 001_add_column.sql   # what will this lock, and for how long?
 pg-debug check-migration --offline --exit-code migrations/*.sql
 
@@ -141,6 +146,8 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--min-window-days DAYS` (default 7: how long the index counters must have counted before an index is called unused), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
 | `config` | `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
 | `partitions` | `--min-size SIZE` (default 1GB, accepts `500MB`/`2GB`), `--min-pruning-share SHARE` (default 0.5), `--limit N` (default 200) |
+| `shard-readiness` | `-i, --interval SECONDS` (default 10): how long to sample the WAL, buffer evictions and checkpoints |
+| `history` | `-n, --limit N` (default 10): rows to read from each source |
 | `check-migration SQL` | a file path, inline SQL, or `-` for stdin; `--offline`, `--exit-code` |
 | `model` | `-s, --schema SCHEMA`, `-r, --rule RULES` (comma-separated, default `all`), `--proven-only`, `--min-rows N` (default 1000), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
 | `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10, ignored for cumulative `resources`), `-i, --interval SECONDS` |
@@ -241,6 +248,32 @@ have to gain the partition key it is recreated rather than copied, because
 `LIKE ... INCLUDING ALL` brings the old key along and PostgreSQL rejects the
 CREATE outright. The monthly boundaries come from the column's histogram, so
 they cover the span the data actually occupies.
+
+`shard-readiness` starts from "not yet". No authoritative threshold for
+sharding exists, so it argues from the reasons not to, each with the figure
+the server recorded: reads taking 80% or more of the recorded statement time
+(add replicas), the top five statements taking half of it (tune them), a large
+table whose time and deletes filter on a time column (partition it, as
+`partitions` would), a write path with no pressure, meaning checkpoints mostly
+timed and autovacuum keeping up, whatever the database's size, and no column
+compared by equality in half of the recorded time (no routing key). The WAL
+written (`pg_stat_wal` from 14, the WAL position before it), the shared
+buffers evicted (`pg_stat_io`, 16) and the checkpoints are sampled over
+`--interval`, a short window it reports with the figures; the workload figures
+come from `pg_stat_statements` over its own window. With nothing refusing and
+the write path under pressure the verdict is "worth evaluating", never
+"shard". On a Citus coordinator it reads shard size skew, the top tenant's CPU
+share, the calls with no distribution key, timestamp and low-cardinality
+distribution columns, and unique and foreign keys without the distribution
+column; that part follows Citus's documentation and is tested against stubbed
+views only.
+
+`history` reads what a platform keeps beyond `pg_stat_statements`, chosen by
+the detected platform or by the object being in this database, and says how
+far back each goes and, when capture is off, which setting turns it on. Query
+Store lives in the database `azure_sys`, so on Azure point the URL there.
+These readers follow each platform's documentation and have not been run on
+the platforms.
 
 `diagnose` reads the plan instead of only printing it. The number it turns on
 is the row estimate: the planner picks a join method, a scan and an order from
@@ -584,6 +617,8 @@ context = QueryContext.from_file("pg-debug.toml")
 | `check_migration(sql)` | `list[StatementReview]` — most severe first |
 | `review_configuration()` | `list[ConfigFinding]` — most severe first |
 | `suggest_partitions(sql=None, min_table_bytes=1GB, min_pruning_share=0.5, limit=200)` | `list[PartitionCandidate]` — recommended first, then by size |
+| `assess_shard_readiness(interval_seconds=10)` | `ShardReadiness` — `verdict` (`not yet` or `worth evaluating`), `refusals` each with its `figures`, `pressure`, `would_change`, `routing_keys`, `measurements`, `citus` (None without the extension) |
+| `read_history(limit=10)` | `HistoryReport` — the `platform` detected, one `HistorySource` per source examined with `present`, `capturing`, `retention`, `status`, `rows` |
 | `get_top_queries(sort_by="resources", limit=10, interval_seconds=None)` | `list[dict]` — one per query; a sample leaves out other roles' statements whose queryid is withheld |
 | `sample_top_queries(interval_seconds, sort_by="resources", limit=10)` | `QuerySample` — `queries`, and `withheld`, how many other roles' statements ran and could not be ranked |
 | `statistics_access()` | `StatisticsAccess` — `role`, `reads_all_stats`, `member`, `remedy` |
@@ -826,8 +861,8 @@ is the same for coding agents.
 | `health/` | `health`: `tool.py` runs the checks in `checks/`, one module per check. |
 | `index/` | `tune-workload` and `tune-queries`: the search in `base.py`, the `dta` and `llm` methods, and the report. |
 | `index_use/` | `index-use`: the query's predicates, the catalog it compares them with, and the verdict for each index. |
-| `model/`, `migration/`, `partition/` | `model`, `check-migration` and `partitions`. |
-| `activity.py`, `configuration.py`, `schema.py`, `statistics.py`, `top_queries.py` | Features that fit in one file. |
+| `model/`, `migration/`, `partition/`, `sharding/` | `model`, `check-migration`, `partitions` and `shard-readiness`. |
+| `activity.py`, `configuration.py`, `history.py`, `schema.py`, `statistics.py`, `top_queries.py` | Features that fit in one file. |
 | `baseline.py` | `--baseline` and `--save-baseline`: the identity each finding is known by, and the file that records them. |
 
 A feature is one module until it needs a second file. `tests/unit/` mirrors

@@ -117,7 +117,8 @@ and answering the question.
 | Running it behind a connection pooler (PgBouncer, Supavisor, a `-pooler` host) | `pg-debug --version` and `--help`, as Connecting says; a build that sets `--search-path` "on the connection" needs the direct or session endpoint | [platforms.md](references/platforms.md) |
 | On a managed or serverless platform (Neon, Supabase, RDS/Aurora, Cloud SQL/AlloyDB, Azure) | the connection URL's host and port, to name the platform, then the command for the question | [platforms.md](references/platforms.md) |
 | On a read replica, or about replication slots | `pg-debug health --type replication,vacuum`; the replica's own URL for the queries it runs | [scale-out.md](references/scale-out.md) |
-| Should we shard? (Citus, sharding proxies) | `pg-debug config`, `health --type vacuum`, `top-queries --interval 10` | [scale-out.md](references/scale-out.md) |
+| Should we shard? (Citus, sharding proxies) | `pg-debug shard-readiness --interval 30` | [scale-out.md](references/scale-out.md) |
+| What history does the platform keep? (Azure Query Store, Aurora plans, the Cloud SQL/AlloyDB index advisor, Neon's file cache, pg_qualstats, pg_wait_sampling) | `pg-debug history` | [platforms.md](references/platforms.md) |
 | Writing Python that uses pg_debug | the `pg_debug` package | [python.md](references/python.md) |
 
 An empty result is an answer, not a failure: a plan whose estimates matched, a
