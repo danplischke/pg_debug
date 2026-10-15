@@ -11,6 +11,7 @@ from pg_debug.client import resolve_database_url
 from pg_debug.db import DbConnPool
 from pg_debug.db import SafeSqlDriver
 from pg_debug.db import SqlDriver
+from pg_debug.db.privileges import StatisticsAccess
 from pg_debug.errors import ConnectionFailedError
 from pg_debug.errors import ExplainPlanError
 from pg_debug.errors import ExtensionRequiredError
@@ -20,6 +21,7 @@ from pg_debug.errors import QueryError
 from pg_debug.model import RuleId
 from pg_debug.plans.tree import ExplainPlanArtifact
 from pg_debug.plans.tree import PlanNode
+from pg_debug.top_queries import QuerySample
 
 
 @pytest.fixture
@@ -34,6 +36,16 @@ def pool():
 @pytest.fixture
 def pg(pool):
     return PgDebug(access_mode=AccessMode.UNRESTRICTED, pool=pool)
+
+
+@pytest.fixture
+def hypopg_installed():
+    """HypoPG present, so index tuning gets past the client's own check for it."""
+    with (
+        patch("pg_debug.client.check_hypopg_installation_status", AsyncMock(return_value=(True, ""))) as check,
+        patch("pg_debug.client.hypopg_unobtainable", AsyncMock(return_value=None)),
+    ):
+        yield check
 
 
 def make_plan() -> ExplainPlanArtifact:
@@ -330,6 +342,7 @@ async def test_review_data_model_passes_its_options_through(pg):
             schema="reporting",
             min_rows=50,
             proven_only=True,
+            static=False,
         )
 
 
@@ -354,14 +367,14 @@ async def test_analyze_db_health_returns_one_entry_per_check(pg):
     ):
         tool_cls.return_value.run_checks = AsyncMock(return_value={"Connection health": "ok"})
         assert await pg.analyze_db_health("connection") == {"Connection health": "ok"}
-        tool_cls.return_value.run_checks.assert_awaited_once_with("connection")
+        tool_cls.return_value.run_checks.assert_awaited_once_with("connection", static=False)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "sort_by,expected_method,expected_kwargs",
     [
-        ("resources", "get_top_resource_queries", {}),
+        ("resources", "get_top_resource_queries", {"limit": 5}),
         ("mean_time", "get_top_queries_by_time", {"limit": 5, "sort_by": "mean"}),
         ("total_time", "get_top_queries_by_time", {"limit": 5, "sort_by": "total"}),
     ],
@@ -382,6 +395,38 @@ async def test_get_top_queries_rejects_unknown_sort(pg):
     with patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))):
         with pytest.raises(InvalidArgumentError, match="Invalid sort criteria"):
             await pg.get_top_queries(sort_by="magic")  # type: ignore[arg-type]
+        with pytest.raises(InvalidArgumentError, match="Invalid sort criteria"):
+            await pg.sample_top_queries(1, sort_by="magic")  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_a_sampled_ranking_is_a_plain_list_and_what_it_left_out_is_asked_apart(pg):
+    sample = QuerySample(queries=[{"queryid": 1, "query": "SELECT 1"}], withheld=3)
+    with (
+        patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
+        patch("pg_debug.client.TopQueriesCalc") as tool_cls,
+    ):
+        tool_cls.return_value.measure = AsyncMock(return_value=sample)
+
+        ranking = await pg.get_top_queries(sort_by="total_time", limit=5, interval_seconds=2)
+        assert type(ranking) is list and ranking == sample.queries
+        assert await pg.sample_top_queries(2, sort_by="mean_time") == sample
+
+    assert tool_cls.return_value.measure.await_args_list[0].kwargs == {"sort_by": "total", "limit": 5}
+    assert tool_cls.return_value.measure.await_args_list[1].kwargs == {"sort_by": "mean", "limit": 10}
+
+
+@pytest.mark.asyncio
+async def test_what_the_statistics_views_withhold_is_asked_of_the_server(pg):
+    access = StatisticsAccess(role="app_user", reads_all_stats=False, remedy="GRANT pg_monitor TO app_user")
+    backends = [{"pid": 41, "in_transaction": True, "locks": [], "blocking": []}]
+    with (
+        patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
+        patch("pg_debug.client.privileges.statistics_access", AsyncMock(return_value=access)),
+        patch("pg_debug.client.privileges.withheld_backends", AsyncMock(return_value=backends)),
+    ):
+        assert await pg.statistics_access() == access
+        assert await pg.withheld_backends() == backends
 
 
 # -- Index tuning -----------------------------------------------------------
@@ -400,6 +445,7 @@ async def test_analyze_query_indexes_caps_query_count(pg):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("hypopg_installed")
 async def test_analyze_query_indexes_uses_dta_by_default(pg):
     with (
         patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
@@ -414,6 +460,7 @@ async def test_analyze_query_indexes_uses_dta_by_default(pg):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("hypopg_installed")
 async def test_analyze_workload_indexes_with_llm_method(pg):
     with (
         patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
@@ -442,6 +489,7 @@ async def test_llm_method_rejects_multiple_queries_up_front(pg):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("hypopg_installed")
 async def test_llm_method_accepts_a_single_query(pg):
     with (
         patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
@@ -475,6 +523,7 @@ def test_llm_model_defaults_to_the_environment(monkeypatch, pool):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("hypopg_installed")
 async def test_llm_model_from_the_client_reaches_the_optimizer(pg):
     with (
         patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),
@@ -489,6 +538,7 @@ async def test_llm_model_from_the_client_reaches_the_optimizer(pg):
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("hypopg_installed")
 async def test_a_per_call_llm_model_wins(pg):
     with (
         patch.object(PgDebug, "sql_driver", AsyncMock(return_value=MagicMock(spec=SqlDriver))),

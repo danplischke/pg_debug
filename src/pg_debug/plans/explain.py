@@ -12,6 +12,7 @@ from ..db import check_postgres_version_requirement
 from ..errors import ExplainPlanError
 from ..errors import InvalidArgumentError
 from ..parsing import SqlBindParams
+from ..queries.hypopg import HYPOPG_RESET_SQL
 from .hypothetical import IndexDefinition
 from .tree import ExplainPlanArtifact
 
@@ -216,7 +217,7 @@ class ExplainPlanTool:
         """
         try:
             # Create the indexes query
-            create_indexes_query = "SELECT hypopg_reset();"
+            create_indexes_query = f"{HYPOPG_RESET_SQL};"
             if len(indexes) > 0:
                 create_indexes_query += SafeSqlDriver.param_sql_to_query(
                     "SELECT hypopg_create_index({});" * len(indexes),
@@ -233,7 +234,14 @@ class ExplainPlanTool:
             explain_plan_query = f"{create_indexes_query}EXPLAIN ({', '.join(explain_options)}) {query_text}"
             # The whole batch shares one transaction and so the context: the
             # hypothetical indexes it creates live in the backend, not the role.
-            plan_result = await self.sql_driver.execute_query(explain_plan_query, in_context=True)  # type: ignore
+            # They outlive the transaction, so the same transaction resets
+            # them: behind a transaction pooler the backend goes to another
+            # client next, whose plain EXPLAIN would use them.
+            plan_result = await self.sql_driver.execute_query(
+                explain_plan_query,  # type: ignore[arg-type]
+                in_context=True,
+                cleanup=HYPOPG_RESET_SQL,
+            )
 
             # Extract the plan
             if plan_result and plan_result[0].cells.get("QUERY PLAN"):

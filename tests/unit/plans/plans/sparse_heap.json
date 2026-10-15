@@ -1,0 +1,50 @@
+[
+ {
+  "Plan": {
+   "Node Type": "Seq Scan",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Relation Name": "sparse",
+   "Schema": "public",
+   "Alias": "sparse",
+   "Startup Cost": 0.0,
+   "Total Cost": 4853.2,
+   "Plan Rows": 264720,
+   "Plan Width": 40,
+   "Actual Startup Time": 0.021,
+   "Actual Total Time": 21.261,
+   "Actual Rows": 3000,
+   "Actual Loops": 1,
+   "Output": [
+    "id",
+    "payload"
+   ],
+   "Shared Hit Blocks": 2206,
+   "Shared Read Blocks": 0,
+   "Shared Dirtied Blocks": 0,
+   "Shared Written Blocks": 0,
+   "Local Hit Blocks": 0,
+   "Local Read Blocks": 0,
+   "Local Dirtied Blocks": 0,
+   "Local Written Blocks": 0,
+   "Temp Read Blocks": 0,
+   "Temp Written Blocks": 0
+  },
+  "Query Identifier": 8024415876626988255,
+  "Planning": {
+   "Shared Hit Blocks": 6,
+   "Shared Read Blocks": 0,
+   "Shared Dirtied Blocks": 0,
+   "Shared Written Blocks": 0,
+   "Local Hit Blocks": 0,
+   "Local Read Blocks": 0,
+   "Local Dirtied Blocks": 0,
+   "Local Written Blocks": 0,
+   "Temp Read Blocks": 0,
+   "Temp Written Blocks": 0
+  },
+  "Planning Time": 0.093,
+  "Triggers": [],
+  "Execution Time": 21.538
+ }
+]

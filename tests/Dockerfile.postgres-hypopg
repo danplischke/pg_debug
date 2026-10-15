@@ -1,10 +1,12 @@
 ARG PG_VERSION=15
 FROM postgres:${PG_VERSION}
 
-# Install build dependencies
+# Install build dependencies, and PgBouncer for the tests that run pg-debug
+# behind a transaction pooler. The image's PGDG repository carries it.
 RUN apt-get update && apt-get install -y \
   build-essential \
   git \
+  pgbouncer \
   postgresql-server-dev-${PG_MAJOR} \
   && rm -rf /var/lib/apt/lists/*
 

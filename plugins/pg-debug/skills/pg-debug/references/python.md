@@ -21,7 +21,9 @@ async def main():
         print(plan.to_text())              # readable summary
 
         for name, check in (await pg.analyze_db_health("index")).items():
-            if not check.healthy:
+            if check.error:
+                print(name, "could not run:", check.error)
+            elif not check.healthy:
                 print(name, check.findings)
 
         for finding in await pg.review_data_model(schema="public"):
@@ -44,8 +46,22 @@ The client connects lazily; `await pg.connect()` first if you want a bad URL to
 fail immediately. Close it (or use the context manager) so the pool is
 released.
 
-Failures raise rather than returning error strings. Catch `PgDebugError`, or
-the specific subclass — `ConnectionFailedError`, `InvalidArgumentError`,
+An open client holds no connection while idle: the pool closes each 30 to 60
+seconds after its last use, so it does not keep an Aurora serverless instance
+from pausing, and the next call connects again. A reconnect refused for a
+reason that will not clear, such as `max_connections` or a role's connection
+limit, raises `ConnectionFailedError` at once with the server's reason. A pool
+handed in with `pool=` keeps its owner's settings and is not closed with the
+client, so close it too. Connecting wakes a
+suspended Neon compute and resets its idle timer, and any connection attempt,
+even one that fails to log in, resumes a paused Aurora serverless instance,
+which takes about 15 seconds. The first timings after a wake run cold.
+
+Failures raise rather than returning error strings, except in
+`analyze_db_health()`, which returns a check that could not run with its
+`error` and runs the rest. Catch `PgDebugError`, or
+the specific subclass — `ConnectionFailedError` (no connection could be had,
+with the server's reason when it refused one), `InvalidArgumentError`,
 `ExtensionRequiredError` (has `.extension`), `ExplainPlanError`, `QueryError`
 (a statement PostgreSQL rejected or restricted mode refused),
 `IndexTuningError` (tables never analyzed, or nothing in the workload could
@@ -58,8 +74,28 @@ health, and `list[ModelFinding]` for the data model review.
 
 The live-activity and statistics methods mirror the commands:
 `list_activity(include_idle=, min_duration_seconds=, blocked_only=)`,
-`lock_tree()`, `vacuum_progress()`, `explain_index_use(sql, index=)`, `column_stats(table)`, `extended_statistics(table)`, and
-`get_top_queries(..., interval_seconds=)` for sampling. The model review is
+`lock_tree()`, `vacuum_progress()`, `classify_waits()` (a `WaitDiagnosis`: `classifications` with
+`kind`, `confidence`, `evidence` and any `judgment`, and what was `declined`), `sample_waits(seconds, interval=0.5)`
+(a `WaitProfile`: `timing.samples`, `timing.achieved_interval_seconds`, `active_sessions`, `waits`, `queries`,
+`extension`), `explain_index_use(sql, index=)`, `column_stats(table)`, `extended_statistics(table)`, and
+`get_top_queries(..., interval_seconds=)` for sampling. Their rows are what
+PostgreSQL showed the connecting role: `statistics_access()` says whether it is
+shown everything and how it could be; `withheld_backends()` gives
+`in_transaction`, `locks` and `blocking` for each backend it is not; and
+`sample_top_queries(interval_seconds, ...)` returns the ranking with
+`withheld`, how many other roles' statements ran and could not be ranked,
+each query's `change` (`new`, `slower`, `faster`: candidates) and
+`changes_refused` when nothing could be judged.
+`sample_server_rates(interval_seconds=10)` returns `ServerRates`, whose
+`groups` each carry `counters` with `delta` and `per_second`, or `refused`
+with the reason; `rates.group("database")` picks one. `inspect_pooler(admin_url)`
+returns `PoolerReport` with PgBouncer's `pools`, `stats`, `config` and the
+saturation `findings`.
+`counting_windows()` says since when the table, checkpoint and
+`pg_stat_statements` counters have counted; relay it with any cumulative
+figure, since a crash or a reset starts them again.
+`analyze_db_health(..., min_window_days=7)` is how long the index counters must
+have counted before an index is called unused. The model review is
 `review_data_model(rules=, schema=, min_rows=, proven_only=)`; each
 `ModelFinding` has `rule`, `confidence`, `severity`, `summary`, `detail`,
 `evidence`, `remediation`, `verify` and `impact_bytes`, plus `to_dict()`.
@@ -82,19 +118,49 @@ async with PgDebug("postgresql://localhost/mydb", context=context) as pg:
 context = QueryContext.from_file("pg-debug.toml")   # the [context] the CLI reads
 ```
 
-Each `execute_sql` call may land on a different pooled connection, so session
-state does not carry over: a `SET`, a temp table, an advisory lock or a
-hypothetical index created in one call is not guaranteed to exist in the next,
-and a `BEGIN` will not hold. When you need several statements in one session,
-drop to the driver and pin it:
+Each `execute_sql` call may land on a different pooled connection, and behind
+a transaction pooler (PgBouncer in transaction mode, Supavisor, a `-pooler`
+host) on a different server backend, so session state does not carry over: a
+`SET`, a temp table, an advisory lock or a hypothetical index created in one
+call is not guaranteed to exist in the next, and a `BEGIN` will not hold. What
+has to share a backend has to share a transaction: put the statements in one
+`execute_query` call on the driver, and undo backend state with a `cleanup`,
+which runs in the same transaction even when the statements fail:
 
 ```python
 driver = await pg.sql_driver()
-async with driver.session():
-    await driver.execute_query("SELECT hypopg_create_index('CREATE INDEX ON orders (user_id)')")
-    rows = await driver.execute_query("EXPLAIN SELECT * FROM orders WHERE user_id = 42")
+rows = await driver.execute_query(
+    "SELECT hypopg_create_index('CREATE INDEX ON orders (user_id)');"
+    "EXPLAIN SELECT * FROM orders WHERE user_id = 42",
+    cleanup="SELECT hypopg_reset()",
+)
 ```
 
-Each statement still commits on its own, so a `SET LOCAL` ends with the
-statement that made it even in a pinned session; a `QueryContext` is the way to
-run a query with a setting.
+A setting is not a `SET` either, nor a `SET LOCAL`, which ends with the
+statement that made it: a `QueryContext` is the way to run a query with a
+setting. `driver.with_context(context)` gives a driver that applies one to
+the statements it runs with `in_context=True`, and to no others:
+
+```python
+tuned = driver.with_context(QueryContext(settings={"work_mem": "256MB"}))
+rows = await tuned.execute_query("EXPLAIN ANALYZE SELECT ...", in_context=True)
+```
+
+`driver.session()` pins one pooled connection for a block of statements; that
+is one session on a direct connection, but not behind a transaction pooler.
+
+`SqlDriver(conn=...)` takes a `DbConnPool`, which already prepares nothing on
+the server, or a single psycopg connection. If you open that connection
+yourself and it may go through a transaction pooler, open it with
+`psycopg.AsyncConnection.connect(url, prepare_threshold=None)` (or build the
+psycopg pool you borrow it from with `kwargs={"prepare_threshold": None}`):
+psycopg prepares a statement it has run five times, and a pooler without
+prepared-statement support fails it with
+`prepared statement "_pg3_0" already exists`.
+
+On a `SQL_ASCII` database also pass `client_encoding="UTF8"`, or the encoding
+the data is really in: `psycopg.AsyncConnection.connect(url,
+prepare_threshold=None, client_encoding="UTF8")`. Left to libpq, such a
+connection gets SQL_ASCII, psycopg returns every text column as `bytes`, and
+`SqlDriver` refuses it with a `QueryError` that says so. A `DbConnPool` makes
+this choice itself.

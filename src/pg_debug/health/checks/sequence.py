@@ -6,6 +6,7 @@ from psycopg.sql import Identifier
 
 from ...db import SafeSqlDriver
 from ...db import SqlDriver
+from ...queries.sequences import type_max
 from ..result import HealthCheckResult
 
 SEQUENCE_HEALTH = "Sequence health"
@@ -121,7 +122,7 @@ class SequenceHealthCalc:
                 continue
 
             # Determine max value based on column type
-            max_value = 2147483647 if seq["column_type"] == "integer" else 9223372036854775807
+            max_value = type_max(seq["column_type"])
 
             # Get sequence attributes
             attrs = await SafeSqlDriver.execute_param_query(

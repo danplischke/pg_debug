@@ -90,6 +90,18 @@ class PlanNode:
     workers_planned: int | None = None
     workers_launched: int | None = None
 
+    # Partitions an Append or MergeAppend dropped when execution began, by
+    # run-time pruning. Present, and zero, whenever run-time pruning was
+    # possible; absent when it was not.
+    subplans_removed: int | None = None
+    # An Index Only Scan's visits to the heap, totalled over its loops: each
+    # one is a page the visibility map could not vouch for.
+    heap_fetches: int | None = None
+    # How a subplan hangs off the tree: "CTE u", "InitPlan 1 (returns $0)",
+    # "SubPlan 2". A CTE Scan names the CTE it reads in ``cte_name``.
+    subplan_name: str | None = None
+    cte_name: str | None = None
+
     #: JSON key -> attribute, for the fields that are copied across unchanged.
     _SIMPLE_FIELDS: ClassVar[dict[str, str]] = {
         "Relation Name": "relation_name",
@@ -115,6 +127,10 @@ class PlanNode:
         "Lossy Heap Blocks": "lossy_heap_blocks",
         "Workers Planned": "workers_planned",
         "Workers Launched": "workers_launched",
+        "Subplans Removed": "subplans_removed",
+        "Heap Fetches": "heap_fetches",
+        "Subplan Name": "subplan_name",
+        "CTE Name": "cte_name",
     }
 
     @classmethod
@@ -162,6 +178,15 @@ class ExplainPlanArtifact:
     plan_tree: PlanNode
     planning_time: float | None = None
     execution_time: float | None = None
+    #: The ``JIT`` section: functions compiled, the options used and the
+    #: milliseconds spent in each phase. None when JIT did not run.
+    jit: dict[str, Any] | None = None
+    #: The ``Triggers`` section: each trigger's name, relation, calls and
+    #: milliseconds, which no plan node's time includes.
+    triggers: list[dict[str, Any]] = field(default_factory=list)
+    #: The values of a prepared statement's parameters, as ``auto_explain``
+    #: logs them (``"$1 = 'queued'"``). Only auto_explain's output has them.
+    query_parameters: str | None = None
 
     def to_text(self) -> str:
         """Convert the explain plan to a text representation.
@@ -240,11 +265,18 @@ class ExplainPlanArtifact:
         planning_time = plan_data.get("Planning Time")
         execution_time = plan_data.get("Execution Time")
 
+        jit = plan_data.get("JIT")
+        triggers = plan_data.get("Triggers")
+        parameters = plan_data.get("Query Parameters")
+
         return cls(
             value=json.dumps(plan_data, indent=2),
             plan_tree=plan_tree,
             planning_time=planning_time,
             execution_time=execution_time,
+            jit=jit if isinstance(jit, dict) else None,
+            triggers=[t for t in triggers if isinstance(t, dict)] if isinstance(triggers, list) else [],
+            query_parameters=parameters if isinstance(parameters, str) else None,
         )
 
     @staticmethod

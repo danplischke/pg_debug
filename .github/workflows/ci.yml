@@ -39,6 +39,9 @@ jobs:
 
   test:
     runs-on: ${{ matrix.os }}
+    # The suite takes about seven minutes; a hung test would otherwise hold
+    # the runner for GitHub's six hours.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -90,6 +93,7 @@ jobs:
   # runs at 2.8 here, not at its own floor.
   lowest:
     name: lowest dependencies (3.12)
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 — https://github.com/actions/checkout/releases/tag/v7.0.1

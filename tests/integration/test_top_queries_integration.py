@@ -4,12 +4,13 @@ from typing import Any
 import psycopg
 import pytest
 import pytest_asyncio
+from psycopg.conninfo import make_conninfo
 
 import pg_debug.top_queries
+from pg_debug import PgDebug
 from pg_debug.db import QUERY_MARKER
 from pg_debug.db import SqlDriver
 from pg_debug.errors import ExtensionRequiredError
-from pg_debug.top_queries import PG_STAT_STATEMENTS
 from pg_debug.top_queries import TopQueriesCalc
 
 logger = logging.getLogger(__name__)
@@ -166,19 +167,12 @@ async def test_extension_not_available(local_sql_driver):
     calc = TopQueriesCalc(sql_driver=local_sql_driver)
 
     with pytest.MonkeyPatch().context() as mp:
-        from pg_debug.db.extensions import ExtensionStatus
 
-        async def mock_check(*args, **kwargs):
-            return ExtensionStatus(
-                is_installed=False,
-                is_available=True,
-                name=PG_STAT_STATEMENTS,
-                message="Extension not installed",
-                default_version=None,
-            )
+        async def not_installed(*args, **kwargs):
+            return None
 
         # Patch the name TopQueriesCalc actually calls, not the one it was imported from.
-        mp.setattr(pg_debug.top_queries, "check_extension", mock_check)
+        mp.setattr(pg_debug.top_queries, "locate_pg_stat_statements", not_installed)
 
         with pytest.raises(ExtensionRequiredError) as excinfo:
             await calc.get_top_queries_by_time()
@@ -186,3 +180,50 @@ async def test_extension_not_available(local_sql_driver):
     message = str(excinfo.value)
     assert "not currently installed" in message
     assert "CREATE EXTENSION" in message
+
+
+OTHER_DATABASE = "pgdebug_top_queries_other"
+
+
+@pytest.mark.asyncio
+async def test_the_workload_is_this_database_s_read_from_where_the_extension_is(connection_string):
+    """Supabase installs pg_stat_statements in the schema extensions. With a
+    search path that left its schema out, every reader failed with "relation
+    pg_stat_statements does not exist"; and every reader counted the
+    statements of every database on the server as this one's workload."""
+    with psycopg.connect(connection_string, autocommit=True) as admin:
+        if not admin.execute("SELECT 1 FROM pg_available_extensions WHERE name = 'pg_stat_statements'").fetchone():
+            pytest.skip("pg_stat_statements extension not available")
+        admin.execute("DROP EXTENSION IF EXISTS pg_stat_statements")
+        admin.execute("CREATE SCHEMA IF NOT EXISTS extensions")
+        admin.execute("CREATE SCHEMA IF NOT EXISTS reporting")
+        admin.execute("CREATE EXTENSION pg_stat_statements SCHEMA extensions")
+        # The server is shared with every other test, whose statements would
+        # otherwise outrank the few this one runs.
+        admin.execute("SELECT extensions.pg_stat_statements_reset()")
+        admin.execute(f"DROP DATABASE IF EXISTS {OTHER_DATABASE}")
+        admin.execute(f"CREATE DATABASE {OTHER_DATABASE}")
+    other = make_conninfo(connection_string, dbname=OTHER_DATABASE)
+    try:
+        with psycopg.connect(other, autocommit=True) as elsewhere:
+            for _ in range(5):
+                elsewhere.execute("SELECT 1 AS only_in_the_other_database")
+        with psycopg.connect(connection_string, autocommit=True) as here:
+            for _ in range(5):
+                here.execute("SELECT 1 AS only_in_this_database")
+
+        async with PgDebug(connection_string, search_path="reporting") as pg:
+            ranked = await pg.get_top_queries(sort_by="total_time", limit=500)
+            resources = await pg.get_top_queries(sort_by="resources")
+
+        texts = [row["query"] for row in ranked]
+        # Constants are recorded as $1; the aliases are kept.
+        assert any("only_in_this_database" in text for text in texts), texts
+        assert not any("only_in_the_other_database" in text for text in texts + [row["query"] for row in resources])
+    finally:
+        with psycopg.connect(connection_string, autocommit=True) as admin:
+            admin.execute(f"DROP DATABASE IF EXISTS {OTHER_DATABASE}")
+            # Back where the other tests expect it.
+            admin.execute("DROP EXTENSION IF EXISTS pg_stat_statements")
+            admin.execute("CREATE EXTENSION pg_stat_statements SCHEMA public")
+            admin.execute("DROP SCHEMA IF EXISTS extensions")

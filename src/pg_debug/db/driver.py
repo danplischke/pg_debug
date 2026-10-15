@@ -2,24 +2,34 @@
 
 from __future__ import annotations
 
+import asyncio
+import copy
+import functools
 import logging
+import os
 import re
+import time
 from collections.abc import AsyncIterator
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import LiteralString
+from typing import Self
 from urllib.parse import urlparse
 from urllib.parse import urlunparse
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict
+from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg.sql import SQL
 from psycopg.sql import Composed
-from psycopg.sql import Identifier
 from psycopg.sql import Literal
 from psycopg_pool import AsyncConnectionPool
+from psycopg_pool import PoolClosed
+from psycopg_pool import PoolTimeout
 
 from ..errors import ConnectionFailedError
 from ..errors import InvalidArgumentError
@@ -104,61 +114,249 @@ def obfuscate_password(text: str | None) -> str | None:
     return text
 
 
-def _rejected(error: psycopg.Error) -> QueryError:
+#: The SQLSTATE of ``invalid byte sequence for encoding``, with which a SQL_ASCII
+#: server refuses to send a client that asked for UTF-8 bytes that are not.
+CHARACTER_NOT_IN_REPERTOIRE = "22021"
+
+
+def _rejected(error: psycopg.Error, conn: Any = None) -> QueryError:
     """PostgreSQL's refusal of a statement, as the error pg_debug raises.
 
     The psycopg exception stays attached as ``__cause__``, with its SQLSTATE
     and diagnostics, for a caller that needs more than the message.
+
+    Args:
+        error: The refusal.
+        conn: What the statement ran on: a :class:`DbConnPool` that chose
+            UTF-8 for a SQL_ASCII database says so, with the remedy, when the
+            refusal is a byte that is not UTF-8.
     """
+    if isinstance(conn, DbConnPool) and conn.reads_sql_ascii_as_utf8 and error.sqlstate == CHARACTER_NOT_IN_REPERTOIRE:
+        return QueryError(
+            f"{error}. The database is SQL_ASCII, which stores text as bytes without saying what encoding they are in; "
+            "pg-debug reads them as UTF-8, and these are not UTF-8. Name the encoding the data is really in when connecting, "
+            "for example ?client_encoding=LATIN1 in the URL, or PGCLIENTENCODING=LATIN1."
+        )
     return QueryError(str(error))
 
 
-def build_session_setup(
-    search_path: str | None = None,
+def _names_no_encoding(encoding: str | None) -> bool:
+    """Whether a client encoding is SQL_ASCII, which declares that the bytes have none.
+
+    The server sends a SQL_ASCII client the bytes it stores, unconverted, and
+    psycopg returns them as ``bytes`` rather than guess at a decoding, and
+    sends statements as ASCII.
+    """
+    # PostgreSQL ignores case and punctuation in encoding names.
+    return encoding is not None and re.sub(r"[^a-z0-9]", "", encoding.lower()) == "sqlascii"
+
+
+def _refuse_undecoded_text(connection: Any) -> None:
+    """Refuse a connection whose text would come back as ``bytes``, before anything runs on it.
+
+    pg-debug's own pool asks for UTF-8 instead (see :meth:`DbConnPool.pool_connect`),
+    but a caller can hand :class:`SqlDriver` a connection of their own, and
+    psycopg returns text read on it as ``bytes``: names came back as
+    ``b'public'``, so a comparison with the query's columns found nothing, and
+    a version check or a join of names failed with a ``TypeError`` that said
+    nothing of the cause.
+
+    Raises:
+        QueryError: If the connection's client encoding is SQL_ASCII.
+    """
+    if not isinstance(connection, psycopg.AsyncConnection):
+        return
+    encoding = connection.info.parameter_status("client_encoding")
+    if _names_no_encoding(encoding):
+        raise QueryError(
+            f"The connection's client_encoding is {encoding}, so the server sends text as the bytes it stores and psycopg "
+            'returns them undecoded, which pg-debug cannot read. Open it with client_encoding="UTF8", or the encoding '
+            'the data is in: psycopg.AsyncConnection.connect(url, client_encoding="UTF8").'
+        )
+
+
+#: The savepoint a statement with a cleanup runs after, so that the cleanup can
+#: run in the same transaction when the statement fails.
+CLEANUP_SAVEPOINT = "pg_debug_cleanup"
+
+#: The longest statement timeout PostgreSQL takes, in whole seconds: it counts
+#: in milliseconds, up to the largest 32-bit integer.
+MAX_STATEMENT_TIMEOUT = 2_147_483
+
+#: How long, in seconds, a pooled connection may sit unused before the pool
+#: closes it.
+#:
+#: The pool keeps none open while idle (``min_size=0``), because an open
+#: connection keeps a scale-to-zero compute awake: Aurora Serverless v2 does
+#: not pause while a client holds one, and a long-lived application that made
+#: one call would hold it for good. psycopg_pool closes idle connections one
+#: at a time, once every ``max_idle`` seconds, and only one that went unused
+#: for a whole interval: a connection is closed one to two intervals after its
+#: last use, and the five the pool can grow to within six. At 30 seconds that
+#: is three minutes, inside the five minutes that are the shortest pause delay
+#: Aurora offers. The CLI closes its pool when the command ends, and is not
+#: affected either way.
+#:
+#: What it costs a long-lived client: a call after an idle spell connects
+#: again, which adds a connection's setup to it (and the wake of a paused
+#: compute), and it needs the server to accept a new connection. That is least
+#: likely when a diagnosis is most wanted: with ``max_connections`` or the
+#: role's connection limit reached, a client that held its connection could
+#: still ask what holds the others, and one that let it go is refused. The
+#: refusal is reported at once, with the server's reason, rather than after
+#: the pool's 30-second wait (see :meth:`DbConnPool.connection`). A shorter
+#: wait would not do it: a resuming compute holds the first connection
+#: attempt open while it starts, which on Aurora takes seconds to tens of
+#: seconds, and a refusal arrives at once anyway.
+POOL_MAX_IDLE = 30.0
+
+#: How long one attempt to connect may take, unless the connection string or
+#: ``PGCONNECT_TIMEOUT`` says. libpq sets no limit, so an attempt to a host
+#: that drops packets lasts as long as the operating system keeps trying,
+#: about two minutes on Linux. The caller stops waiting after the pool's 30
+#: seconds, but the attempt runs on in the pool's task, which outlives a pool
+#: closed under it and keeps an event loop from finishing. The same 30 seconds
+#: lets a resuming compute finish starting.
+CONNECT_TIMEOUT = 30
+
+
+def _bounded(conninfo: str) -> dict[str, Any]:
+    """The connect_timeout to add to a connection string that sets none."""
+    if "connect_timeout" in conninfo_to_dict(conninfo) or os.environ.get("PGCONNECT_TIMEOUT"):
+        return {}
+    return {"connect_timeout": CONNECT_TIMEOUT}
+
+
+def _reporting_connection(on_failure: Callable[[Exception], None]) -> type[psycopg.AsyncConnection[Any]]:
+    """psycopg's connection class, telling ``on_failure`` why an attempt to connect failed.
+
+    psycopg_pool connects in a task of its own and only logs a failure, while
+    a caller waiting for the connection waits on until its timeout and is
+    told then only that none came.
+    """
+
+    class ReportingConnection(psycopg.AsyncConnection[Any]):
+        @classmethod
+        async def connect(cls, conninfo: str = "", **kwargs: Any) -> Self:
+            try:
+                return await super().connect(conninfo, **kwargs)
+            except Exception as error:
+                on_failure(error)
+                raise
+
+    return ReportingConnection
+
+
+#: SQLSTATEs of a refused connection that trying again will not change: a
+#: wrong password or an authorization refused, a database that does not
+#: exist, too many connections (for the server or for the role).
+_REFUSALS_THAT_STAY = frozenset({"28P01", "28000", "3D000", "53300"})
+
+
+def _will_not_clear(error: Exception) -> bool:
+    """Whether a failed attempt to connect will fail the same way if tried again."""
+    sqlstate = getattr(error, "sqlstate", None)
+    if sqlstate in _REFUSALS_THAT_STAY:
+        return True
+    # libpq reports some refusals before a SQLSTATE reaches psycopg.
+    text = str(error)
+    return any(phrase in text for phrase in ("password authentication failed", "too many connections", "does not exist", "no pg_hba.conf entry"))
+
+
+def check_statement_timeout(seconds: int | None) -> None:
+    """Refuse a timeout PostgreSQL would refuse, before any statement depends on it.
+
+    Left to the server, it would fail in the setup of every transaction, and be
+    reported as the failure of whatever that transaction was for: the query
+    context, when there is one.
+
+    Raises:
+        InvalidArgumentError: If it is negative or more than PostgreSQL allows.
+    """
+    if seconds is not None and not 0 <= seconds <= MAX_STATEMENT_TIMEOUT:
+        raise InvalidArgumentError(f"The statement timeout must be between 0 and {MAX_STATEMENT_TIMEOUT} seconds, PostgreSQL's limit, not {seconds}.")
+
+
+def _quoted_identifier(name: str) -> str:
+    """A name as PostgreSQL writes it double-quoted, which is how a search path holds it."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+#: Settings a role's own defaults do not decide here: who the statement runs
+#: as, and whether it may write, which --access-mode decides.
+_NEVER_FROM_THE_ROLE = {"role", "session_authorization", "transaction_read_only", "default_transaction_read_only"}
+
+#: The context role's ``ALTER ROLE ... SET`` values, applied the way a login
+#: as the role applies them: the value for this database over the one for all
+#: databases. Left out: a setting the context or pg-debug decides (``decided``),
+#: and one the connecting user may not set, which would fail every statement;
+#: a login as the role would have been allowed it.
+ROLE_DEFAULTS_SQL = """(SELECT count(set_config(d.name, d.value, true)) FROM (
+    SELECT DISTINCT ON (lower(split_part(c.cfg, '=', 1)))
+        split_part(c.cfg, '=', 1) AS name,
+        substr(c.cfg, strpos(c.cfg, '=') + 1) AS value
+    FROM pg_catalog.pg_db_role_setting s
+    CROSS JOIN LATERAL unnest(s.setconfig) AS c(cfg)
+    LEFT JOIN pg_catalog.pg_settings p ON p.name = lower(split_part(c.cfg, '=', 1))
+    WHERE s.setrole = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = {role})
+      AND s.setdatabase IN (0, (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()))
+      AND lower(split_part(c.cfg, '=', 1)) <> ALL ({decided}::text[])
+      AND (
+        p.context = 'user'
+        OR (p.context = 'superuser' AND (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user))
+        OR (p.name IS NULL AND strpos(split_part(c.cfg, '=', 1), '.') > 0)
+      )
+    ORDER BY lower(split_part(c.cfg, '=', 1)), s.setdatabase DESC
+) d)"""
+
+
+def build_transaction_setup(
     statement_timeout: int | None = None,
-) -> list[Composed] | None:
-    """Build the SET statements to run on every pooled connection.
+    search_path: str | None = None,
+    context: QueryContext | None = None,
+) -> Composed | None:
+    """The statement that applies pg-debug's settings to the transaction it runs in.
+
+    Everything goes through ``set_config(name, value, true)``, and the role
+    through ``set_config('role', ...)``, which is ``SET LOCAL ROLE``, so all of
+    it ends with the transaction. A session-level ``SET`` would not: behind a
+    transaction pooler the session belongs to whichever client the pooler
+    gives the backend next, and the setting would reach only the backend that
+    ran it, and stay there.
+
+    The role comes last: PostgreSQL evaluates the select list in order, so a
+    setting only the connecting user may change is set before the switch to
+    a role that may not. Names and values go in as literals psycopg quotes,
+    never as text pasted into the statement.
 
     Args:
+        statement_timeout: In seconds. 0 disables it.
         search_path: Comma-separated schema names, e.g. ``"reporting, public"``.
-        statement_timeout: Statement timeout in seconds. 0 disables it.
+        context: The query context, for a statement that runs or plans the
+            user's query.
 
     Returns:
-        The statements to run, or None when there is nothing to configure.
+        The statement, or None when there is nothing to apply.
     """
-    statements: list[Composed] = []
-
-    if search_path:
-        schemas = [s.strip() for s in search_path.split(",") if s.strip()]
-        if schemas:
-            # Identifier quotes each schema, which is also correct for the
-            # special "$user" entry.
-            statements.append(SQL(QUERY_MARKER + " SET search_path TO {}").format(SQL(", ").join(Identifier(s) for s in schemas)))
-
+    settings: list[tuple[str, str]] = []
     if statement_timeout is not None:
-        statements.append(SQL(QUERY_MARKER + " SET statement_timeout = {}").format(Literal(f"{int(statement_timeout)}s")))
+        settings.append(("statement_timeout", f"{int(statement_timeout)}s"))
+    schemas = [schema.strip() for schema in (search_path or "").split(",") if schema.strip()]
+    if schemas:
+        # Each schema quoted, which is also correct for the special "$user".
+        settings.append(("search_path", ", ".join(_quoted_identifier(schema) for schema in schemas)))
+    if context:
+        settings.extend(context.settings.items())
 
-    return statements or None
-
-
-def build_context_statement(context: QueryContext | None) -> Composed | None:
-    """The statement that applies a query context to the transaction it runs in.
-
-    Every setting goes through ``set_config(name, value, true)`` and the role
-    through ``set_config('role', ...)``, which is ``SET LOCAL ROLE``, so all of
-    it ends with the transaction. The role comes last: PostgreSQL evaluates
-    the select list in order, so a setting only the connecting user may change
-    is set before the switch to a role that may not. Names and values go in as
-    literals psycopg quotes, never as text pasted into the statement.
-
-    Returns:
-        The statement, or None when the context has nothing to apply.
-    """
-    if not context:
-        return None
-    calls = [SQL("set_config({}, {}, true)").format(Literal(name), Literal(value)) for name, value in context.settings.items()]
-    if context.role is not None:
+    calls = [SQL("set_config({}, {}, true)").format(Literal(name), Literal(value)) for name, value in settings]
+    if context and context.role is not None:
+        # A login as the role would also take its ALTER ROLE ... SET values;
+        # SET ROLE does not, so they are applied here, under the same rules.
+        decided = sorted({name.lower() for name, _ in settings} | _NEVER_FROM_THE_ROLE)
+        calls.append(SQL(ROLE_DEFAULTS_SQL).format(role=Literal(context.role), decided=Literal(decided)))
         calls.append(SQL("set_config('role', {}, true)").format(Literal(context.role)))
+    if not calls:
+        return None
     return SQL(QUERY_MARKER + " SELECT ") + SQL(", ").join(calls)
 
 
@@ -170,36 +368,66 @@ class DbConnPool:
         connection_url: str | None = None,
         search_path: str | None = None,
         statement_timeout: int | None = None,
+        *,
+        server_side_timeout: bool = True,
     ):
         """
         Args:
             connection_url: PostgreSQL connection URL.
-            search_path: Schema search path to set on every connection.
-            statement_timeout: Statement timeout in seconds to set on every
-                connection. None leaves the server default in place.
+            search_path: Schema search path for every statement a
+                :class:`SqlDriver` runs on this pool.
+            statement_timeout: Statement timeout in seconds for every
+                statement a :class:`SqlDriver` runs on this pool. None leaves
+                the server default in place.
+            server_side_timeout: Whether the timeout is set on the server, as
+                its ``statement_timeout``. False keeps it on this side
+                instead, for a server that refuses ``statement_timeout``: the
+                driver stops waiting for a statement once it has run that
+                long, and asks the server to cancel it.
+
+        The driver applies both inside each transaction, never to the
+        connection: behind a transaction pooler a connection is not one
+        session, and a setting made for the session would reach one backend
+        and stay there for the pooler's next client.
         """
+        check_statement_timeout(statement_timeout)
         self.connection_url = connection_url
         self.search_path = search_path
         self.statement_timeout = statement_timeout
+        self.server_side_timeout = server_side_timeout
         self.pool: AsyncConnectionPool | None = None
+        #: Whether the database sent its text as SQL_ASCII, no encoding at
+        #: all, so that the pool asked for it in UTF-8 instead.
+        self.reads_sql_ascii_as_utf8 = False
         self._is_valid = False
         self._last_error = None
-
-    async def _configure_connection(self, conn: Any) -> None:
-        """Apply the session settings to a connection as the pool hands it out."""
-        statements = build_session_setup(self.search_path, self.statement_timeout)
-        if not statements:
-            return
-        for statement in statements:
-            await conn.execute(statement)
-        await conn.commit()
+        # Connections borrowed through connection() and not yet returned.
+        self._borrowed = 0
+        # When the pool's last attempt to connect failed, and why.
+        self._refusal: tuple[float, Exception] | None = None
+        # A pool being closed because no connection could come to its waiters.
+        self._abandoning: asyncio.Task[None] | None = None
+        # Whether a connection to the server ever succeeded.
+        self._has_connected = False
+        # Held while a pool is being opened, by the first caller to need one.
+        self._opening = asyncio.Lock()
 
     async def pool_connect(self, connection_url: str | None = None) -> AsyncConnectionPool:
-        """Initialize connection pool with retry logic."""
+        """Initialize connection pool with retry logic.
+
+        Callers that start at once share the one pool the first of them
+        opens: without the lock, a second would close the pool the first was
+        still opening.
+        """
         # If we already have a valid pool, return it
         if self.pool and self._is_valid:
             return self.pool
+        async with self._opening:
+            if self.pool and self._is_valid:
+                return self.pool
+            return await self._pool_connect(connection_url)
 
+    async def _pool_connect(self, connection_url: str | None) -> AsyncConnectionPool:
         url = connection_url or self.connection_url
         self.connection_url = url
         if not url:
@@ -210,38 +438,178 @@ class DbConnPool:
         # Close any existing pool before creating a new one
         await self.close()
 
+        asked_at = time.monotonic()
         try:
-            # Configure connection pool with appropriate settings
-            self.pool = AsyncConnectionPool(
-                conninfo=url,
-                min_size=1,
-                max_size=5,
-                open=False,  # Don't connect immediately, let's do it explicitly
-                configure=self._configure_connection,
-            )
-
-            # Open the pool explicitly
-            await self.pool.open()
-
-            # Test the connection pool by executing a simple query
-            async with self.pool.connection() as conn:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(f"{QUERY_MARKER} SELECT 1")
+            pool, encoding = await self._open(url)
+            # Decided from what the server reports once connected, not from
+            # the URL: an encoding can also be named in PGCLIENTENCODING, in
+            # options or PGOPTIONS, in a service file, or by ALTER DATABASE or
+            # ALTER ROLE ... SET client_encoding, and only the reported value
+            # says which of them won. SQL_ASCII, whether named, reached by
+            # client_encoding=auto in a C locale, or the database's own, is no
+            # encoding at all.
+            self.reads_sql_ascii_as_utf8 = _names_no_encoding(encoding)
+            if self.reads_sql_ascii_as_utf8:
+                await self.close()
+                pool, _ = await self._open(make_conninfo(url, client_encoding="UTF8"))
 
             self._is_valid = True
+            self._has_connected = True
             self._last_error = None
-            return self.pool
+            return pool
         except Exception as e:
+            # A refused first connection fails the wait as it would a later
+            # one; what the server said is the reason, not the wait's end.
+            cause = self._refusal_since(asked_at) or e
             self._is_valid = False
-            self._last_error = str(e)
+            self._last_error = str(cause)
 
             # Clean up failed pool
             await self.close()
 
-            raise ConnectionFailedError(f"Could not connect to database: {obfuscate_password(str(e))}") from e
+            raise ConnectionFailedError(f"Could not connect to database: {obfuscate_password(str(cause))}") from e
+        except asyncio.CancelledError:
+            # A caller that stopped waiting (a timeout around the call) leaves
+            # a pool still trying to connect, whose attempt does not end with
+            # the caller: closed here, or it outlives the event loop.
+            self._is_valid = False
+            await self.close()
+            raise
+
+    @asynccontextmanager
+    async def connection(self) -> AsyncIterator[Any]:
+        """Borrow a connection from the pool for the length of the block.
+
+        The pool keeps no connection while idle (see :data:`POOL_MAX_IDLE`),
+        so a borrow after an idle spell waits for the pool to connect. When
+        that attempt fails and no connection in use can come back instead,
+        the wait ends at once, with what the server said; otherwise the pool
+        tries again, and the wait ends after the pool's timeout.
+
+        Raises:
+            ConnectionFailedError: If no connection could be had: with the
+                server's reason when an attempt to connect failed, and saying
+                so when the pool's connections were all in use or an attempt
+                was still under way when the wait ran out.
+        """
+        pool = await self.pool_connect()
+        asked_at = time.monotonic()
+        borrowed = False
+        try:
+            async with pool.connection() as connection:
+                borrowed = True
+                self._borrowed += 1
+                try:
+                    yield connection
+                finally:
+                    self._borrowed -= 1
+        except (PoolTimeout, PoolClosed) as e:
+            if borrowed:
+                raise
+            raise self._no_connection(pool, e, asked_at) from e
+
+    def _no_connection(self, pool: AsyncConnectionPool, error: Exception, asked_at: float) -> ConnectionFailedError:
+        """Why a borrow got no connection, as the error pg_debug raises."""
+        refusal = self._refusal_since(asked_at)
+        if refusal is not None:
+            return ConnectionFailedError(f"Could not connect to database: {obfuscate_password(str(refusal))}")
+        if isinstance(error, PoolTimeout):
+            waited = f"{pool.timeout:.0f} seconds"
+            if self._borrowed >= pool.max_size:
+                return ConnectionFailedError(f"No pooled connection came free within {waited}: all {self._borrowed} are in use.")
+            return ConnectionFailedError(f"Could not connect to database within {waited}: the attempt to connect had not finished.")
+        return ConnectionFailedError(f"Could not connect to database: {obfuscate_password(str(error))}")
+
+    def _refusal_since(self, moment: float) -> Exception | None:
+        """Why the pool's last attempt to connect failed, if it failed after this moment."""
+        if self._refusal is not None and self._refusal[0] >= moment:
+            return self._refusal[1]
+        return None
+
+    def _connect_failed(self, built: list[AsyncConnectionPool], error: Exception) -> None:
+        """Hear from the pool's connection class that an attempt to connect failed.
+
+        psycopg_pool tries again later and leaves a caller waiting until its
+        timeout. When the pool has no connection to give, none in use to come
+        back, and a caller waiting, the next attempt is all that caller waits
+        for, and a refusal now is usually a refusal then: too many
+        connections, a role or database that does not exist, a password that
+        is wrong. So the pool is closed, which fails the waiting caller at
+        once; :meth:`connection` gives it this error as the reason, and the
+        next call starts a new pool.
+        """
+        self._refusal = (time.monotonic(), error)
+        if self._has_connected and not _will_not_clear(error):
+            # Once this client has reached the server, a server starting up,
+            # a failover or a connection refused while one restarts may clear
+            # by the pool's next attempt, so the caller waits for it, up to
+            # the pool's timeout. Before it ever has, a refusal is most often
+            # a wrong host or port, and says so at once.
+            return
+        pool = built[0] if built else None
+        if pool is None or pool is not self.pool or self._borrowed:
+            return
+        stats = pool.get_stats()
+        if stats.get("pool_available", 0) or not stats.get("requests_waiting", 0):
+            return
+        self._is_valid = False
+        self._abandoning = asyncio.ensure_future(self._abandon(pool))
+
+    async def _abandon(self, pool: AsyncConnectionPool) -> None:
+        try:
+            await pool.close()
+        except Exception as e:
+            logger.warning("Error closing a connection pool that could not connect: %s", e)
+
+    async def _open(self, conninfo: str) -> tuple[AsyncConnectionPool, str | None]:
+        """Open the pool on a connection string, test it, and return it with the client encoding it reports.
+
+        A SQL_ASCII database asked for text in UTF-8 converts nothing, but
+        checks that what it sends is UTF-8, and refuses the statement, naming
+        the byte, when it is not: nothing is decoded on a guess. Any other
+        database converts its text to the encoding asked for.
+
+        The encoding is asked for as a startup parameter, not with a ``SET``:
+        PgBouncer keeps one for each client, and sets it on whichever backend
+        serves that client.
+        """
+        # The pool, once built, for the connection class to report on.
+        built: list[AsyncConnectionPool] = []
+        self.pool = AsyncConnectionPool(
+            conninfo=conninfo,
+            # None kept open while the client is idle: see POOL_MAX_IDLE.
+            min_size=0,
+            max_size=5,
+            max_idle=POOL_MAX_IDLE,
+            connection_class=_reporting_connection(functools.partial(self._connect_failed, built)),
+            open=False,  # Don't connect immediately, let's do it explicitly
+            # psycopg prepares a statement on the server once it has run
+            # five times on a connection. Behind a transaction pooler the
+            # connection is not one session: the next execution reaches a
+            # backend without the statement, or another client's
+            # preparation one that already has it, and Supavisor and the
+            # poolers Cloud SQL, AlloyDB and Azure offer do not support
+            # prepared statements at all. pg-debug runs few statements
+            # often enough for preparing them to save anything.
+            kwargs={"prepare_threshold": None, **_bounded(conninfo)},
+        )
+        built.append(self.pool)
+
+        # Open the pool explicitly
+        await self.pool.open()
+
+        # Test the connection pool by executing a simple query. The pool
+        # opened none of its own, so this is the first connection.
+        async with self.pool.connection() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(f"{QUERY_MARKER} SELECT 1")
+            return self.pool, conn.info.parameter_status("client_encoding")
 
     async def close(self) -> None:
         """Close the connection pool."""
+        if self._abandoning is not None:
+            await self._abandoning
+            self._abandoning = None
         if self.pool:
             try:
                 # Close the pool
@@ -286,7 +654,10 @@ class SqlDriver:
         Initialize with a PostgreSQL connection or pool.
 
         Args:
-            conn: PostgreSQL connection object or pool
+            conn: PostgreSQL connection object or pool. A psycopg connection
+                whose client encoding is SQL_ASCII, which is what a SQL_ASCII
+                database gives one that names none, is refused: open it with
+                ``client_encoding="UTF8"``.
             engine_url: Connection URL string as an alternative to providing a connection
             context: The role and settings for the statements that run or
                 plan the user's query, the ones executed with
@@ -309,21 +680,49 @@ class SqlDriver:
     def connect(self):
         if self.conn is not None:
             return self.conn
-        if self.engine_url:
+        # A driver given a connection forgets it once a statement fails on it
+        # (the connection may be broken), and has no URL to make another.
+        if getattr(self, "engine_url", None):
             self.conn = DbConnPool(self.engine_url)
             self.is_pool = True
             return self.conn
         else:
             raise NotConnectedError("Connection not established. Either conn or engine_url must be provided")
 
+    def with_context(self, context: QueryContext | None) -> SqlDriver:
+        """The same driver, on the same connection or pool, with another query context.
+
+        For a statement that needs a setting of its own: the setting goes in
+        the context, which applies it inside the transaction of each statement
+        run with ``in_context=True``, rather than in a ``SET`` that a
+        transaction pooler would leave on whichever backend ran it.
+
+        The new driver does not share a pin made by :meth:`session`: it
+        borrows its own connection, so it stays usable after the session ends.
+        """
+        if self.conn is None:
+            # Connect first, so the two share one pool rather than each opening its own.
+            self.connect()
+        driver = copy.copy(self)
+        driver.context = context
+        driver._pinned_connection = None
+        return driver
+
     @asynccontextmanager
     async def session(self) -> AsyncIterator[SqlDriver]:
         """Pin one pooled connection for the duration of the block.
 
-        Session state — hypothetical indexes, ``SET``, temp tables, advisory
-        locks — lives in the connection that created it. Without a pin, the
-        pool is free to hand the next statement a different connection and the
-        state silently disappears.
+        The statements in the block share a connection to the server, which
+        saves borrowing one from the pool for each. They do not necessarily
+        share a session: behind a transaction pooler (PgBouncer in transaction
+        mode, Supavisor, the pooled endpoints of Neon and Supabase) each
+        transaction can reach a different backend, so session state — a
+        ``SET``, a hypothetical index, a temp table, an advisory lock — made in
+        one statement may be missing from the next, and left behind for
+        another client. Anything that has to live in the backend goes in the
+        same transaction as what reads it: settings through the query context
+        (:meth:`with_context`), hypothetical indexes in one batch with the
+        ``EXPLAIN`` and a ``cleanup`` that resets them.
 
         The pinned driver is the same object, so anything already holding a
         reference to it sees the pin too. That also means a pinned driver must
@@ -345,16 +744,15 @@ class SqlDriver:
             yield self
             return
 
-        pool = await self.conn.pool_connect()
         try:
-            async with pool.connection() as connection:
+            async with self.conn.connection() as connection:
                 self._pinned_connection = connection
                 try:
                     yield self
                 finally:
                     self._pinned_connection = None
         except psycopg.Error as e:
-            raise _rejected(e) from e
+            raise _rejected(e, self.conn) from e
 
     async def execute_query(
         self,
@@ -363,6 +761,7 @@ class SqlDriver:
         force_readonly: bool = False,
         *,
         in_context: bool = False,
+        cleanup: LiteralString | None = None,
     ) -> list[RowResult] | None:
         """
         Execute a query and return results.
@@ -375,6 +774,12 @@ class SqlDriver:
                 statements that run or plan the user's own SQL, and the reads
                 of settings that shaped them; never for pg-debug's reads of
                 the catalog, which the context's role may be barred from.
+            cleanup: A statement to run after the query, in the same
+                transaction, whether the query succeeded, failed or was cancelled: for
+                state that lives in the backend rather than the transaction,
+                such as hypothetical indexes, which a rollback does not undo
+                and a transaction pooler would leave for its next client. The
+                query's rows are returned, not the cleanup's.
 
         Returns:
             The rows of the last statement, or None when it returns none
@@ -382,8 +787,22 @@ class SqlDriver:
 
         Raises:
             QueryError: If PostgreSQL rejected the statement or it failed to
-                run. The psycopg exception is its ``__cause__``.
+                run, or it outlasted a timeout the pool keeps on this side.
+                The psycopg exception is its ``__cause__``.
         """
+        async with self._client_side_timeout():
+            return await self._execute_query(query, params, force_readonly, in_context=in_context, cleanup=cleanup)
+
+    async def _execute_query(
+        self,
+        query: LiteralString,
+        params: list[Any] | None,
+        force_readonly: bool,
+        *,
+        in_context: bool,
+        cleanup: LiteralString | None,
+    ) -> list[RowResult] | None:
+        """:meth:`execute_query`, without the timeout kept on this side."""
         try:
             if self.conn is None:
                 self.connect()
@@ -396,7 +815,7 @@ class SqlDriver:
             if self._pinned_connection is not None:
                 try:
                     return await self._execute_with_connection(
-                        self._pinned_connection, query, params, force_readonly=force_readonly, in_context=in_context
+                        self._pinned_connection, query, params, force_readonly=force_readonly, in_context=in_context, cleanup=cleanup
                     )
                 except Exception:
                     # A failed statement leaves the connection's transaction
@@ -414,12 +833,15 @@ class SqlDriver:
             # Handle connection pool vs direct connection
             if self.is_pool:
                 # For pools, get a connection from the pool
-                pool = await self.conn.pool_connect()
-                async with pool.connection() as connection:
-                    return await self._execute_with_connection(connection, query, params, force_readonly=force_readonly, in_context=in_context)
+                async with self.conn.connection() as connection:
+                    return await self._execute_with_connection(
+                        connection, query, params, force_readonly=force_readonly, in_context=in_context, cleanup=cleanup
+                    )
             else:
                 # Direct connection approach
-                return await self._execute_with_connection(self.conn, query, params, force_readonly=force_readonly, in_context=in_context)
+                return await self._execute_with_connection(
+                    self.conn, query, params, force_readonly=force_readonly, in_context=in_context, cleanup=cleanup
+                )
         except Exception as e:
             # Mark pool as invalid if there was a connection issue
             if self.conn and self.is_pool:
@@ -429,7 +851,7 @@ class SqlDriver:
                 self.conn = None
 
             if isinstance(e, psycopg.Error):
-                raise _rejected(e) from e
+                raise _rejected(e, self.conn) from e
             raise
 
     @staticmethod
@@ -460,16 +882,63 @@ class SqlDriver:
         if self.context:
             await self.execute_query("SELECT 1", force_readonly=True, in_context=True)
 
-    async def _apply_context(self, cursor: Any) -> None:
-        """Apply the query context to the transaction the cursor is in."""
-        context = self.context
-        statement = build_context_statement(context)
-        if context is None or statement is None:
+    def _transaction_setup(self, in_context: bool) -> Composed | None:
+        """The statement that sets up a transaction: the pool's timeout and search path, and the context if asked for."""
+        pool = self.conn if self.is_pool else None
+        return build_transaction_setup(
+            statement_timeout=getattr(pool, "statement_timeout", None) if getattr(pool, "server_side_timeout", True) else None,
+            search_path=getattr(pool, "search_path", None),
+            context=self.context if in_context else None,
+        )
+
+    @asynccontextmanager
+    async def _client_side_timeout(self) -> AsyncIterator[None]:
+        """Bound a statement on this side, for a pool whose server will not take statement_timeout.
+
+        Aurora DSQL refuses ``statement_timeout`` at any scope, by its
+        documentation, so the pool's timeout cannot be set there, and every
+        statement's setup would fail if it were. For such a pool the same
+        number of seconds bounds the wait here instead, the way restricted
+        mode bounds its own. It is a weaker promise than the server's: when it
+        passes, psycopg sends PostgreSQL's cancel request and waits for the
+        server to act on it, and how soon DSQL does has not been tried.
+        """
+        pool = self.conn if self.is_pool else None
+        seconds = None if getattr(pool, "server_side_timeout", True) else getattr(pool, "statement_timeout", None)
+        if not seconds:
+            yield
             return
         try:
-            await cursor.execute(statement)
+            async with asyncio.timeout(seconds):
+                yield
+        except TimeoutError as e:
+            raise QueryError(
+                f"The statement did not finish within the {seconds}-second timeout, which pg-debug keeps on its own side "
+                "because this server does not take statement_timeout."
+            ) from e
+
+    async def _apply_setup(self, cursor: Any, setup: Composed, in_context: bool) -> None:
+        """Apply the setup to the transaction the cursor is in."""
+        try:
+            await cursor.execute(setup)
         except psycopg.Error as e:
-            raise InvalidArgumentError(f"Could not apply the query context ({context.describe()}): {e}") from e
+            if in_context and self.context:
+                raise InvalidArgumentError(f"Could not apply the query context ({self.context.describe()}): {e}") from e
+            raise
+
+    async def _clean_up_after_failure(self, cursor: Any, cleanup: LiteralString) -> None:
+        """Run the cleanup in the transaction the failed statement aborted, from the savepoint before it.
+
+        Also after a cancellation, such as restricted mode's own timeout or
+        Ctrl-C: psycopg has cancelled the statement on the server by then, and
+        the connection is waiting in the aborted transaction.
+        """
+        try:
+            await cursor.execute(f"{QUERY_MARKER} ROLLBACK TO SAVEPOINT {CLEANUP_SAVEPOINT}")
+            await cursor.execute(cleanup)
+        except Exception as cleanup_error:
+            # Never let this replace the error that caused it.
+            logger.error("Error cleaning up after the failed statement: %s", cleanup_error)
 
     async def _reset_pinned_transaction(self) -> None:
         """Clear an aborted transaction so the pinned session stays usable."""
@@ -481,9 +950,21 @@ class SqlDriver:
             # Never let this replace the error that caused it.
             logger.error("Error clearing the session's aborted transaction: %s", rollback_error)
 
-    async def _execute_with_connection(self, connection, query, params, force_readonly, in_context=False) -> list[RowResult] | None:
+    async def _execute_with_connection(
+        self,
+        connection,
+        query,
+        params,
+        force_readonly,
+        in_context=False,
+        cleanup: LiteralString | None = None,
+    ) -> list[RowResult] | None:
         """Execute query with the given connection."""
+        _refuse_undecoded_text(connection)
         transaction_started = False
+        setup = self._transaction_setup(in_context)
+        if cleanup is not None:
+            cleanup = self.tagged(cleanup)
         try:
             async with connection.cursor(row_factory=dict_row) as cursor:
                 # Start read-only transaction
@@ -491,33 +972,40 @@ class SqlDriver:
                     await cursor.execute("BEGIN TRANSACTION READ ONLY")
                     transaction_started = True
 
-                if in_context and self.context:
-                    if not transaction_started and getattr(connection, "autocommit", False):
-                        # Outside a transaction block, a set_config(..., true)
-                        # lasts only as long as the statement that made it.
-                        await cursor.execute("BEGIN")
-                        transaction_started = True
-                    await self._apply_context(cursor)
+                if (setup is not None or cleanup is not None) and not transaction_started and getattr(connection, "autocommit", False):
+                    # Outside a transaction block, a set_config(..., true)
+                    # lasts only as long as the statement that made it, and
+                    # there is nothing to take a savepoint in.
+                    await cursor.execute("BEGIN")
+                    transaction_started = True
 
-                if params:
-                    await cursor.execute(query, params)
-                else:
-                    await cursor.execute(query)
+                if setup is not None:
+                    await self._apply_setup(cursor, setup, in_context)
 
-                # For multiple statements, move to the last statement's results
-                while cursor.nextset():
-                    pass
+                if cleanup is not None:
+                    await cursor.execute(f"{QUERY_MARKER} SAVEPOINT {CLEANUP_SAVEPOINT}")
 
-                if cursor.description is None:  # No results (like DDL statements)
-                    if not force_readonly:
-                        await cursor.execute("COMMIT")
-                    elif transaction_started:
-                        await cursor.execute("ROLLBACK")
-                        transaction_started = False
-                    return None
+                try:
+                    if params:
+                        await cursor.execute(query, params)
+                    else:
+                        await cursor.execute(query)
 
-                # Get results from the last statement only
-                rows = await cursor.fetchall()
+                    # For multiple statements, move to the last statement's results
+                    while cursor.nextset():
+                        pass
+
+                    # Results from the last statement only; none for DDL
+                    rows = await cursor.fetchall() if cursor.description is not None else None
+
+                    if cleanup is not None:
+                        await cursor.execute(cleanup)
+                except (psycopg.Error, asyncio.CancelledError):
+                    # A cancellation is not a psycopg.Error, and is how a
+                    # timeout on this side arrives.
+                    if cleanup is not None:
+                        await self._clean_up_after_failure(cursor, cleanup)
+                    raise
 
                 # End the transaction appropriately
                 if not force_readonly:
@@ -526,18 +1014,28 @@ class SqlDriver:
                     await cursor.execute("ROLLBACK")
                     transaction_started = False
 
+                if rows is None:
+                    return None
                 return [SqlDriver.RowResult(cells=dict(row)) for row in rows]
 
-        except Exception as e:
-            # Try to roll back the transaction if it's still active
-            if transaction_started:
+        except (Exception, asyncio.CancelledError) as e:
+            # Roll back the transaction this call began, or psycopg began for
+            # it: left open, the context's role and settings would carry over
+            # to the connection's next statement, which on a connection the
+            # caller owns is the caller's.
+            if transaction_started or not getattr(connection, "autocommit", False):
                 try:
                     await connection.rollback()
                 except Exception as rollback_error:
                     logger.error("Error rolling back transaction: %s", rollback_error)
 
-            logger.error("Error executing query (%s): %s", query, e)
-            raise e
+            if not isinstance(e, asyncio.CancelledError):
+                # The statement only at debug: pg-debug's own statements run
+                # to dozens of lines, and a health run that carries on past a
+                # failed check would otherwise print each one in full.
+                logger.error("Error executing query: %s", e)
+                logger.debug("The statement that failed: %s", query)
+            raise
 
     async def execute_query_and_rollback(
         self,
@@ -559,9 +1057,14 @@ class SqlDriver:
         trigger that wrote to another system has already written. Callers that
         offer this to a user should say so.
 
-        ``in_context`` runs it with the query context, as for
-        :meth:`execute_query`.
+        ``in_context`` runs it with the query context, and a timeout the pool
+        keeps on this side bounds it, as for :meth:`execute_query`.
         """
+        async with self._client_side_timeout():
+            return await self._execute_query_and_rollback(query, params, in_context=in_context)
+
+    async def _execute_query_and_rollback(self, query: LiteralString, params: list[Any] | None, *, in_context: bool) -> list[RowResult] | None:
+        """:meth:`execute_query_and_rollback`, without the timeout kept on this side."""
         if self.conn is None:
             self.connect()
             if self.conn is None:
@@ -573,15 +1076,15 @@ class SqlDriver:
             if self._pinned_connection is not None:
                 return await self._execute_rolled_back(self._pinned_connection, query, params, in_context=in_context)
             if self.is_pool:
-                pool = await self.conn.pool_connect()
-                async with pool.connection() as connection:
+                async with self.conn.connection() as connection:
                     return await self._execute_rolled_back(connection, query, params, in_context=in_context)
             return await self._execute_rolled_back(self.conn, query, params, in_context=in_context)
         except psycopg.Error as e:
-            raise _rejected(e) from e
+            raise _rejected(e, self.conn) from e
 
     async def _execute_rolled_back(self, connection, query, params, in_context=False) -> list[RowResult] | None:
         """Execute on a connection inside a transaction that is always undone."""
+        _refuse_undecoded_text(connection)
         try:
             async with connection.cursor(row_factory=dict_row) as cursor:
                 # Without autocommit psycopg has already opened a transaction
@@ -590,8 +1093,9 @@ class SqlDriver:
                 if getattr(connection, "autocommit", False):
                     await cursor.execute("BEGIN")
 
-                if in_context:
-                    await self._apply_context(cursor)
+                setup = self._transaction_setup(in_context)
+                if setup is not None:
+                    await self._apply_setup(cursor, setup, in_context)
 
                 if params:
                     await cursor.execute(query, params)

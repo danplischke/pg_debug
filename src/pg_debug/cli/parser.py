@@ -8,20 +8,27 @@ from collections.abc import Iterator
 from typing import Any
 
 from .. import __version__
+from ..audit.versions import NEWEST_MAJOR
 from ..baseline import config_finding_key
 from ..baseline import model_finding_key
 from ..client import DATABASE_URL_ENV_VARS
 from ..client import AccessMode
 from ..context import CONFIG_FILE_NAME
 from ..health import HealthType
+from ..health.checks.index import MIN_WINDOW_DAYS
+from ..index.base import DEFAULT_MAX_REGRESSION_FACTOR
 from ..index.base import MAX_NUM_INDEX_TUNING_QUERIES
 from ..index.llm_settings import DEFAULT_LLM_MODEL
+from ..logs import FORMATS as LOG_FORMATS
 from ..model import DEFAULT_MIN_ROWS
 from ..model import RuleId
 from ..partition import DEFAULT_MIN_PRUNING_SHARE
 from ..partition import DEFAULT_MIN_TABLE_BYTES
 from ..plans import DEFAULT_MIN_RATIO
 from ..schema import ObjectType
+from ..server_rates import DEFAULT_RATES_INTERVAL
+from ..sharding import DEFAULT_INTERVAL_SECONDS
+from ..waits import DEFAULT_SAMPLE_INTERVAL
 from .commands import cmd_activity
 from .commands import cmd_check_migration
 from .commands import cmd_column_stats
@@ -31,35 +38,52 @@ from .commands import cmd_diagnose
 from .commands import cmd_execute
 from .commands import cmd_explain
 from .commands import cmd_health
+from .commands import cmd_history
 from .commands import cmd_index_use
 from .commands import cmd_locks
 from .commands import cmd_model
 from .commands import cmd_objects
 from .commands import cmd_partitions
+from .commands import cmd_plans
+from .commands import cmd_pooler
 from .commands import cmd_schemas
+from .commands import cmd_security
+from .commands import cmd_server_rates
+from .commands import cmd_shard_readiness
 from .commands import cmd_top_queries
 from .commands import cmd_tune_queries
 from .commands import cmd_tune_workload
+from .commands import cmd_upgrade_check
 from .commands import cmd_vacuum_progress
 from .render import as_is
+from .render import audit_report_json
 from .render import health_checks_json
 from .render import marked_against
 from .render import plan_document
+from .render import plan_shapes_json
 from .render import render_activity
+from .render import render_audit_report
 from .render import render_column_stats
 from .render import render_configuration_review
 from .render import render_health_checks
+from .render import render_history
 from .render import render_index_recommendations
 from .render import render_index_use
 from .render import render_lock_tree
+from .render import render_log_report
 from .render import render_migration_review
 from .render import render_model_findings
 from .render import render_object_details
 from .render import render_partition_candidates
 from .render import render_plan
 from .render import render_plan_findings
+from .render import render_plan_shapes
+from .render import render_pooler_report
 from .render import render_rows
+from .render import render_server_rates
+from .render import render_shard_readiness
 from .render import render_vacuum_progress
+from .render import with_wait_diagnosis
 
 PROG = "pg-debug"
 
@@ -253,6 +277,30 @@ def add_baseline_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_suppress_arguments(parser: argparse.ArgumentParser) -> None:
+    """``--suppress``, ``--config`` and ``--no-config``, for the commands that gate a build on rules."""
+    parser.add_argument(
+        "--suppress",
+        metavar="RULE",
+        action="append",
+        help=f"Report this rule's findings as suppressed, so they never fail --exit-code. Repeatable. The [suppress] table of "
+        f"{CONFIG_FILE_NAME} does the same with a reason for each; the rules are listed in the rules reference.",
+    )
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--config", metavar="FILE", help=f"Read [suppress] from FILE instead of {CONFIG_FILE_NAME}.")
+    source.add_argument("--no-config", action="store_true", help=f"Do not read {CONFIG_FILE_NAME}.")
+
+
+def add_static_argument(parser: argparse.ArgumentParser, what: str) -> None:
+    """``--static``: only what reads the catalog alone, for a CI database."""
+    parser.add_argument(
+        "--static",
+        action="store_true",
+        help=f"Run only the {what} that read nothing but the catalog, which a freshly migrated, empty database in CI "
+        "answers as production would. The others need the tables' contents or the workload's counters.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser."""
     parser = argparse.ArgumentParser(
@@ -274,11 +322,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout",
         type=int,
-        help="Statement timeout in seconds. Defaults to no timeout in unrestricted mode and 30 in restricted mode.",
+        help="Statement timeout in seconds, for every statement. Defaults to no timeout in unrestricted mode and 30 in restricted mode.",
     )
     parser.add_argument(
         "--search-path",
-        help="Schema search path to set on the connection, e.g. 'reporting,public'. Index tuning resolves table names through it.",
+        help="Schema search path for every statement, e.g. 'reporting,public'. Index tuning resolves table names through it.",
     )
     parser.add_argument(
         "--llm-model",
@@ -397,7 +445,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any high-severity finding is reported, for use in CI.",
     )
+    add_static_argument(model, "rules")
     add_baseline_arguments(model)
+    add_suppress_arguments(model)
     model.set_defaults(func=cmd_model, render=render_model_findings, json_payload=marked_against(model_finding_key))
 
     config = subparsers.add_parser("config", help="Review the server's settings against what it is actually doing")
@@ -407,7 +457,35 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any high-severity finding is reported, for use in CI.",
     )
     add_baseline_arguments(config)
+    add_suppress_arguments(config)
     config.set_defaults(func=cmd_config, render=render_configuration_review, json_payload=marked_against(config_finding_key))
+
+    upgrade_check = subparsers.add_parser("upgrade-check", help="Say what stands between this cluster and pg_upgrade to a newer major version")
+    upgrade_check.add_argument(
+        "--to",
+        type=int,
+        metavar="VERSION",
+        help=(
+            f"The major version to upgrade to (default: {NEWEST_MAJOR}, the newest pg-debug knows was released, "
+            "or the one after the server's when it already runs that)."
+        ),
+    )
+    upgrade_check.add_argument(
+        "--exit-code",
+        action="store_true",
+        help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any high-severity finding is reported, for use in CI.",
+    )
+    add_baseline_arguments(upgrade_check)
+    upgrade_check.set_defaults(func=cmd_upgrade_check, render=render_audit_report, json_payload=audit_report_json)
+
+    security = subparsers.add_parser("security", help="Audit authentication rules, roles, privileges and row-level security")
+    security.add_argument(
+        "--exit-code",
+        action="store_true",
+        help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any high-severity finding is reported, for use in CI.",
+    )
+    add_baseline_arguments(security)
+    security.set_defaults(func=cmd_security, render=render_audit_report, json_payload=audit_report_json)
 
     partitions = subparsers.add_parser("partitions", help="Say whether a table is worth partitioning, from what the workload does")
     partitions.add_argument(
@@ -431,6 +509,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     partitions.set_defaults(func=cmd_partitions, render=render_partition_candidates)
 
+    shard_readiness = subparsers.add_parser("shard-readiness", help='Say whether to shard, usually "not yet", with the figure behind each reason')
+    shard_readiness.add_argument(
+        "-i",
+        "--interval",
+        type=float,
+        default=DEFAULT_INTERVAL_SECONDS,
+        metavar="SECONDS",
+        help=f"Sample the WAL, buffer evictions and checkpoints over this many seconds (default: {DEFAULT_INTERVAL_SECONDS:g}).",
+    )
+    shard_readiness.set_defaults(func=cmd_shard_readiness, render=render_shard_readiness)
+
+    history = subparsers.add_parser(
+        "history", help="Read the history the platform keeps (Azure Query Store, Aurora, Cloud SQL/AlloyDB, Neon) and pg_qualstats, pg_wait_sampling"
+    )
+    history.add_argument("-n", "--limit", type=int, default=10, help="Rows to read from each source (default: 10).")
+    history.set_defaults(func=cmd_history, render=render_history)
+
     check_migration = subparsers.add_parser("check-migration", help="Review a migration for the locks it takes before running it")
     check_migration.add_argument("sql", help="Migration file, SQL, or - to read it from stdin")
     check_migration.add_argument(
@@ -444,6 +539,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any statement is high severity, for use in CI.",
     )
+    add_context_arguments(check_migration)
     check_migration.set_defaults(func=cmd_check_migration, render=render_migration_review)
 
     activity = subparsers.add_parser("activity", help="Show what the server is doing right now")
@@ -457,10 +553,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only show backends that have held their current state this long, e.g. 30 for queries running over 30s.",
     )
     activity.add_argument("-b", "--blocked", action="store_true", help="Only show backends waiting on a lock another backend holds.")
-    activity.set_defaults(func=cmd_activity, render=render_activity)
+    activity.add_argument(
+        "--sample",
+        type=float,
+        metavar="SECONDS",
+        help="Sample pg_stat_activity for this long instead, and report what active sessions waited on: average active "
+        "sessions by wait event and by query. Needs no extension.",
+    )
+    activity.add_argument(
+        "--sample-interval",
+        type=float,
+        default=DEFAULT_SAMPLE_INTERVAL,
+        metavar="SECONDS",
+        help=f"Seconds between two samples with --sample (default: {DEFAULT_SAMPLE_INTERVAL}).",
+    )
+    activity.set_defaults(func=cmd_activity, render=with_wait_diagnosis(render_activity))
 
     locks = subparsers.add_parser("locks", help="Show who is blocking whom, the root blockers first")
-    locks.set_defaults(func=cmd_locks, render=render_lock_tree)
+    locks.set_defaults(func=cmd_locks, render=with_wait_diagnosis(render_lock_tree))
 
     vacuum_progress = subparsers.add_parser("vacuum-progress", help="Show running vacuums and how far along they are")
     vacuum_progress.set_defaults(func=cmd_vacuum_progress, render=render_vacuum_progress)
@@ -476,10 +586,61 @@ def build_parser() -> argparse.ArgumentParser:
     health.add_argument(
         "--exit-code",
         action="store_true",
-        help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any check reports a problem, for use in CI.",
+        help=(
+            f"Exit with status {UNHEALTHY_EXIT_CODE} when a check that ran finds a problem, for use in CI. "
+            "A check that could not run makes the exit status 1, unless a check that ran found a problem; "
+            "with --save-baseline such a run saves nothing and exits 1."
+        ),
     )
+    health.add_argument(
+        "--min-window-days",
+        type=float,
+        default=MIN_WINDOW_DAYS,
+        metavar="DAYS",
+        help=(
+            "Call an index unused only once the index counters have been counting this many days "
+            f"(default: {MIN_WINDOW_DAYS:g}). A crash, a failover, a restore or pg_stat_reset() starts them again."
+        ),
+    )
+    add_static_argument(health, "checks")
     add_baseline_arguments(health)
+    add_suppress_arguments(health)
     health.set_defaults(func=cmd_health, render=render_health_checks, json_payload=health_checks_json)
+
+    plans = subparsers.add_parser("plans", help="Record each query's plan shape, and fail a build when one changes")
+    plans.add_argument(
+        "-q",
+        "--queries",
+        metavar="FILE",
+        action="append",
+        required=True,
+        help="Queries to plan, separated by semicolons: a file, inline SQL, or - for stdin. Repeatable. A '-- name: ...' "
+        "line above a query names it; otherwise it is known by its fingerprint, which ignores constants.",
+    )
+    plans.add_argument(
+        "--exit-code",
+        action="store_true",
+        help=f"Exit with status {UNHEALTHY_EXIT_CODE} when a plan's shape differs from the one --baseline holds, for use in CI.",
+    )
+    add_baseline_arguments(plans)
+    add_context_arguments(plans)
+    plans.set_defaults(func=cmd_plans, render=render_plan_shapes, json_payload=plan_shapes_json)
+
+    logs = subparsers.add_parser("logs", help="Read server logs for deadlocks, lock waits, temp files, vacuums and checkpoints")
+    logs.add_argument("files", nargs="+", metavar="FILE", help="Log files: stderr, csvlog or jsonlog, plain or .gz; - for stdin.")
+    logs.add_argument(
+        "--prefix",
+        metavar="PREFIX",
+        help="The server's log_line_prefix, for a stderr log, e.g. '%%m [%%p] %%q%%u@%%d '. Without it the timestamp, "
+        "[pid] and user@db are found where the common prefixes put them.",
+    )
+    logs.add_argument(
+        "--format",
+        dest="log_format",
+        choices=list(LOG_FORMATS),
+        help="The log's format, as log_destination names it (default: detected from each file).",
+    )
+    logs.set_defaults(render=render_log_report)
 
     top_queries = subparsers.add_parser("top-queries", help="Report the most expensive queries (needs pg_stat_statements)")
     top_queries.add_argument(
@@ -489,7 +650,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="resources",
         help="Ranking criteria (default: resources).",
     )
-    top_queries.add_argument("-n", "--limit", type=int, default=10, help="Number of queries to report when ranking by time (default: 10).")
+    top_queries.add_argument("-n", "--limit", type=int, default=10, help="Number of queries to report (default: 10).")
     top_queries.add_argument(
         "-i",
         "--interval",
@@ -498,6 +659,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sample over this many seconds instead of reporting totals since the last statistics reset.",
     )
     top_queries.set_defaults(func=cmd_top_queries)
+
+    server_rates = subparsers.add_parser("server-rates", help="Measure the server's counters over an interval: commits, I/O, WAL, checkpoints, slots")
+    server_rates.add_argument(
+        "-i",
+        "--interval",
+        type=float,
+        default=DEFAULT_RATES_INTERVAL,
+        metavar="SECONDS",
+        help=f"Seconds between the two snapshots (default: {DEFAULT_RATES_INTERVAL:g}).",
+    )
+    server_rates.set_defaults(func=cmd_server_rates, render=render_server_rates)
+
+    pooler = subparsers.add_parser("pooler", help="Read PgBouncer's admin console: are clients waiting for a server connection?")
+    pooler.add_argument(
+        "admin_url",
+        metavar="ADMIN_URL",
+        help="PgBouncer's admin console, e.g. postgresql://postgres@host:6432/pgbouncer, as a user in admin_users or stats_users. "
+        "With -d or DATABASE_URL as well, the pool sizes are compared with the server's max_connections.",
+    )
+    pooler.set_defaults(func=cmd_pooler, render=render_pooler_report)
 
     tune_workload = subparsers.add_parser(
         "tune-workload",
@@ -526,5 +707,14 @@ def _add_tuning_arguments(parser: argparse.ArgumentParser) -> None:
         choices=["dta", "llm"],
         default="dta",
         help="dta (default) searches index combinations against the planner; llm asks a language model and needs the llm extra.",
+    )
+    parser.add_argument(
+        "--max-regression-factor",
+        type=float,
+        default=DEFAULT_MAX_REGRESSION_FACTOR,
+        help=(
+            "Refuse an index that raises any query's planner cost above (1 + this) times its cost without the "
+            f"recommended set (default: {DEFAULT_MAX_REGRESSION_FACTOR}, Azure's default; 0 refuses any rise)."
+        ),
     )
     add_context_arguments(parser)

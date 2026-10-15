@@ -10,6 +10,9 @@ from pg_debug.activity import ActivityInspector
 from pg_debug.activity import assemble_lock_tree
 from pg_debug.db import SafeSqlDriver
 from pg_debug.db import SqlDriver
+from pg_debug.db.privileges import HIDDEN_QUERY_TEXT
+from pg_debug.db.privileges import IN_TRANSACTION
+from pg_debug.db.privileges import IN_TRANSACTION_CTE
 
 
 def make_driver(rows=()):
@@ -351,3 +354,102 @@ def test_an_unblocked_backend_blocking_nobody_is_not_a_root():
     roots = assemble_lock_tree(rows, [])
 
     assert [root["pid"] for root in roots] == [1]
+
+
+# -- What PostgreSQL withholds from a role without pg_read_all_stats ---------
+
+
+def withheld(pid, **fields):
+    """A backend as PostgreSQL 16 shows it to a role that may not see it."""
+    row = backend(pid)
+    row.update(
+        {
+            "usename": "postgres",
+            "backend_type": None,
+            "state": None,
+            "wait_event_type": None,
+            "wait_event": None,
+            "state_seconds": None,
+            "query_seconds": None,
+            "transaction_seconds": None,
+            "query": HIDDEN_QUERY_TEXT,
+        }
+    )
+    row.update(fields)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_a_withheld_backend_in_a_transaction_is_listed_with_the_running_ones(pg16):
+    """The reported failure: activity said "(nothing running)" while other
+    roles' queries ran. Their state is withheld from a role without
+    pg_read_all_stats, and the idle filter dropped them through NULL logic;
+    whether they are in a transaction is not withheld, and decides."""
+    driver = make_driver()
+
+    await ActivityInspector(driver).list_backends()
+
+    query = executed_query(driver)
+    assert f"WHEN a.query = '{HIDDEN_QUERY_TEXT}' THEN {IN_TRANSACTION}" in query
+    # The CTE follows the blocking graph's, under one WITH RECURSIVE.
+    assert query.lstrip().startswith("WITH RECURSIVE")
+    assert IN_TRANSACTION_CTE in query
+
+
+@pytest.mark.asyncio
+async def test_each_backend_says_whether_it_is_in_a_transaction(pg16):
+    driver = make_driver([withheld(41, in_transaction=True)])
+
+    (row,) = await ActivityInspector(driver).list_backends()
+
+    assert f"{IN_TRANSACTION} AS in_transaction" in executed_query(driver)
+    assert row["in_transaction"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", [{}, {"include_idle": True}, {"min_duration_seconds": 30}])
+async def test_the_backends_query_is_allowed_in_restricted_mode(pg16, arguments):
+    driver = make_driver()
+
+    await ActivityInspector(driver).list_backends(**arguments)
+
+    SafeSqlDriver(MagicMock(spec=SqlDriver))._validate(executed_query(driver))
+
+
+@pytest.mark.asyncio
+async def test_a_withheld_waiter_is_listed_among_the_blocked(pg16):
+    """Who blocks whom is read from the locks, which every role is shown."""
+    driver = make_driver([withheld(42, blocked_by=[41], in_transaction=True), withheld(41, in_transaction=True)])
+
+    blocked = await ActivityInspector(driver).blocked_backends()
+
+    assert [row["pid"] for row in blocked] == [42]
+    assert blocked[0]["blocked_by"] == [41]
+
+
+@pytest.mark.asyncio
+async def test_a_withheld_blocker_stays_in_the_lock_tree_and_says_it_is_in_a_transaction():
+    driver = tree_driver(
+        [withheld(41, in_transaction=True), backend(42, blocked_by=[41], in_transaction=True)],
+        [holder(42, 41, "AccessExclusiveLock")],
+    )
+
+    (root,) = await ActivityInspector(driver).lock_tree()
+
+    assert (root["pid"], root["query"], root["in_transaction"]) == (41, HIDDEN_QUERY_TEXT, True)
+    assert [child["pid"] for child in root["blocking"]] == [42]
+    assert f"{IN_TRANSACTION} AS in_transaction" in LOCK_TREE_BACKENDS_SQL
+
+
+@pytest.mark.asyncio
+async def test_whether_a_vacuum_is_autovacuum_is_read_from_the_backend_type(pg16):
+    """Read from the query text, a withheld one said False: '<insufficient
+    privilege>' does not start with 'autovacuum:'. The backend type is
+    withheld with the rest, so the answer is NULL, which is the truth."""
+    driver = make_driver()
+
+    await ActivityInspector(driver).vacuum_progress()
+
+    query = executed_query(driver)
+    assert "a.backend_type = 'autovacuum worker' AS autovacuum" in query
+    assert "LIKE 'autovacuum:%'" not in query

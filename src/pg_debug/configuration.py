@@ -25,6 +25,12 @@ from typing import Any
 from .db import SafeSqlDriver
 from .db import SqlDriver
 from .db.extensions import get_postgres_version
+from .db.window import CountingWindow
+from .db.window import checkpoint_window
+from .db.window import table_window
+from .platform import Platform
+from .platform import PlatformDetection
+from .rules import DOCS_URL
 from .severity import SEVERITY_ORDER
 from .severity import Severity
 
@@ -79,6 +85,10 @@ class ConfigFinding:
         summary: One sentence.
         detail: The argument, in terms of this server's own numbers.
         evidence: The measurements behind it.
+        rule: The id of the rule that found it, as :mod:`pg_debug.rules`
+            lists it: ``work_mem_spills``, ``fsync_off``. More than one rule
+            can be about the same setting, so this, not ``setting``, says
+            which kind of finding it is.
     """
 
     setting: str
@@ -88,10 +98,14 @@ class ConfigFinding:
     detail: str
     recommended: str | None = None
     evidence: dict[str, Any] = field(default_factory=dict)
+    rule: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the finding as a JSON-friendly dict."""
-        result: dict[str, Any] = {
+        result: dict[str, Any] = {}
+        if self.rule is not None:
+            result |= {"rule": self.rule, "docs": f"{DOCS_URL}#{self.rule}"}
+        result |= {
             "setting": self.setting,
             "current": self.current,
             "severity": self.severity.value,
@@ -107,8 +121,16 @@ class ConfigFinding:
 class ConfigurationReviewer:
     """Reads pg_settings, and the counters that say whether they are working."""
 
-    def __init__(self, sql_driver: SqlDriver | SafeSqlDriver):
+    def __init__(self, sql_driver: SqlDriver | SafeSqlDriver, platform: PlatformDetection | None = None):
+        """
+        Args:
+            sql_driver: The driver to read the settings and counters through.
+            platform: The managed platform the server runs on, which decides
+                whether ``fsync = off`` is a risk. Left out, it is the risk it
+                is on PostgreSQL itself.
+        """
         self.sql_driver = sql_driver
+        self.platform = platform
 
     async def review(self) -> list[ConfigFinding]:
         """Review the server's configuration.
@@ -121,11 +143,10 @@ class ConfigurationReviewer:
         settings = await self._settings()
         measurements = await self._measurements()
 
-        findings = []
-        for rule in _RULES:
-            finding = rule(settings, measurements)
-            if finding is not None:
-                findings.append(finding)
+        # The durability rule is the one whose verdict depends on the platform.
+        verdicts: list[ConfigFinding | None] = list(_durability(settings, measurements, self.platform))
+        verdicts += [rule(settings, measurements) for rule in _RULES]
+        findings = [finding for finding in verdicts if finding is not None]
 
         return sorted(findings, key=lambda finding: SEVERITY_ORDER[finding.severity])
 
@@ -160,7 +181,27 @@ class ConfigurationReviewer:
             WHERE d.datname = current_database()
             """,
         )
-        return dict(rows[0].cells) if rows else {}
+        measurements = dict(rows[0].cells) if rows else {}
+        # Each counter is a count since it last started from zero, which a
+        # crash, a failover or a reset may have done an hour ago.
+        measurements["table_window"] = await table_window(self.sql_driver)
+        measurements["checkpoint_window"] = await checkpoint_window(self.sql_driver)
+        return measurements
+
+
+# -- Counting windows -------------------------------------------------------
+
+
+def _window(measurements: dict[str, Any], name: str) -> dict[str, Any]:
+    """When the counters behind a finding started, as evidence."""
+    window = measurements.get(name)
+    return window.to_dict() if isinstance(window, CountingWindow) else {}
+
+
+def _counted(measurements: dict[str, Any], name: str) -> str:
+    """`` since 2026-10-14 21:01 UTC (3 hours)`` for a summary, or nothing when not read."""
+    window = measurements.get(name)
+    return f" {window.describe()}" if isinstance(window, CountingWindow) else ""
 
 
 # -- Units ------------------------------------------------------------------
@@ -206,28 +247,99 @@ Rule = Callable[[dict[str, dict[str, Any]], dict[str, Any]], ConfigFinding | Non
 # -- Rules ------------------------------------------------------------------
 
 
-def _durability(settings: dict[str, dict[str, Any]], _measurements: dict[str, Any]) -> ConfigFinding | None:
-    """fsync and full_page_writes exist to survive a crash."""
+#: Platforms whose commits are made durable by a quorum of safekeepers holding
+#: the WAL, not by the compute's own disk, and whose computes therefore run
+#: with fsync and full_page_writes off. Neon's documentation says so for both;
+#: Databricks' says it of Lakebase's commits, and both companies wrote of
+#: turning full-page writes off together.
+_SAFEKEEPER_PLATFORMS = frozenset({Platform.NEON, Platform.LAKEBASE})
+
+#: Why each durability setting being off is safe on such a platform.
+_WHY_SAFE_THERE = {
+    "fsync": ("a commit is acknowledged once a quorum of safekeepers holds its WAL, so the compute's own fsync is not what makes a commit durable"),
+    "full_page_writes": (
+        "pages are rebuilt from the WAL by the storage layer, not read back from the compute's disk, so there is no "
+        "torn page on it for a full-page image to repair"
+    ),
+}
+
+
+def _durability(
+    settings: dict[str, dict[str, Any]],
+    _measurements: dict[str, Any],
+    platform: PlatformDetection | None = None,
+) -> list[ConfigFinding]:
+    """fsync and full_page_writes exist to survive a crash.
+
+    Except on Neon and Databricks Lakebase, whose computes run with both off:
+    a commit there is acknowledged once a quorum of safekeepers holds its WAL,
+    and pages are rebuilt from the WAL by the storage layer. Each setting off
+    there is reported as a note, low enough not to fail ``--exit-code``,
+    rather than left out, so that the reader sees the setting and the signal
+    the platform was recognised by, and can tell if the recognition was wrong.
+
+    Only a firm signal excuses them: for Neon the server's ``neon.timeline_id``
+    setting or a host under neon.tech, for Lakebase its host. A
+    ``neon_superuser`` role alone does not, because a role can be on any
+    server, and the findings it would downgrade are the most serious there
+    are; the HIGH finding says why it did not.
+    """
+    recognised = platform if platform is not None and platform.platform in _SAFEKEEPER_PLATFORMS else None
+    excused = recognised is not None and recognised.firm
+    findings: list[ConfigFinding] = []
     for name, consequence in (
         ("fsync", "a crash or power loss can leave the database unrecoverably corrupt, not merely missing recent commits"),
         ("full_page_writes", "a crash during a write can tear a page in half, and recovery has nothing to repair it from"),
     ):
         setting = settings.get(name)
-        if _off(setting):
-            return ConfigFinding(
+        if not _off(setting):
+            continue
+        evidence: dict[str, Any] = {"source": setting.get("source") if setting else None}
+        if recognised is not None:
+            evidence |= {"platform": recognised.platform.value, "platform_signal": recognised.signal}
+        if excused and recognised is not None:
+            label = recognised.platform.label
+            findings.append(
+                ConfigFinding(
+                    rule=f"{name}_off",
+                    setting=name,
+                    current="off",
+                    severity=Severity.LOW,
+                    summary=f"{name} is off, as {label} runs every compute; that does not put commits at risk here.",
+                    detail=(
+                        f"On {label}, {_WHY_SAFE_THERE[name]}, and the platform fixes the setting: there is nothing to "
+                        f"change. pg-debug took this server for {label} because {recognised.signal}. If that is wrong, "
+                        f"this is among the most serious findings there are: with {name} off, {consequence}."
+                    ),
+                    evidence=evidence,
+                )
+            )
+            continue
+        detail = (
+            f"With {name} off, {consequence}. This is only a defensible setting for a database whose "
+            f"contents can be thrown away and rebuilt — a test fixture, or a replica that would be "
+            f"recreated from scratch."
+        )
+        if recognised is not None:
+            detail += (
+                f" pg-debug took this server for {recognised.platform.label}, which runs every compute with {name} off, "
+                f"because {recognised.signal}. That is not enough to call {name} = off safe: a role can be on any "
+                "server, created by a superuser or restored from a dump of a project's roles. Only the setting "
+                "neon.timeline_id or a host of the platform's is taken as enough."
+            )
+        findings.append(
+            ConfigFinding(
+                rule=f"{name}_off",
                 setting=name,
                 current="off",
                 recommended="on",
                 severity=Severity.HIGH,
                 summary=f"{name} is off, so this server cannot be trusted to survive a crash.",
-                detail=(
-                    f"With {name} off, {consequence}. This is only a defensible setting for a database whose "
-                    f"contents can be thrown away and rebuilt — a test fixture, or a replica that would be "
-                    f"recreated from scratch."
-                ),
-                evidence={"source": setting.get("source") if setting else None},
+                detail=detail,
+                evidence=evidence,
             )
-    return None
+        )
+    return findings
 
 
 def _autovacuum_off(settings: dict[str, dict[str, Any]], _measurements: dict[str, Any]) -> ConfigFinding | None:
@@ -235,6 +347,7 @@ def _autovacuum_off(settings: dict[str, dict[str, Any]], _measurements: dict[str
     if not _off(setting):
         return None
     return ConfigFinding(
+        rule="autovacuum_off",
         setting="autovacuum",
         current="off",
         recommended="on",
@@ -260,18 +373,19 @@ def _work_mem(settings: dict[str, dict[str, Any]], measurements: dict[str, Any])
     current = _as_bytes(setting)
     average = temp_bytes // temp_files
     return ConfigFinding(
+        rule="work_mem_spills",
         setting="work_mem",
         current=_humanize(current),
         recommended=_humanize(max((current or 0) * 2, average)),
         severity=Severity.MEDIUM,
-        summary=f"Queries have spilled {_humanize(temp_bytes)} to disk in {temp_files:,} temporary files.",
+        summary=f"Queries have spilled {_humanize(temp_bytes)} to disk in {temp_files:,} temporary files{_counted(measurements, 'table_window')}.",
         detail=(
             f"A sort or hash that does not fit in work_mem is written to disk instead. The average spill here is "
             f"{_humanize(average)}, against a work_mem of {_humanize(current)}. Raise it carefully: the limit "
             f"applies per operation, not per query, so a complex query with several sorts can use it several "
             f"times over, and every connection can do so at once."
         ),
-        evidence={"temp_files": temp_files, "temp_bytes": temp_bytes, "average_spill_bytes": average},
+        evidence={"temp_files": temp_files, "temp_bytes": temp_bytes, "average_spill_bytes": average, **_window(measurements, "table_window")},
     )
 
 
@@ -291,11 +405,12 @@ def _checkpoints(settings: dict[str, dict[str, Any]], measurements: dict[str, An
     current = _as_bytes(setting)
     share = requested / (timed + requested)
     return ConfigFinding(
+        rule="requested_checkpoints",
         setting="max_wal_size",
         current=_humanize(current),
         recommended=_humanize((current or 0) * 2),
         severity=Severity.MEDIUM,
-        summary=f"{share:.0%} of checkpoints happened on request rather than on schedule.",
+        summary=f"{share:.0%} of checkpoints happened on request rather than on schedule{_counted(measurements, 'checkpoint_window')}.",
         detail=(
             f"{requested:,} checkpoints were requested against {timed:,} that came round on the timer. The usual "
             f"reason is max_wal_size filling up before checkpoint_timeout elapses, and those arrive at whatever "
@@ -304,7 +419,7 @@ def _checkpoints(settings: dict[str, dict[str, Any]], measurements: dict[str, An
             f"an explicit CHECKPOINT command, a backup and a shutdown are counted here too, so check this is "
             f"write volume before acting on it."
         ),
-        evidence={"checkpoints_timed": timed, "checkpoints_requested": requested},
+        evidence={"checkpoints_timed": timed, "checkpoints_requested": requested, **_window(measurements, "checkpoint_window")},
     )
 
 
@@ -323,6 +438,7 @@ def _shared_buffers(settings: dict[str, dict[str, Any]], measurements: dict[str,
     current = _as_bytes(setting)
     database_bytes = int(measurements.get("database_bytes") or 0)
     return ConfigFinding(
+        rule="shared_buffers_cache_misses",
         setting="shared_buffers",
         current=_humanize(current),
         recommended=None,
@@ -338,6 +454,7 @@ def _shared_buffers(settings: dict[str, dict[str, Any]], measurements: dict[str,
             "blocks_read": reads,
             "blocks_hit": hits,
             "database_bytes": database_bytes,
+            **_window(measurements, "table_window"),
         },
     )
 
@@ -352,6 +469,7 @@ def _effective_cache_size(settings: dict[str, dict[str, Any]], measurements: dic
         return None
 
     return ConfigFinding(
+        rule="effective_cache_size_default",
         setting="effective_cache_size",
         current=_humanize(current),
         recommended=None,
@@ -381,6 +499,7 @@ def _random_page_cost(settings: dict[str, dict[str, Any]], measurements: dict[st
         return None
 
     return ConfigFinding(
+        rule="random_page_cost_default",
         setting="random_page_cost",
         current="4.0",
         recommended=None,
@@ -403,6 +522,7 @@ def _slow_query_log(settings: dict[str, dict[str, Any]], _measurements: dict[str
     if not setting or str(setting.get("setting")) != "-1":
         return None
     return ConfigFinding(
+        rule="slow_query_log_off",
         setting="log_min_duration_statement",
         current="-1 (nothing logged)",
         recommended="1000",
@@ -423,6 +543,7 @@ def _idle_transaction_timeout(settings: dict[str, dict[str, Any]], _measurements
     if not setting or str(setting.get("setting")) != "0":
         return None
     return ConfigFinding(
+        rule="idle_transaction_timeout_off",
         setting="idle_in_transaction_session_timeout",
         current="0 (no limit)",
         recommended="60000",
@@ -439,8 +560,9 @@ def _idle_transaction_timeout(settings: dict[str, dict[str, Any]], _measurements
     )
 
 
+#: The rules that read only the settings and the counters. _durability is not
+#: among them: the reviewer calls it with the platform too.
 _RULES: list[Rule] = [
-    _durability,
     _autovacuum_off,
     _work_mem,
     _checkpoints,

@@ -155,9 +155,39 @@ async def test_generate_candidates(async_sql_driver, create_dta):
 
 
 @pytest.mark.asyncio
+async def test_the_candidates_are_measured_and_reset_in_one_transaction(async_sql_driver, create_dta):
+    """Hypothetical indexes outlive the transaction, in the backend, and a reset in a
+    transaction of its own may reach another backend behind a transaction pooler."""
+
+    async def mock_execute_query(query, **kwargs):
+        if "to_regclass" in query:
+            return [MockCell({"name": "users"})]
+        if "FROM information_schema.columns c" in query:
+            columns = {"table_schema": "public", "table_name": "users", "column_name": "name", "data_type": "text"}
+            return [MockCell({**columns, "character_maximum_length": None, "avg_width": 8, "potential_long_text": False})]
+        if "hypopg_create_index" in query:
+            return [MockCell({"index_name": "pg_debug_idx_users_name_1", "index_size": 81920})]
+        return None
+
+    async_sql_driver.execute_query = AsyncMock(side_effect=mock_execute_query)
+
+    q1 = "SELECT * FROM users WHERE name = 'Alice'"
+    await create_dta.generate_candidates([(q1, parse_sql(q1)[0].stmt, 1.0)], set())
+
+    calls = async_sql_driver.execute_query.await_args_list
+    (measure,) = [call for call in calls if "hypopg_create_index" in call.args[0]]
+    assert measure.kwargs["cleanup"] == "SELECT hypopg_reset()"
+    assert not any("hypopg_reset" in call.args[0] for call in calls), "no reset in a transaction of its own"
+
+
+@pytest.mark.asyncio
 async def test_analyze_workload(async_sql_driver, create_dta):
     async def mock_execute_query(query, **kwargs):
         logger.info("Query: %s", query)
+        if "AS analyzed" in query:
+            return [MockCell({"analyzed": True})]
+        if "FROM pg_extension e" in query:
+            return [MockCell({"schema": "public", "version": "1.10"})]
         if "pg_stat_statements" in query:
             return [
                 MockCell(
@@ -533,8 +563,10 @@ async def test_basic_workload_analysis(async_sql_driver):
     responses = [
         # check if hypopg is enabled
         [MockCell({"hypopg_enabled_result": 1})],
-        # check last analyze
-        [MockCell({"last_analyze": "2024-01-01 00:00:00"})],
+        # whether any table has statistics
+        [MockCell({"analyzed": True})],
+        # where pg_stat_statements is
+        [MockCell({"schema": "public", "version": "1.10"})],
         # pg_stat_statements
         [
             MockCell(
@@ -1147,7 +1179,7 @@ async def test_enumerate_greedy_pareto_cost_benefit(async_sql_driver):
 
     # Create test queries
     q1 = "SELECT * FROM test_table WHERE col1 = 1"
-    queries = [(q1, parse_sql(q1)[0].stmt, 1.0)]
+    queries: list[tuple[str, Any, float]] = [(q1, parse_sql(q1)[0].stmt, 1.0)]
 
     # Create candidate indexes
     candidate_indexes = set()

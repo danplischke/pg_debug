@@ -260,7 +260,7 @@ async def test_analyze_db_health(pg):
         "Constraint health",
     }
     assert all(check.name == name and check.summary for name, check in results.items())
-    assert results["Connection health"].metrics["total_connections"] >= 1
+    assert results["Connection health"].metrics["client_connections"] >= 1
     # A healthy check reports nothing to act on.
     assert all(not check.findings for check in results.values() if check.healthy)
 
@@ -270,7 +270,9 @@ async def test_analyze_db_health_flags_a_duplicate_index(pg, tuning_table):
     await pg.execute_sql(f"CREATE INDEX {tuning_table}_status_idx ON {tuning_table} (status)")
     await pg.execute_sql(f"CREATE INDEX {tuning_table}_status_dup_idx ON {tuning_table} (status)")
 
-    results = await pg.analyze_db_health("index")
+    # The test server's counters are minutes old, which is too short a window
+    # to call an index unused unless the minimum is lowered.
+    results = await pg.analyze_db_health("index", min_window_days=0)
 
     pair = {f"{tuning_table}_status_idx", f"{tuning_table}_status_dup_idx"}
 
@@ -654,14 +656,17 @@ async def test_index_use_says_when_no_column_of_the_index_is_restricted(pg, inde
 
 
 @pytest.mark.asyncio
-async def test_index_use_in_restricted_mode_skips_the_forced_plan_and_says_so(indexed_users):
+async def test_index_use_in_restricted_mode_gives_the_unrestricted_verdict(pg, indexed_users):
+    """The forced plan turns sequential scans off for its own transaction, which writes nothing."""
+    query = f"SELECT * FROM {indexed_users} WHERE status = 'closed'"
     async with PgDebug(DATABASE_URI, access_mode=AccessMode.RESTRICTED) as restricted:
-        verdicts = await restricted.explain_index_use(f"SELECT * FROM {indexed_users} WHERE status = 'closed'", index="users_status")
+        (verdict,) = await restricted.explain_index_use(query, index="users_status")
+    (unrestricted,) = await pg.explain_index_use(query, index="users_status")
 
-    (verdict,) = verdicts
     assert verdict.used is False
-    assert verdict.findings == []
-    assert verdict.notes and "restricted mode" in verdict.notes[0]
+    assert [f.reason for f in verdict.findings] == [f.reason for f in unrestricted.findings]
+    assert verdict.findings, "the forced plan was not taken"
+    assert verdict.notes == []
 
 
 @pytest.mark.asyncio
@@ -1517,11 +1522,20 @@ def test_cli_check_migration_against_a_real_database(capsys, monkeypatch, pg):
 @pytest.mark.asyncio
 async def test_a_table_with_autovacuum_disabled_is_reported_as_that(pg):
     """Not as "behind": the fix for a switched-off table is not the fix for a
-    late one, so the two must not read the same."""
-    await pg.execute_sql(f"CREATE TABLE {SCHEMA}.frozen (id int, pad text) WITH (autovacuum_enabled = false)")
-    await pg.execute_sql(f"INSERT INTO {SCHEMA}.frozen SELECT i, 'x' FROM generate_series(1, 40000) i")
-    await pg.execute_sql(f"DELETE FROM {SCHEMA}.frozen WHERE id % 2 = 0")
-    await pg.execute_sql(f"ANALYZE {SCHEMA}.frozen")
+    late one, so the two must not read the same.
+
+    The rows are written and deleted by a connection of their own, as an
+    application would. A backend publishes the counts of its own writes in
+    batches, when idle up to seconds later, and an ANALYZE in that backend
+    leaves the unpublished ones out of its estimate: on pg-debug's single
+    pooled connection the dead rows would not show yet. Closing the writer
+    publishes them.
+    """
+    with psycopg.connect(DATABASE_URI or "", autocommit=True) as app:
+        app.execute(f"CREATE TABLE {SCHEMA}.frozen (id int, pad text) WITH (autovacuum_enabled = false)")
+        app.execute(f"INSERT INTO {SCHEMA}.frozen SELECT i, 'x' FROM generate_series(1, 40000) i")
+        app.execute(f"DELETE FROM {SCHEMA}.frozen WHERE id % 2 = 0")
+        app.execute(f"ANALYZE {SCHEMA}.frozen")
 
     calc = AutovacuumCalc(await pg.sql_driver())
     check = await calc.autovacuum_backlog_check()

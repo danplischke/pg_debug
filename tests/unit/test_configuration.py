@@ -24,6 +24,10 @@ from pg_debug.configuration import _slow_query_log
 from pg_debug.configuration import _work_mem
 from pg_debug.db import SqlDriver
 from pg_debug.db import reset_postgres_version_cache
+from pg_debug.platform import Basis
+from pg_debug.platform import Platform
+from pg_debug.platform import PlatformDetection
+from pg_debug.platform import detect_platform
 from pg_debug.severity import Severity
 
 
@@ -48,8 +52,14 @@ def healthy_measurements(**overrides):
 # -- Durability -------------------------------------------------------------
 
 
+def only(findings):
+    """The one durability finding a test expects, or None."""
+    assert len(findings) <= 1, findings
+    return findings[0] if findings else None
+
+
 def test_fsync_off_is_the_most_serious_thing_here():
-    finding = _durability(setting("fsync", "off"), healthy_measurements())
+    finding = only(_durability(setting("fsync", "off"), healthy_measurements()))
 
     assert finding is not None
     assert finding.severity is Severity.HIGH
@@ -57,11 +67,136 @@ def test_fsync_off_is_the_most_serious_thing_here():
 
 
 def test_full_page_writes_off_is_reported_too():
-    assert _durability(setting("full_page_writes", "off"), healthy_measurements()) is not None
+    assert only(_durability(setting("full_page_writes", "off"), healthy_measurements())) is not None
 
 
 def test_durability_left_alone_when_it_is_on():
-    assert _durability(setting("fsync", "on"), healthy_measurements()) is None
+    assert _durability(setting("fsync", "on"), healthy_measurements()) == []
+
+
+NEON = PlatformDetection(Platform.NEON, "the server has the setting neon.timeline_id", Basis.SERVER)
+
+
+def test_neons_fsync_off_is_a_note_not_a_failure():
+    """Neon runs every compute with fsync off; a commit is durable once its
+    safekeepers hold the WAL, which a HIGH finding on every Neon database hid."""
+    finding = only(_durability(setting("fsync", "off"), healthy_measurements(), NEON))
+
+    assert finding is not None
+    assert finding.severity is Severity.LOW, "low enough not to fail --exit-code"
+    assert finding.recommended is None, "there is nothing to change"
+    assert "quorum of safekeepers" in finding.detail
+    assert "neon.timeline_id" in finding.detail, "it says what it took the platform from"
+    assert finding.evidence["platform"] == "neon"
+    assert finding.evidence["platform_signal"] == NEON.signal
+
+
+@pytest.mark.parametrize(
+    "platform",
+    [None, PlatformDetection(Platform.UNKNOWN, "nothing matched", Basis.NONE), PlatformDetection(Platform.SUPABASE, "a setting", Basis.SERVER)],
+)
+def test_fsync_off_anywhere_else_is_still_high(platform):
+    finding = only(_durability(setting("fsync", "off"), healthy_measurements(), platform))
+
+    assert finding is not None
+    assert finding.severity is Severity.HIGH
+
+
+def test_a_neon_host_excuses_fsync_as_the_setting_does():
+    host = PlatformDetection(Platform.NEON, "the host ep-x.aws.neon.tech is under neon.tech", Basis.URL)
+
+    finding = only(_durability(setting("fsync", "off"), healthy_measurements(), host))
+
+    assert finding is not None
+    assert finding.severity is Severity.LOW
+
+
+def test_a_neon_role_alone_does_not_excuse_fsync():
+    """A role can be on any server: a dump of a Neon project's roles restored on
+    one's own cluster carries neon_superuser, and that must not turn the most
+    serious finding there is into a note that passes --exit-code."""
+    role = PlatformDetection(Platform.NEON, "the role neon_superuser exists", Basis.ROLE)
+
+    finding = only(_durability(setting("fsync", "off"), healthy_measurements(), role))
+
+    assert finding is not None
+    assert finding.severity is Severity.HIGH
+    assert finding.recommended == "on"
+    assert "because the role neon_superuser exists" in finding.detail, "it says what it examined"
+    assert "That is not enough to call fsync = off safe" in finding.detail, "and why it refused"
+    assert finding.evidence["platform_signal"] == "the role neon_superuser exists"
+
+
+@pytest.mark.asyncio
+async def test_a_server_with_only_a_neon_role_keeps_fsync_high_end_to_end():
+    """The case review found: no setting, a host that names nothing, and the role."""
+    driver = MagicMock(spec=SqlDriver)
+    probe = {
+        "neon_timeline_id": False,
+        "supautils_privileged_role": False,
+        "aurora_version": False,
+        "rds_extensions": False,
+        "azure_extensions": False,
+        "platform_roles": ["neon_superuser"],
+    }
+    driver.execute_query = AsyncMock(return_value=[SqlDriver.RowResult(cells=probe)])
+
+    detection = await detect_platform(driver, "postgresql://postgres@db.internal.example.com/app")
+    finding = only(_durability(setting("fsync", "off"), healthy_measurements(), detection))
+
+    assert detection.platform is Platform.NEON
+    assert finding is not None
+    assert finding.severity is Severity.HIGH
+
+
+def test_both_durability_settings_off_on_neon_are_each_a_note():
+    """Neon runs its computes with full_page_writes off too: its storage rebuilds
+    pages from the WAL. Reported HIGH, it failed --exit-code on every Neon
+    database as fsync did, and took the fsync note's place."""
+    settings = {**setting("fsync", "off"), **setting("full_page_writes", "off")}
+
+    findings = _durability(settings, healthy_measurements(), NEON)
+
+    assert [(f.setting, f.severity) for f in findings] == [("fsync", Severity.LOW), ("full_page_writes", Severity.LOW)]
+    assert "rebuilt from the WAL" in findings[1].detail
+
+
+def test_lakebase_is_judged_as_neon_is():
+    lakebase = PlatformDetection(Platform.LAKEBASE, "the host ep-abc-123.databricks.com has the form of a Databricks Lakebase endpoint", Basis.URL)
+
+    finding = only(_durability(setting("fsync", "off"), healthy_measurements(), lakebase))
+
+    assert finding is not None and finding.severity is Severity.LOW
+    assert "Databricks Lakebase" in finding.summary
+
+
+def test_full_page_writes_off_on_a_neon_role_alone_stays_high():
+    role = PlatformDetection(Platform.NEON, "the role neon_superuser exists", Basis.ROLE)
+
+    finding = only(_durability(setting("full_page_writes", "off"), healthy_measurements(), role))
+
+    assert finding is not None and finding.severity is Severity.HIGH
+
+
+@pytest.mark.asyncio
+async def test_the_reviewer_judges_fsync_by_the_platform_it_is_given():
+    reset_postgres_version_cache()
+    driver = MagicMock(spec=SqlDriver)
+
+    async def answer(query, *args, **kwargs):
+        if "pg_settings" in query:
+            return [SqlDriver.RowResult(cells={"name": "fsync", "setting": "off", "unit": None, "source": "configuration file", "boot_val": "on"})]
+        if query.strip() == "SHOW server_version_num":
+            return [SqlDriver.RowResult(cells={"server_version_num": "160004"})]
+        return [SqlDriver.RowResult(cells=healthy_measurements())]
+
+    driver.execute_query = AsyncMock(side_effect=answer)
+
+    on_neon = await ConfigurationReviewer(driver, platform=NEON).review()
+    unknown = await ConfigurationReviewer(driver).review()
+
+    assert [(f.setting, f.severity) for f in on_neon] == [("fsync", Severity.LOW)]
+    assert [(f.setting, f.severity) for f in unknown] == [("fsync", Severity.HIGH)]
 
 
 # -- work_mem ---------------------------------------------------------------
@@ -225,8 +360,8 @@ async def test_a_server_with_nothing_measurably_wrong_reports_nothing():
                     ("random_page_cost", "1.1", None),
                 )
             ]
-        if query.strip() == "SHOW server_version":
-            return [SqlDriver.RowResult(cells={"server_version": "16.4"})]
+        if query.strip() == "SHOW server_version_num":
+            return [SqlDriver.RowResult(cells={"server_version_num": "160004"})]
         return [SqlDriver.RowResult(cells=healthy_measurements())]
 
     driver.execute_query = AsyncMock(side_effect=answer)
@@ -237,3 +372,26 @@ async def test_a_server_with_nothing_measurably_wrong_reports_nothing():
 def test_the_hit_rate_threshold_is_a_share_not_a_percentage():
     """A rule reading 99 where it means 0.99 would fire on every server."""
     assert 0 < GOOD_CACHE_HIT_RATE < 1
+
+
+# -- Counting windows -------------------------------------------------------
+
+
+def test_a_finding_argued_from_a_counter_says_since_when_it_counted():
+    """Two gigabytes spilled is a different finding over a year and over the hour since a crash."""
+    from datetime import UTC
+    from datetime import datetime
+
+    from pg_debug.db.window import CountingWindow
+
+    since_crash = CountingWindow(since=datetime(2026, 10, 14, 9, tzinfo=UTC), now=datetime(2026, 10, 14, 12, tzinfo=UTC), began_with="restart")
+    measurements = healthy_measurements(temp_files=100, temp_bytes=MIN_TEMP_BYTES * 2, table_window=since_crash, checkpoint_window=since_crash)
+
+    spills = _work_mem(setting("work_mem", "4096", "kB"), measurements)
+    checkpoints = _checkpoints(setting("max_wal_size", "1024", "MB"), healthy_measurements(checkpoints_requested=500, checkpoint_window=since_crash))
+
+    assert spills is not None and checkpoints is not None
+    assert spills.summary.endswith("temporary files since 2026-10-14 09:00 UTC (3 hours).")
+    assert spills.evidence["counting_began_with"] == "restart"
+    assert spills.evidence["counting_seconds"] == 3 * 3600
+    assert checkpoints.evidence["counting_since"] == "2026-10-14T09:00:00+00:00"

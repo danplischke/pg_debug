@@ -4,7 +4,10 @@ import json
 
 import pytest
 
+from pg_debug.audit import AuditFinding
+from pg_debug.audit import AuditReport
 from pg_debug.baseline import Baseline
+from pg_debug.baseline import audit_finding_key
 from pg_debug.baseline import config_finding_key
 from pg_debug.baseline import describe_key
 from pg_debug.baseline import health_finding_key
@@ -66,6 +69,54 @@ def test_health_keys_cover_findings_and_checks_that_are_unhealthy_without_any():
     assert health_keys(results) == [{"check": "Connection health"}, {"check": "Index bloat", "schema": "s", "table": "t", "index": "i"}]
 
 
+def test_a_health_check_that_could_not_run_has_no_key():
+    """It is unhealthy and names nothing, like a cache hit rate below its
+    limit, but it found nothing: a key for it would accept whatever it finds
+    once it runs."""
+    results = {"Replication health": HealthCheckResult.could_not_run("Replication health", "permission denied")}
+
+    assert health_keys(results) == []
+
+
+def test_no_baseline_is_taken_of_a_health_run_in_which_a_check_could_not_run():
+    results = {
+        "Index bloat": health("Index bloat", False, [{"schema": "s", "table": "t", "index": "i"}]),
+        "Replication health": HealthCheckResult.could_not_run("Replication health", "permission denied"),
+    }
+
+    with pytest.raises(InvalidArgumentError, match=r"1 of 2 health checks could not run \(Replication health\)"):
+        Baseline.of("health", results)
+
+
+def test_a_session_left_idle_in_transaction_is_known_by_its_job_not_its_pid():
+    finding = {
+        "kind": "idle_in_transaction",
+        "pid": 4242,
+        "usename": "app",
+        "datname": "shop",
+        "application_name": "checkout",
+        "idle_in_transaction_seconds": 300,
+        "query": "SELECT 1",
+    }
+
+    key = health_finding_key("Connection health", finding)
+
+    assert key == {"check": "Connection health", "kind": "idle_in_transaction", "usename": "app", "datname": "shop", "application_name": "checkout"}
+    assert describe_key(key) == "Connection health: idle_in_transaction usename=app datname=shop application_name=checkout"
+
+
+def test_a_baseline_holds_each_identity_once(tmp_path):
+    """Three sessions of one job left idle in transaction are one accepted finding."""
+    path = tmp_path / "health.json"
+    sessions = [{"kind": "idle_in_transaction", "pid": pid, "usename": "app", "datname": "shop"} for pid in (1, 2, 3)]
+
+    Baseline.of("health", {"Connection health": health("Connection health", False, sessions)}).save(path)
+
+    assert json.loads(path.read_text())["findings"] == [
+        {"check": "Connection health", "kind": "idle_in_transaction", "usename": "app", "datname": "shop"}
+    ]
+
+
 def test_a_model_finding_is_the_rule_and_the_table_and_its_columns():
     assert model_finding_key(model()) == {"rule": "missing_primary_key", "schema": "public", "table": "orders", "columns": ["id"]}
 
@@ -91,7 +142,7 @@ def test_a_baseline_round_trips_through_a_file_in_a_stable_order(tmp_path):
     assert len(loaded) == 2
     assert {"check": "Index bloat", "schema": "s", "table": "t", "index": "alpha"} in loaded
     payload = json.loads(path.read_text())
-    assert payload["version"] == 1 and payload["command"] == "health"
+    assert payload["version"] == 2 and payload["command"] == "health"
     assert [f["index"] for f in payload["findings"]] == ["alpha", "zeta"], "sorted, so the file diffs cleanly"
     assert path.read_text().count("\n") == len(payload["findings"]) + 7, "one finding per line, plus the seven lines of framing"
 
@@ -181,3 +232,53 @@ def test_keys_describe_themselves():
     assert describe_key({"rule": "missing_primary_key", "schema": "public", "table": "events", "columns": []}) == "missing_primary_key: public.events"
     assert describe_key({"setting": "work_mem"}) == "finding: work_mem"
     assert describe_key({"check": "Connection health"}) == "Connection health"
+
+
+# -- Audits -----------------------------------------------------------------
+
+
+def audit_report(*findings, command="security"):
+    return AuditReport(command=command, server_version="16.4", findings=list(findings))
+
+
+def audit_finding(check="ssl", subject="ssl", severity=Severity.MEDIUM):
+    return AuditFinding(check=check, subject=subject, severity=severity, confidence=Confidence.PROVEN, summary="...", detail="...")
+
+
+def test_an_audit_finding_is_known_by_its_check_and_subject():
+    assert audit_finding_key(audit_finding("hba_rules", "host all all 0.0.0.0/0.0.0.0 trust")) == {
+        "check": "hba_rules",
+        "subject": "host all all 0.0.0.0/0.0.0.0 trust",
+    }
+
+
+def test_an_audit_baseline_round_trips_and_fails_only_on_new_high_findings(tmp_path):
+    accepted = audit_report(audit_finding("privileged_roles", "role postgres", Severity.LOW), command="upgrade-check")
+    path = tmp_path / "upgrade.json"
+    Baseline.of("upgrade-check", accepted).save(path)
+    baseline = Baseline.load(path, "upgrade-check")
+
+    later = audit_report(
+        audit_finding("privileged_roles", "role postgres", Severity.LOW),
+        audit_finding("prepared_transactions", "transaction t1", Severity.HIGH),
+        audit_finding("extension_versions", "extension hstore", Severity.LOW),
+        command="upgrade-check",
+    )
+    split = partition("upgrade-check", later, baseline)
+
+    assert split.known == [{"check": "privileged_roles", "subject": "role postgres"}]
+    assert [k["subject"] for k in split.new] == ["transaction t1", "extension hstore"]
+    assert split.new_failures == 1
+
+
+def test_a_security_baseline_is_refused_by_upgrade_check(tmp_path):
+    path = tmp_path / "security.json"
+    Baseline.of("security", audit_report(audit_finding())).save(path)
+
+    with pytest.raises(InvalidArgumentError, match="not `pg-debug upgrade-check`"):
+        Baseline.load(path, "upgrade-check")
+
+
+def test_an_audit_key_describes_its_subject():
+    assert describe_key({"check": "ssl", "subject": "ssl"}) == "ssl: ssl"
+    assert describe_key({"check": "privileged_roles", "subject": "role app"}) == "privileged_roles: role app"

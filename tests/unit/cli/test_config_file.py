@@ -148,8 +148,9 @@ def test_a_command_says_what_context_it_runs_in_and_passes_it_on(project, pg_cli
 
 def test_a_command_that_takes_no_context_neither_reads_nor_mentions_the_file(project, pg_client):
     (project / "pg-debug.toml").write_text("not toml at all", encoding="utf-8")
+    pg_client.return_value.list_schemas = AsyncMock(return_value=[])
 
-    code, _, err = run(["health"])
+    code, _, err = run(["schemas"])
 
     assert code == 0
     assert err == ""

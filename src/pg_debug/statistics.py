@@ -131,24 +131,43 @@ class StatisticsInspector:
 
         Returns:
             One dict per table, with when it was last analyzed (``null`` if
-            never), how many rows changed since, and that as a fraction.
+            not since statistics were last reset), how many rows changed
+            since, and that as a fraction. ``never_analyzed`` is a table with
+            data and no statistics at all.
+
+        Whether a table has statistics is read from ``pg_stats``, not from
+        the activity counters: a crash or ``pg_stat_reset()`` zeroes those,
+        and the times of the last ANALYZE with them, but not the statistics.
+        Judged by the counters, a reset made every table look current, and
+        one that had never been analyzed was not reported, for want of a row
+        count. A table the role may not read is not judged on that, since
+        ``pg_stats`` hides its rows from the role.
         """
         query = """
             SELECT
-                schemaname AS schema,
-                relname AS table,
-                n_live_tup AS live_rows,
-                n_mod_since_analyze AS changed_rows,
+                s.schemaname AS schema,
+                s.relname AS table,
+                GREATEST(s.n_live_tup, c.reltuples::bigint, 0) AS live_rows,
+                pg_relation_size(s.relid) AS size_bytes,
+                s.n_mod_since_analyze AS changed_rows,
                 CASE
-                    WHEN n_live_tup > 0
-                    THEN (n_mod_since_analyze::float8 / n_live_tup)
+                    WHEN s.n_live_tup > 0
+                    THEN (s.n_mod_since_analyze::float8 / s.n_live_tup)
                 END AS changed_fraction,
-                GREATEST(last_analyze, last_autoanalyze) AS last_analyzed,
-                last_analyze IS NULL AND last_autoanalyze IS NULL AS never_analyzed
-            FROM pg_stat_user_tables
-            WHERE (last_analyze IS NULL AND last_autoanalyze IS NULL AND n_live_tup > 0)
-               OR (n_mod_since_analyze >= {} AND n_live_tup > 0 AND n_mod_since_analyze::float8 / n_live_tup >= {})
-            ORDER BY n_mod_since_analyze DESC
+                GREATEST(s.last_analyze, s.last_autoanalyze) AS last_analyzed,
+                NOT st.has_statistics AS never_analyzed
+            FROM pg_stat_user_tables s
+            JOIN pg_class c ON c.oid = s.relid
+            CROSS JOIN LATERAL (
+                SELECT
+                    s.last_analyze IS NOT NULL
+                    OR s.last_autoanalyze IS NOT NULL
+                    OR EXISTS (SELECT 1 FROM pg_stats p WHERE p.schemaname = s.schemaname AND p.tablename = s.relname)
+                    AS has_statistics
+            ) st
+            WHERE (NOT st.has_statistics AND has_table_privilege(s.relid, 'SELECT') AND pg_relation_size(s.relid) > 0)
+               OR (s.n_mod_since_analyze >= {} AND s.n_live_tup > 0 AND s.n_mod_since_analyze::float8 / s.n_live_tup >= {})
+            ORDER BY s.n_mod_since_analyze DESC
         """
         rows = await SafeSqlDriver.execute_param_query(self.sql_driver, query, [min_changed_rows, stale_fraction])
         return [row.cells for row in rows] if rows else []

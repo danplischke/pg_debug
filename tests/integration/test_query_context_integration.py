@@ -5,8 +5,6 @@ context is needed: run as the owner, a query sees every tenant's rows and
 plans without the policy's predicate, which is not what the application gets.
 """
 
-import contextlib
-import io
 import time
 from urllib.parse import urlsplit
 from urllib.parse import urlunsplit
@@ -189,14 +187,82 @@ class TestQueryContext:
             with pytest.raises(IndexTuningError, match=r"could not be planned \(the first: permission denied for table context_orders\)"):
                 await app.analyze_query_indexes([BY_AMOUNT])
 
-    def test_the_command_line_runs_the_query_in_the_context_it_announces(self, tenants, monkeypatch, tmp_path):
+    def test_the_command_line_runs_the_query_in_the_context_it_announces(self, tenants, monkeypatch, tmp_path, capsys):
         monkeypatch.chdir(tmp_path)
         (tmp_path / "pg-debug.toml").write_text(f'[context]\nrole = "{APP_ROLE}"\n[context.settings]\napp.tenant_id = "t3"\n', encoding="utf-8")
 
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cli.main(["--json", "-d", tenants, "execute", COUNT])
+        # Read through capsys: under pytest's live logging, as CI runs it, a
+        # log record undoes a redirect of sys.stderr.
+        code = cli.main(["--json", "-d", tenants, "execute", COUNT])
+        out, err = capsys.readouterr()
 
-        assert code == 0, err.getvalue()
-        assert f"query context: role {APP_ROLE}, app.tenant_id=t3" in err.getvalue()
-        assert '"n": 1000' in out.getvalue()
+        assert code == 0, err
+        assert f"query context: role {APP_ROLE}, app.tenant_id=t3" in err
+        assert '"n": 1000' in out
+
+
+DEFAULTS_ROLE = "pgdebug_context_defaults"
+SUPERUSER_ONLY = "log_statement"
+
+
+@pytest.fixture
+def role_with_defaults(connection_string):
+    """A role with ALTER ROLE ... SET values, as Supabase gives its authenticated role an 8 s timeout."""
+    with psycopg.connect(connection_string, autocommit=True) as conn:
+        database = conn.info.dbname
+        conn.execute(
+            sql.SQL("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {}) THEN CREATE ROLE {} LOGIN; END IF; END $$").format(
+                sql.Literal(DEFAULTS_ROLE), sql.Identifier(DEFAULTS_ROLE)
+            )
+        )
+        conn.execute(sql.SQL("ALTER ROLE {} SET statement_timeout = '8s'").format(sql.Identifier(DEFAULTS_ROLE)))
+        conn.execute(sql.SQL("ALTER ROLE {} SET work_mem = '16MB'").format(sql.Identifier(DEFAULTS_ROLE)))
+        conn.execute(sql.SQL("ALTER ROLE {} SET request.jwt.claim.role = 'authenticated'").format(sql.Identifier(DEFAULTS_ROLE)))
+        # This database's value stands over the one for every database.
+        conn.execute(sql.SQL("ALTER ROLE {} IN DATABASE {} SET work_mem = '24MB'").format(sql.Identifier(DEFAULTS_ROLE), sql.Identifier(database)))
+        conn.execute(sql.SQL("ALTER ROLE {} SET log_statement = 'all'").format(sql.Identifier(DEFAULTS_ROLE)))
+        conn.execute(sql.SQL("GRANT {} TO {}").format(sql.Identifier(DEFAULTS_ROLE), sql.Identifier(OUTSIDER)))
+    try:
+        yield connection_string
+    finally:
+        with psycopg.connect(connection_string, autocommit=True) as conn:
+            conn.execute(sql.SQL("ALTER ROLE {} RESET ALL").format(sql.Identifier(DEFAULTS_ROLE)))
+            conn.execute(sql.SQL("ALTER ROLE {} IN DATABASE {} RESET ALL").format(sql.Identifier(DEFAULTS_ROLE), sql.Identifier(database)))
+
+
+SHOW_DEFAULTS = (
+    "SELECT current_user AS role, current_setting('statement_timeout') AS statement_timeout, current_setting('work_mem') AS work_mem, "
+    "current_setting('request.jwt.claim.role', true) AS claim, current_setting('log_statement') AS log_statement"
+)
+
+
+@pytest.mark.usefixtures("tenants")
+class TestTheRolesOwnSettings:
+    """SET ROLE does not apply a role's ALTER ROLE ... SET values; a login as the role does."""
+
+    @pytest.mark.asyncio
+    async def test_the_query_runs_with_the_settings_a_login_as_the_role_gets(self, role_with_defaults):
+        async with PgDebug(role_with_defaults, context=QueryContext(role=DEFAULTS_ROLE)) as pg:
+            (row,) = await pg.execute_sql(SHOW_DEFAULTS)
+
+        assert row["role"] == DEFAULTS_ROLE
+        assert row["statement_timeout"] == "8s"
+        assert row["work_mem"] == "24MB"
+        assert row["claim"] == "authenticated"
+
+    @pytest.mark.asyncio
+    async def test_the_context_and_pg_debug_s_own_timeout_stand_over_the_role_s(self, role_with_defaults):
+        context = QueryContext(role=DEFAULTS_ROLE, settings={"work_mem": "8MB"})
+        async with PgDebug(role_with_defaults, timeout=30, context=context) as pg:
+            (row,) = await pg.execute_sql(SHOW_DEFAULTS)
+
+        assert (row["statement_timeout"], row["work_mem"], row["claim"]) == ("30s", "8MB", "authenticated")
+
+    @pytest.mark.asyncio
+    async def test_a_setting_the_connecting_user_may_not_set_is_left_out_rather_than_failing_every_statement(self, role_with_defaults):
+        """log_statement is superuser-only; a login as the role would have had it."""
+        async with PgDebug(as_user(role_with_defaults, OUTSIDER), context=QueryContext(role=DEFAULTS_ROLE)) as pg:
+            (row,) = await pg.execute_sql(SHOW_DEFAULTS)
+
+        assert row["statement_timeout"] == "8s"
+        assert row["log_statement"] != "all"

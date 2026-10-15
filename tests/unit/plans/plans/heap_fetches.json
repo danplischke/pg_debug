@@ -1,0 +1,54 @@
+[
+ {
+  "Plan": {
+   "Node Type": "Index Only Scan",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Scan Direction": "Forward",
+   "Index Name": "counters_pkey",
+   "Relation Name": "counters",
+   "Schema": "public",
+   "Alias": "counters",
+   "Startup Cost": 0.42,
+   "Total Cost": 5104.45,
+   "Plan Rows": 150059,
+   "Plan Width": 8,
+   "Actual Startup Time": 0.053,
+   "Actual Total Time": 66.388,
+   "Actual Rows": 99999,
+   "Actual Loops": 1,
+   "Output": [
+    "id"
+   ],
+   "Index Cond": "(counters.id < 100000)",
+   "Rows Removed by Index Recheck": 0,
+   "Heap Fetches": 149998,
+   "Shared Hit Blocks": 100819,
+   "Shared Read Blocks": 0,
+   "Shared Dirtied Blocks": 0,
+   "Shared Written Blocks": 0,
+   "Local Hit Blocks": 0,
+   "Local Read Blocks": 0,
+   "Local Dirtied Blocks": 0,
+   "Local Written Blocks": 0,
+   "Temp Read Blocks": 0,
+   "Temp Written Blocks": 0
+  },
+  "Query Identifier": -4591349185943368725,
+  "Planning": {
+   "Shared Hit Blocks": 19,
+   "Shared Read Blocks": 0,
+   "Shared Dirtied Blocks": 0,
+   "Shared Written Blocks": 0,
+   "Local Hit Blocks": 0,
+   "Local Read Blocks": 0,
+   "Local Dirtied Blocks": 0,
+   "Local Written Blocks": 0,
+   "Temp Read Blocks": 0,
+   "Temp Written Blocks": 0
+  },
+  "Planning Time": 0.244,
+  "Triggers": [],
+  "Execution Time": 73.396
+ }
+]

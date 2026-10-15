@@ -193,6 +193,10 @@ ALLOWED_FUNCTIONS: set[str] = {
     "trim_array",
     "unnest",
     "any",
+    # Set-returning functions that compute values and read nothing. A call in
+    # FROM is checked against this list like any other.
+    "generate_series",
+    "generate_subscripts",
     # String functions
     "ascii",
     "bit_length",
@@ -296,6 +300,9 @@ ALLOWED_FUNCTIONS: set[str] = {
     "pg_table_size",
     "pg_tablespace_size",
     "pg_total_relation_size",
+    "pg_partition_ancestors",
+    "pg_partition_root",
+    "pg_partition_tree",
     # Security privilege check functions
     "has_any_column_privilege",
     "has_column_privilege",
@@ -506,6 +513,23 @@ ALLOWED_FUNCTIONS: set[str] = {
     "pg_postmaster_start_time",  # Shows server start time
     # Recovery Information Functions (safe ones)
     "pg_is_in_recovery",
+    "pg_last_wal_receive_lsn",
+    "pg_last_wal_replay_lsn",
+    "pg_last_xact_replay_timestamp",
+    # The WAL write position: a read of shared memory, which shard readiness
+    # samples twice for the write rate where pg_stat_wal (14) is missing.
+    "pg_current_wal_lsn",
+    # Aurora's history: pg_stat_statements with storage columns, and one row
+    # per tracked plan. Both only read what Aurora has recorded.
+    "aurora_stat_statements",
+    "aurora_stat_plans",
+    # WAL distance (pg_current_wal_lsn is above), multixact age and collation library versions:
+    # each reads a counter or asks the C library or ICU for a version string,
+    # and writes nothing
+    "pg_wal_lsn_diff",
+    "mxid_age",
+    "pg_collation_actual_version",
+    "pg_database_collation_actual_version",
     # Hypopg functions
     "hypopg",
     "hypopg_create_index",

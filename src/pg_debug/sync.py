@@ -17,6 +17,7 @@ from concurrent.futures import Future
 from typing import Any
 from typing import TypeVar
 
+from .audit import AuditReport
 from .client import AccessMode
 from .client import PgDebug
 from .client import SortBy
@@ -24,8 +25,12 @@ from .client import TuningMethod
 from .configuration import ConfigFinding
 from .context import QueryContext
 from .db import DbConnPool
+from .db.privileges import StatisticsAccess
 from .health import HealthCheckResult
 from .health import HealthType
+from .health.checks.index import MIN_WINDOW_DAYS
+from .history import HistoryReport
+from .index.base import DEFAULT_MAX_REGRESSION_FACTOR
 from .index_use import IndexUse
 from .migration import StatementReview
 from .model import DEFAULT_MIN_ROWS
@@ -37,8 +42,18 @@ from .partition import PartitionCandidate
 from .plans import DEFAULT_MIN_RATIO
 from .plans import PlanFinding
 from .plans import PlanInput
+from .plans.shape import PlanShape
 from .plans.tree import ExplainPlanArtifact
+from .pooler import PoolerReport
 from .schema import ObjectType
+from .server_rates import DEFAULT_RATES_INTERVAL
+from .server_rates import ServerRates
+from .sharding import DEFAULT_INTERVAL_SECONDS
+from .sharding import ShardReadiness
+from .top_queries import QuerySample
+from .waits import DEFAULT_SAMPLE_INTERVAL
+from .waits import WaitDiagnosis
+from .waits import WaitProfile
 
 T = TypeVar("T")
 
@@ -218,6 +233,7 @@ class SyncPgDebug:
         schema: str | None = None,
         min_rows: int = DEFAULT_MIN_ROWS,
         proven_only: bool = False,
+        static: bool = False,
     ) -> list[ModelFinding]:
         """Review the data model for defects, and say how to fix each one."""
         return self._call(
@@ -226,6 +242,7 @@ class SyncPgDebug:
             schema=schema,
             min_rows=min_rows,
             proven_only=proven_only,
+            static=static,
         )
 
     def check_migration(self, sql: str) -> list[StatementReview]:
@@ -235,6 +252,26 @@ class SyncPgDebug:
     def review_configuration(self) -> list[ConfigFinding]:
         """Review the server's settings against what it is actually doing."""
         return self._call(self._client.review_configuration)
+
+    # -- Audits --------------------------------------------------------------
+
+    def check_upgrade(self, to: int | None = None) -> AuditReport:
+        """Say what stands between this cluster and ``pg_upgrade`` to a newer major version."""
+        return self._call(self._client.check_upgrade, to=to)
+
+    def audit_security(self) -> AuditReport:
+        """Read the server's authentication rules, roles, privileges and row-level security for what lets too much in."""
+        return self._call(self._client.audit_security)
+
+    # -- Gating a build ------------------------------------------------------
+
+    def definition_fingerprints(self, command: str, keys: list[dict[str, Any]]) -> list[str | None]:
+        """Fingerprint the definitions of the objects findings are about."""
+        return self._call(self._client.definition_fingerprints, command, keys)
+
+    def plan_shapes(self, queries: list[str]) -> list[PlanShape]:
+        """Plan each query without running it, and say what shape its plan has."""
+        return self._call(self._client.plan_shapes, queries)
 
     # -- Partitioning --------------------------------------------------------
 
@@ -253,6 +290,14 @@ class SyncPgDebug:
             min_pruning_share=min_pruning_share,
             limit=limit,
         )
+
+    def assess_shard_readiness(self, interval_seconds: float = DEFAULT_INTERVAL_SECONDS) -> ShardReadiness:
+        """Say whether to shard, which usually means "not yet", with the figure behind each reason."""
+        return self._call(self._client.assess_shard_readiness, interval_seconds=interval_seconds)
+
+    def read_history(self, limit: int = 10) -> HistoryReport:
+        """Read the history the platform and the installed extensions keep, and how far back each goes."""
+        return self._call(self._client.read_history, limit=limit)
 
     # -- Live activity -------------------------------------------------------
 
@@ -278,14 +323,24 @@ class SyncPgDebug:
         """Report who is blocking whom, root blockers first."""
         return self._call(self._client.lock_tree)
 
+    def sample_waits(self, seconds: float, interval: float = DEFAULT_SAMPLE_INTERVAL) -> WaitProfile:
+        """Sample what active sessions wait on, without an extension."""
+        return self._call(self._client.sample_waits, seconds, interval=interval)
+
+    def classify_waits(self) -> WaitDiagnosis:
+        """Name the patterns in one snapshot of the server's waits."""
+        return self._call(self._client.classify_waits)
+
     # -- Diagnostics ---------------------------------------------------------
 
     def analyze_db_health(
         self,
         health_type: str | HealthType | Iterable[str | HealthType] = HealthType.ALL,
+        min_window_days: float = MIN_WINDOW_DAYS,
+        static: bool = False,
     ) -> dict[str, HealthCheckResult]:
         """Run database health checks."""
-        return self._call(self._client.analyze_db_health, health_type)
+        return self._call(self._client.analyze_db_health, health_type, min_window_days, static=static)
 
     def get_top_queries(
         self,
@@ -296,13 +351,45 @@ class SyncPgDebug:
         """Report the most expensive queries recorded by pg_stat_statements."""
         return self._call(self._client.get_top_queries, sort_by=sort_by, limit=limit, interval_seconds=interval_seconds)
 
+    def sample_top_queries(
+        self,
+        interval_seconds: float,
+        sort_by: SortBy = "resources",
+        limit: int = 10,
+    ) -> QuerySample:
+        """Measure the most expensive queries over an interval, and say what the ranking left out."""
+        return self._call(self._client.sample_top_queries, interval_seconds, sort_by=sort_by, limit=limit)
+
+    def sample_server_rates(self, interval_seconds: float = DEFAULT_RATES_INTERVAL) -> ServerRates:
+        """Measure the server's own counters over an interval, as rates per second."""
+        return self._call(self._client.sample_server_rates, interval_seconds)
+
+    def inspect_pooler(self, admin_url: str) -> PoolerReport:
+        """Read PgBouncer's admin console and report whether clients wait for a server connection."""
+        return self._call(self._client.inspect_pooler, admin_url)
+
+    # -- What the statistics views withhold ----------------------------------
+
+    def statistics_access(self) -> StatisticsAccess:
+        """Whether the connecting role is shown every role's activity and statements."""
+        return self._call(self._client.statistics_access)
+
+    def withheld_backends(self) -> list[dict[str, Any]]:
+        """The backends whose details PostgreSQL withholds from the connecting role, and what it still shows of them."""
+        return self._call(self._client.withheld_backends)
+
     # -- Index tuning --------------------------------------------------------
+
+    def counting_windows(self) -> dict[str, dict[str, Any] | None]:
+        """How long each set of counters pg-debug argues from has been counting."""
+        return self._call(self._client.counting_windows)
 
     def analyze_workload_indexes(
         self,
         max_index_size_mb: int = 10000,
         method: TuningMethod = "dta",
         llm_model: str | None = None,
+        max_regression_factor: float = DEFAULT_MAX_REGRESSION_FACTOR,
     ) -> dict[str, Any]:
         """Recommend indexes for the workload recorded by pg_stat_statements."""
         return self._call(
@@ -310,6 +397,7 @@ class SyncPgDebug:
             max_index_size_mb=max_index_size_mb,
             method=method,
             llm_model=llm_model,
+            max_regression_factor=max_regression_factor,
         )
 
     def analyze_query_indexes(
@@ -318,6 +406,7 @@ class SyncPgDebug:
         max_index_size_mb: int = 10000,
         method: TuningMethod = "dta",
         llm_model: str | None = None,
+        max_regression_factor: float = DEFAULT_MAX_REGRESSION_FACTOR,
     ) -> dict[str, Any]:
         """Recommend indexes for a specific list of queries."""
         return self._call(
@@ -326,6 +415,7 @@ class SyncPgDebug:
             max_index_size_mb=max_index_size_mb,
             method=method,
             llm_model=llm_model,
+            max_regression_factor=max_regression_factor,
         )
 
 

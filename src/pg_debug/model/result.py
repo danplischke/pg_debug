@@ -18,6 +18,7 @@ from enum import Enum
 from typing import Any
 
 from ..errors import InvalidArgumentError
+from ..rules import DOCS_URL
 from ..severity import SEVERITY_ORDER
 from ..severity import Confidence
 from ..severity import Severity
@@ -39,6 +40,9 @@ class RuleId(str, Enum):
     BLANK_PADDED_CHAR = "blank_padded_char"
     NULLABLE_NEVER_NULL = "nullable_never_null"
     LOW_CARDINALITY_TEXT = "low_cardinality_text"
+    JSON_COLUMN = "json_column"
+    PRIMARY_KEY_OVERFLOW = "primary_key_overflow"
+    MOSTLY_NULL_INDEX = "mostly_null_index"
     ALL = "all"
 
     @classmethod
@@ -121,6 +125,7 @@ class ModelFinding:
         """Return the finding as a JSON-friendly dict."""
         result: dict[str, Any] = {
             "rule": self.rule.value,
+            "docs": f"{DOCS_URL}#{self.rule.value}",
             "confidence": self.confidence.value,
             "severity": self.severity.value,
             "schema": self.schema,

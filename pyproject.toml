@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "psycopg[binary]>=3.3.2",
     "humanize>=4.15.0",
-    "pglast==7.11",
+    "pglast==7.20",
     "psycopg-pool>=3.3.0",
 ]
 license = "MIT"
@@ -55,23 +55,28 @@ packages = ["src/pg_debug"]
 pythonpath = ["./src", "./tests"]
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+# A test still running after five minutes prints every thread's stack, so a
+# hang in CI names the test and the line it is stuck on.
+faulthandler_timeout = 300
 
 [dependency-groups]
 dev = [
     "docker>=7.1.0",
     "pre-commit>=4.6.2",
-    "pyright==1.1.408",
+    "pyright==1.1.414",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.1.0",
     "pytest>=9.0.2",
     "python-dotenv>=1.0.0",
-    "ruff==0.14.13",
+    "ruff==0.17.0",
 ]
 
 [tool.ruff]
 line-length = 150
 target-version = "py312"
 exclude = [".venv*"]
+# Markdown is prose with examples in it, laid out for reading, not for the formatter.
+extend-exclude = ["*.md"]
 
 lint.select = [
     "E",   # pycodestyle errors
@@ -88,6 +93,7 @@ lint.select = [
 lint.ignore = [
     "RUF059", # Unused unpacked variable
     "RUF100", # Unused noqa directive
+    "UP042", # StrEnum: it changes what str() and format() of a public enum member print
 ]
 
 [tool.ruff.format]

@@ -5,6 +5,7 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 from typing import Any
 from typing import ClassVar
 from typing import LiteralString
@@ -28,6 +29,9 @@ from ..errors import QueryError
 from . import allowlist
 from .driver import QUERY_MARKER
 from .driver import SqlDriver
+
+if TYPE_CHECKING:
+    from ..context import QueryContext
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +71,15 @@ class SafeSqlDriver(SqlDriver):
         """
         self.sql_driver = sql_driver
         self.timeout = timeout
+
+    @property
+    def context(self) -> QueryContext | None:
+        """The wrapped driver's query context, which is the one that is applied."""
+        return self.sql_driver.context
+
+    def with_context(self, context: QueryContext | None) -> SafeSqlDriver:
+        """The same restrictions over the wrapped driver with another query context."""
+        return SafeSqlDriver(self.sql_driver.with_context(context), timeout=self.timeout)
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[SqlDriver]:
@@ -132,21 +145,23 @@ class SafeSqlDriver(SqlDriver):
                 # Skip attributes that don't exist (this is normal in pglast)
                 continue
 
-            # Handle lists of nodes
-            if isinstance(attr, list):
-                for item in attr:
-                    if isinstance(item, Node):
-                        self._validate_node(item)
+            self._validate_children(attr)
 
-            # Handle tuples of nodes
-            elif isinstance(attr, tuple):
-                for item in attr:
-                    if isinstance(item, Node):
-                        self._validate_node(item)
+    def _validate_children(self, value: Any) -> None:
+        """Validate every node in an attribute, however deeply pglast nests it.
 
-            # Handle single nodes
-            elif isinstance(attr, Node):
-                self._validate_node(attr)
+        Some attributes are sequences of sequences: a function in FROM is
+        ``RangeFunction.functions = ((FuncCall, None),)``, and the rows of a
+        ``VALUES`` list are ``SelectStmt.valuesLists``. A walk that looked one
+        level into a sequence never reached the calls inside, so
+        ``SELECT * FROM pg_terminate_backend(...)`` ran a function the
+        allowlist refuses in the select list.
+        """
+        if isinstance(value, Node):
+            self._validate_node(value)
+        elif isinstance(value, list | tuple):
+            for item in value:
+                self._validate_children(item)
 
     def _validate(self, query: str) -> None:
         """Refuse the query unless every statement in it is read-only.
@@ -178,15 +193,19 @@ class SafeSqlDriver(SqlDriver):
         force_readonly: bool = True,  # do not use value passed in
         *,
         in_context: bool = False,
+        cleanup: LiteralString | None = None,
     ) -> list[SqlDriver.RowResult] | None:  # noqa: UP007
         """Execute a query after validating it is safe.
 
         The query context, with ``in_context``, is applied by the wrapped
         driver after the query has passed: it is pg-debug's own statement,
         and it sets a role and settings, which writes nothing. The settings
-        restricted mode depends on are ones a context cannot hold.
+        restricted mode depends on are ones a context cannot hold. A
+        ``cleanup`` is validated like the query.
         """
         self._validate(query)
+        if cleanup is not None:
+            self._validate(cleanup)
 
         # NOTE: Always force readonly=True in SafeSqlDriver regardless of what was passed
         if self.timeout:
@@ -199,22 +218,25 @@ class SafeSqlDriver(SqlDriver):
                         params=params,
                         force_readonly=True,
                         in_context=in_context,
+                        cleanup=cleanup,
                     )
             except TimeoutError as e:
-                logger.warning("Query execution timed out after %s seconds: %s...", self.timeout, query[:100])
+                # One line, with the statement only at debug, as the wrapped
+                # driver logs one that failed. A failure in the wrapped
+                # driver is logged there, so it is not logged here again.
+                logger.warning("Query execution timed out after %s seconds", self.timeout)
+                logger.debug("The statement that timed out: %s", query)
                 raise QueryError(
                     f"Query execution timed out after {self.timeout} seconds in restricted mode. "
                     "Consider simplifying your query or increasing the timeout."
                 ) from e
-            except Exception as e:
-                logger.error("Error executing query: %s", e)
-                raise
         else:
             return await self.sql_driver.execute_query(
                 query,
                 params=params,
                 force_readonly=True,
                 in_context=in_context,
+                cleanup=cleanup,
             )
 
     async def execute_query_and_rollback(

@@ -10,6 +10,9 @@ from typing import Any
 from typing import Literal
 
 from .activity import ActivityInspector
+from .audit import AuditReport
+from .audit import SecurityAuditor
+from .audit import UpgradeChecker
 from .configuration import ConfigFinding
 from .configuration import ConfigurationReviewer
 from .context import QueryContext
@@ -18,6 +21,15 @@ from .db import SafeSqlDriver
 from .db import SqlDriver
 from .db import check_hypopg_installation_status
 from .db import obfuscate_password
+from .db import privileges
+from .db.driver import check_statement_timeout
+from .db.extensions import hypopg_unobtainable
+from .db.privileges import StatisticsAccess
+from .db.statements import locate_pg_stat_statements
+from .db.window import checkpoint_window
+from .db.window import statement_window
+from .db.window import table_window
+from .definitions import definition_fingerprints
 from .errors import ConnectionFailedError
 from .errors import ExtensionRequiredError
 from .errors import InvalidArgumentError
@@ -25,8 +37,14 @@ from .errors import PgDebugError
 from .health import DatabaseHealthTool
 from .health import HealthCheckResult
 from .health import HealthType
+from .health.checks.index import MIN_WINDOW_DAYS
+from .history import HistoryReader
+from .history import HistoryReport
+from .index.base import DEFAULT_MAX_REGRESSION_FACTOR
 from .index.base import MAX_NUM_INDEX_TUNING_QUERIES
+from .index.base import IndexTuningBase
 from .index.dta import DatabaseTuningAdvisor
+from .index.heuristic import StatisticsIndexAdvisor
 from .index.presentation import TextPresentation
 from .index_use import IndexUse
 from .index_use import IndexUseAnalyzer
@@ -45,11 +63,32 @@ from .plans import ExplainPlanTool
 from .plans import PlanDiagnoser
 from .plans import PlanFinding
 from .plans import PlanInput
+from .plans.shape import PlanShape
+from .plans.shape import read_plan_shapes
 from .plans.tree import ExplainPlanArtifact
+from .platform import PlatformDetection
+from .platform import detect_from_url
+from .platform import detect_platform
+from .pooler import PoolerReport
+from .pooler import check_admin_url
+from .pooler import inspect_pgbouncer
+from .pooler import read_server_connections
 from .schema import ObjectType
 from .schema import SchemaInspector
+from .server_rates import DEFAULT_RATES_INTERVAL
+from .server_rates import ServerRates
+from .server_rates import ServerRatesSampler
+from .sharding import DEFAULT_INTERVAL_SECONDS
+from .sharding import ShardReadiness
+from .sharding import ShardReadinessAssessor
 from .statistics import StatisticsInspector
+from .top_queries import QuerySample
 from .top_queries import TopQueriesCalc
+from .waits import DEFAULT_SAMPLE_INTERVAL
+from .waits import WaitDiagnosis
+from .waits import WaitProfile
+from .waits import WaitSampler
+from .waits import classify_waits
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +100,11 @@ DEFAULT_RESTRICTED_TIMEOUT = 30
 
 TuningMethod = Literal["dta", "llm"]
 SortBy = Literal["resources", "mean_time", "total_time"]
+
+
+def _check_sort_by(sort_by: str) -> None:
+    if sort_by not in ("resources", "mean_time", "total_time"):
+        raise InvalidArgumentError("Invalid sort criteria. Please use 'resources', 'mean_time' or 'total_time'.")
 
 
 class AccessMode(str, Enum):
@@ -136,11 +180,14 @@ class PgDebug:
             access_mode: ``unrestricted`` (default) allows any statement;
                 ``restricted`` allows only read-only statements.
             timeout: Statement timeout in seconds, applied in both access
-                modes. Defaults to none in unrestricted mode and to
+                modes, from 0 (none) to 2147483, PostgreSQL's limit. Defaults
+                to none in unrestricted mode and to
                 ``DEFAULT_RESTRICTED_TIMEOUT`` in restricted mode.
-            search_path: Schema search path to set on every connection, e.g.
+            search_path: Schema search path for every statement, e.g.
                 ``"reporting, public"``. Index tuning resolves table names
-                through it.
+                through it. It and the timeout are set inside each statement's
+                transaction, never for the session, so that behind a
+                transaction pooler neither reaches another client.
             llm_model: Model for the ``llm`` index tuning method. Defaults to
                 the ``PG_DEBUG_LLM_MODEL`` environment variable, then to
                 :data:`~pg_debug.index.llm_settings.DEFAULT_LLM_MODEL`.
@@ -158,6 +205,7 @@ class PgDebug:
                 connecting user. Checked against the server when the client
                 connects. Applies in restricted mode too.
         """
+        check_statement_timeout(timeout)
         self._database_url = database_url
         self.access_mode = AccessMode(access_mode)
         self.timeout = timeout
@@ -165,6 +213,7 @@ class PgDebug:
         self.llm_model = llm_model
         self.context = context
         self._context_checked = False
+        self._platform: PlatformDetection | None = None
         self._pool = (
             pool
             if pool is not None
@@ -209,14 +258,70 @@ class PgDebug:
                 role the connecting user is not a member of, or a setting it
                 does not know or will not take.
         """
+        url = self.database_url
+        self._keep_timeout_off_a_server_that_refuses_it(url)
         try:
-            await self._pool.pool_connect(self.database_url)
+            await self._pool.pool_connect(url)
         except PgDebugError:
             raise
         except Exception as e:
             raise ConnectionFailedError(f"Could not connect to database: {obfuscate_password(str(e))}") from e
         await self._check_context()
         return self
+
+    def _keep_timeout_off_a_server_that_refuses_it(self, url: str) -> None:
+        """Keep the statement timeout on this side for a server that will not take statement_timeout.
+
+        Aurora DSQL refuses ``statement_timeout`` at any scope, by its
+        documentation; pg-debug has not been run against it. Set in each
+        transaction's setup, as everywhere else, the timeout would make every
+        statement fail before it ran, and restricted mode always has one. So
+        on DSQL it is not set on the server. DSQL is recognised from the URL's
+        host or its ``amzn-cluster-id`` option, before anything runs: no
+        statement could run to ask the server.
+
+        The pool keeps the same number of seconds on this side instead, which
+        restricted mode does for every statement already. With ``timeout`` in
+        unrestricted mode the bound is kept too, rather than the option
+        refused: the option then means one thing in both modes, and a user who
+        asked for a bound keeps the one that can be had instead of being left
+        with none. It is weaker than the server's, and the warning says how.
+        A pool handed in is its owner's to configure.
+        """
+        if not self._owns_pool or not self._pool.server_side_timeout:
+            return
+        detection = detect_from_url(url)
+        if detection is None or not detection.platform.refuses_statement_timeout:
+            return
+        self._pool.server_side_timeout = False
+        if self.effective_timeout:
+            logger.warning(
+                "%s refuses statement_timeout, so the %s-second timeout is not set on the server: pg-debug stops waiting for "
+                "a statement after that long and asks the server to cancel it, which has not been tried there. pg-debug took "
+                "the server for %s because %s.",
+                detection.platform.label,
+                self.effective_timeout,
+                detection.platform.label,
+                detection.signal,
+            )
+
+    async def _detect_platform(self) -> PlatformDetection:
+        """Which managed platform the server runs on, detected once per client.
+
+        One statement, which restricted mode allows, and the host and options
+        of the URL the pool connected with;
+        :func:`~pg_debug.platform.detect_platform` lists the signals.
+        """
+        if self._platform is None:
+            driver = await self.sql_driver()
+            self._platform = await detect_platform(driver, getattr(self._pool, "connection_url", None))
+        return self._platform
+
+    async def _require_hypopg(self, driver: SqlDriver | SafeSqlDriver) -> None:
+        """Refuse what needs HypoPG where it is not installed, saying how to get it on this platform."""
+        is_hypopg_installed, hypopg_message = await check_hypopg_installation_status(driver, platform=self._detect_platform)
+        if not is_hypopg_installed:
+            raise ExtensionRequiredError("hypopg", hypopg_message)
 
     async def _check_context(self) -> None:
         """Have the server refuse a bad context once, before any query depends on it."""
@@ -327,10 +432,7 @@ class PgDebug:
             if analyze:
                 raise InvalidArgumentError("Cannot use analyze and hypothetical indexes together.")
 
-            is_hypopg_installed, hypopg_message = await check_hypopg_installation_status(driver)
-            if not is_hypopg_installed:
-                raise ExtensionRequiredError("hypopg", hypopg_message)
-
+            await self._require_hypopg(driver)
             return await explain_tool.explain_with_hypothetical_indexes(sql, hypothetical_indexes)
         if analyze:
             return await explain_tool.explain_analyze(sql)
@@ -372,7 +474,7 @@ class PgDebug:
             ExplainPlanError: If the statement could not be run or its plan
                 could not be read.
         """
-        return await PlanDiagnoser(await self.sql_driver()).diagnose(sql, min_ratio=min_ratio)
+        return await PlanDiagnoser(await self.sql_driver(), platform=self._detect_platform).diagnose(sql, min_ratio=min_ratio)
 
     async def diagnose_plan(self, plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> list[PlanFinding]:
         """Diagnose a plan that already exists, checking this database's catalog.
@@ -399,7 +501,7 @@ class PgDebug:
             InvalidArgumentError: If the plan is not EXPLAIN JSON, or was
                 produced without ANALYZE.
         """
-        return await PlanDiagnoser(await self.sql_driver()).diagnose_plan(plan, min_ratio=min_ratio)
+        return await PlanDiagnoser(await self.sql_driver(), platform=self._detect_platform).diagnose_plan(plan, min_ratio=min_ratio)
 
     # -- Index use -----------------------------------------------------------
 
@@ -416,9 +518,9 @@ class PgDebug:
         disabled: if the index is used then, nothing stopped it, and the
         finding reports both costs and the row estimate the choice rests on.
 
-        Nothing is executed; the query is planned, not run. The forced plan
-        needs a ``SET`` for the session, which restricted mode does not allow,
-        and the verdict notes that it was skipped.
+        Nothing is executed; the query is planned, not run, in restricted mode
+        too: sequential scans are disabled for the forced plan's transaction
+        alone.
 
         Args:
             sql: One SELECT, UPDATE or DELETE.
@@ -465,6 +567,7 @@ class PgDebug:
         schema: str | None = None,
         min_rows: int = DEFAULT_MIN_ROWS,
         proven_only: bool = False,
+        static: bool = False,
     ) -> list[ModelFinding]:
         """Review the data model for defects, and say how to fix each one.
 
@@ -485,6 +588,9 @@ class PgDebug:
                 smaller than this.
             proven_only: Keep only what the catalog proves, dropping the
                 findings inferred from statistics.
+            static: Run only the rules that read nothing but the catalog, so
+                that a freshly migrated, empty database in CI answers them as
+                production would. See :mod:`pg_debug.rules`.
 
         Returns:
             :class:`~pg_debug.model.ModelFinding` objects, most severe first,
@@ -493,10 +599,11 @@ class PgDebug:
             from a sample and carries a ``verify`` query to settle it first.
 
         Raises:
-            InvalidArgumentError: If an unknown rule is requested.
+            InvalidArgumentError: If an unknown rule is requested, or
+                ``static`` leaves none of them to run.
         """
         reviewer = ModelReviewer(await self.sql_driver())
-        return await reviewer.review(rules=rules, schema=schema, min_rows=min_rows, proven_only=proven_only)
+        return await reviewer.review(rules=rules, schema=schema, min_rows=min_rows, proven_only=proven_only, static=static)
 
     async def check_migration(self, sql: str) -> list[StatementReview]:
         """Review a migration before running it.
@@ -534,7 +641,92 @@ class PgDebug:
             first. Empty means nothing measurable is wrong, which is not the
             same as optimal.
         """
-        return await ConfigurationReviewer(await self.sql_driver()).review()
+        reviewer = ConfigurationReviewer(await self.sql_driver(), platform=await self._detect_platform())
+        return await reviewer.review()
+
+    # -- Audits --------------------------------------------------------------
+
+    async def check_upgrade(self, to: int | None = None) -> AuditReport:
+        """Say what stands between this cluster and ``pg_upgrade`` to a newer major version.
+
+        Reads, from the connection, what ``pg_upgrade`` refuses (``reg*``
+        columns, prepared transactions, a checksum setting the new cluster
+        will not share), what it carries across incomplete (logical slots and
+        subscriptions before 17, extended statistics), and what is better
+        done before (extension updates, MD5 passwords). Read-only, so it
+        runs in restricted mode.
+
+        Args:
+            to: The major version to upgrade to. Defaults to the newest one
+                pg-debug knows was released.
+
+        Returns:
+            An :class:`~pg_debug.audit.AuditReport`: the findings, most severe
+            first, and what each check examined or why it could not tell.
+
+        Raises:
+            InvalidArgumentError: If ``to`` is not newer than the server.
+        """
+        checker = UpgradeChecker(await self.sql_driver(), platform=await self._detect_platform())
+        return await checker.check(to=to)
+
+    async def audit_security(self) -> AuditReport:
+        """Read the server's authentication rules, roles, privileges and row-level security for what lets too much in.
+
+        The authentication rules are readable by a superuser only; for any
+        other role that check reports that it could not tell rather than
+        passing. Read-only, so it runs in restricted mode.
+
+        Returns:
+            An :class:`~pg_debug.audit.AuditReport`: the findings, most severe
+            first, and what each check examined or why it could not tell.
+        """
+        auditor = SecurityAuditor(await self.sql_driver(), platform=await self._detect_platform())
+        return await auditor.audit()
+
+    # -- Gating a build ------------------------------------------------------
+
+    async def definition_fingerprints(self, command: str, keys: list[dict[str, Any]]) -> list[str | None]:
+        """Fingerprint the definitions of the objects findings are about.
+
+        A baseline records them, so that a finding whose index, constraint or
+        columns are defined differently than when it was accepted is reported
+        as changed rather than known. One statement reads them all.
+
+        Args:
+            command: ``health``, ``model`` or ``config``.
+            keys: The findings' keys, as :func:`pg_debug.baseline.keys_of`
+                makes them.
+
+        Returns:
+            One fingerprint per key, None for a finding that is not about a
+            definition (a measurement, a setting) or whose object is gone.
+        """
+        return await definition_fingerprints(await self.sql_driver(), command, keys)
+
+    async def plan_shapes(self, queries: list[str]) -> list[PlanShape]:
+        """Plan each query without running it, and say what shape its plan has.
+
+        The shape is the plan's node types, join and aggregate strategies,
+        and the relations and indexes it reads, without costs or row counts,
+        so that it changes only when the plan does. ``pg-debug plans
+        --baseline`` fails a build when it changes. Runs with the query
+        context, as :meth:`explain_query` does.
+
+        Args:
+            queries: SQL text, each holding one or more statements. A
+                statement under a ``-- name: ...`` line is known by that name;
+                otherwise by its fingerprint, which ignores constants.
+
+        Returns:
+            One :class:`~pg_debug.plans.shape.PlanShape` per statement, in
+            order. One that could not be planned has ``error`` set.
+
+        Raises:
+            InvalidArgumentError: If the text does not parse, or two
+                statements would be known by the same name.
+        """
+        return await read_plan_shapes(ExplainPlanTool(sql_driver=await self.sql_driver()), queries)
 
     # -- Partitioning --------------------------------------------------------
 
@@ -578,6 +770,62 @@ class PgDebug:
         )
         return await advisor.analyze(query_list=queries, limit=limit)
 
+    # -- Scale-out and kept history ------------------------------------------
+
+    async def assess_shard_readiness(self, interval_seconds: float = DEFAULT_INTERVAL_SECONDS) -> ShardReadiness:
+        """Say whether to shard, which usually means "not yet", with the figure behind each reason.
+
+        Samples the write path for ``interval_seconds`` (the WAL written, the
+        shared buffers evicted from PostgreSQL 16, the checkpoints), reads the
+        cumulative checkpoint counts and the autovacuum backlog, and weighs
+        the workload ``pg_stat_statements`` recorded: the share of time in
+        reads, in the top five statements, and on the best candidate routing
+        key. Each "do not shard" comes back as a
+        :class:`~pg_debug.sharding.Refusal` with its figure. On a Citus
+        coordinator it also reads the cluster's own views. Everything it runs
+        is a read, so it works in restricted mode.
+
+        Args:
+            interval_seconds: How long to sample. The figures describe that
+                interval, so a short one describes little; it is reported with
+                them.
+
+        Returns:
+            A :class:`~pg_debug.sharding.ShardReadiness`: the verdict
+            (``not yet`` by default, ``worth evaluating`` only when nothing
+            refuses and the write path is under pressure), the refusals, the
+            pressure, what would change the verdict, the candidate routing
+            keys and the measurements.
+
+        Raises:
+            InvalidArgumentError: If the interval is not positive.
+        """
+        return await ShardReadinessAssessor(await self.sql_driver()).assess(interval_seconds)
+
+    async def read_history(self, limit: int = 10) -> HistoryReport:
+        """Read the history the platform and the installed extensions keep, and how far back each goes.
+
+        Azure's Query Store, Aurora's ``aurora_stat_statements()`` and
+        ``aurora_stat_plans()``, the Cloud SQL and AlloyDB index advisor's
+        recommendations, and Neon's local file cache, chosen by the detected
+        platform or by the object being in this database; and, wherever they
+        are installed, ``pg_qualstats`` and ``pg_wait_sampling``. A source
+        whose capture is off says so and with which setting. The platform
+        readers follow each platform's documentation and have not been run on
+        the platforms.
+
+        Args:
+            limit: How many rows to read from each source.
+
+        Returns:
+            A :class:`~pg_debug.history.HistoryReport`, one
+            :class:`~pg_debug.history.HistorySource` per source examined.
+
+        Raises:
+            InvalidArgumentError: If the limit is below 1.
+        """
+        return await HistoryReader(await self.sql_driver(), await self._detect_platform()).read(limit=limit)
+
     # -- Live activity -------------------------------------------------------
 
     async def list_activity(
@@ -599,7 +847,12 @@ class PgDebug:
 
         Returns:
             One dict per backend, including ``blocked_by`` (the pids blocking
-            it) and the age of its state, query and transaction.
+            it), ``in_transaction``, and the age of its state, query and
+            transaction. A role without ``pg_read_all_stats`` is shown other
+            roles' backends without their state, query, wait or timings: the
+            ones in a transaction are listed with the running ones, and
+            :meth:`statistics_access` and :meth:`withheld_backends` say what
+            was withheld.
         """
         inspector = ActivityInspector(await self.sql_driver())
         if blocked_only:
@@ -621,30 +874,87 @@ class PgDebug:
         """
         return await ActivityInspector(await self.sql_driver()).lock_tree()
 
+    async def sample_waits(self, seconds: float, interval: float = DEFAULT_SAMPLE_INTERVAL) -> WaitProfile:
+        """Sample what active sessions wait on, without an extension.
+
+        Reads pg_stat_activity every ``interval`` seconds for ``seconds``, one
+        statement per sample, leaving out pg-debug's own backend and
+        statements, and builds a profile: average active sessions overall,
+        per wait event and per query. Where pg_wait_sampling is installed its
+        profile over the same window is read too; where Azure's Query Store
+        records waits, its most recent interval.
+
+        Args:
+            seconds: How long to sample.
+            interval: Seconds between samples (default 0.5).
+
+        Returns:
+            A :class:`~pg_debug.waits.WaitProfile` with the number of samples
+            taken and the interval achieved, measured on the server's clock.
+            Each sample is exact; the profile is a sample, so its
+            attributions are candidates.
+
+        Raises:
+            InvalidArgumentError: If the duration or interval is not one a
+                sample can be taken with.
+        """
+        return await WaitSampler(await self.sql_driver()).sample(seconds, interval=interval)
+
+    async def classify_waits(self) -> WaitDiagnosis:
+        """Name the patterns in one snapshot of the server's waits.
+
+        A lock queue behind DDL, an idle-in-transaction session blocking
+        others, row lock contention, and LWLock pressure on BufferMapping or
+        LockManager, each with the pids, lock modes and relation it was read
+        from, and a confidence.
+
+        Returns:
+            A :class:`~pg_debug.waits.WaitDiagnosis`.
+        """
+        return await classify_waits(await self.sql_driver())
+
     # -- Diagnostics ---------------------------------------------------------
 
     async def analyze_db_health(
         self,
         health_type: str | HealthType | Iterable[str | HealthType] = HealthType.ALL,
+        min_window_days: float = MIN_WINDOW_DAYS,
+        static: bool = False,
     ) -> dict[str, HealthCheckResult]:
         """Run database health checks.
+
+        Each check runs on its own: one the server refuses, or a statement
+        timeout cancels behind a lock, is returned with ``error`` set rather
+        than raised, and the others still run.
 
         Args:
             health_type: Which checks to run: ``index``, ``connection``,
                 ``vacuum``, ``sequence``, ``replication``, ``buffer``,
-                ``constraint`` or ``all`` (default). Accepts a comma-separated
-                string or an iterable.
+                ``constraint``, ``statistics``, ``table``, ``scan`` or
+                ``all`` (default). Accepts a comma-separated string or an
+                iterable.
+            min_window_days: How many days the index counters must have
+                been counting before an index they show unscanned is called
+                unused (default 7). A crash, a failover, a restore or
+                ``pg_stat_reset()`` starts them again; with less than this,
+                the unused-index check says why it did not judge.
+            static: Run only the checks that read nothing but the catalog
+                (invalid and duplicate indexes, invalid constraints), so that
+                a freshly migrated, empty database in CI answers them as
+                production would. See :mod:`pg_debug.rules`.
 
         Returns:
             A mapping of check name to its :class:`HealthCheckResult`, each
             carrying a ``healthy`` flag, a text ``summary``, the flagged
-            ``findings`` and the ``metrics`` behind the verdict.
+            ``findings``, the ``metrics`` behind the verdict and, for a check
+            that could not run, the ``error`` that stopped it.
 
         Raises:
-            InvalidArgumentError: If an unknown health type is requested.
+            InvalidArgumentError: If an unknown health type is requested, or
+                ``static`` leaves none of them to run.
         """
-        health_tool = DatabaseHealthTool(await self.sql_driver())
-        return await health_tool.run_checks(health_type)
+        health_tool = DatabaseHealthTool(await self.sql_driver(), min_window_days=min_window_days)
+        return await health_tool.run_checks(health_type, static=static)
 
     async def get_top_queries(
         self,
@@ -658,9 +968,9 @@ class PgDebug:
             sort_by: ``resources`` (default) ranks by a blend of execution
                 time, buffer access and WAL volume; ``mean_time`` and
                 ``total_time`` rank by execution time.
-            limit: Number of queries to return. Ignored when ranking by
-                ``resources`` over cumulative counters, which reports every
-                query above its threshold.
+            limit: Number of queries to return. Ranked by ``resources``, they
+                are the queries over its threshold with the largest share of
+                any one resource.
             interval_seconds: Sample over this many seconds instead of
                 reporting cumulative totals. Cumulative counters cover
                 everything since statistics were last reset, which is often
@@ -668,25 +978,185 @@ class PgDebug:
                 workload; sampling measures what is running now.
 
         Returns:
-            One dict of statistics per query.
+            One dict of statistics per query. A role without
+            ``pg_read_all_stats`` is shown other roles' statements with
+            ``<insufficient privilege>`` for their text; a sample leaves them
+            out, and :meth:`sample_top_queries` says how many ran.
 
         Raises:
             InvalidArgumentError: If ``sort_by`` is not a valid criterion, or
                 the interval is not positive.
             ExtensionRequiredError: If pg_stat_statements is not installed.
         """
-        if sort_by not in ("resources", "mean_time", "total_time"):
-            raise InvalidArgumentError("Invalid sort criteria. Please use 'resources', 'mean_time' or 'total_time'.")
+        if interval_seconds is not None:
+            return (await self.sample_top_queries(interval_seconds, sort_by=sort_by, limit=limit)).queries
 
+        _check_sort_by(sort_by)
         top_queries_tool = TopQueriesCalc(sql_driver=await self.sql_driver())
 
-        if interval_seconds is not None:
-            sample_sort = {"resources": "resources", "mean_time": "mean", "total_time": "total"}[sort_by]
-            return await top_queries_tool.sample(interval_seconds, sort_by=sample_sort, limit=limit)  # type: ignore[arg-type]
-
         if sort_by == "resources":
-            return await top_queries_tool.get_top_resource_queries()
+            return await top_queries_tool.get_top_resource_queries(limit=limit)
         return await top_queries_tool.get_top_queries_by_time(limit=limit, sort_by="mean" if sort_by == "mean_time" else "total")
+
+    async def sample_top_queries(
+        self,
+        interval_seconds: float,
+        sort_by: SortBy = "resources",
+        limit: int = 10,
+    ) -> QuerySample:
+        """Measure the most expensive queries over an interval, and say what the ranking left out.
+
+        Takes the arguments :meth:`get_top_queries` takes with
+        ``interval_seconds``, and ranks the same way.
+
+        Returns:
+            A :class:`~pg_debug.top_queries.QuerySample`: ``queries``, the
+            ranking ``get_top_queries`` returns, and ``withheld``, how many of
+            other roles' statements ran during the interval and are not in it.
+            pg_stat_statements shows a role without ``pg_read_all_stats``
+            their counters but not their queryid, so they cannot be followed
+            from one snapshot to the next.
+
+        Raises:
+            InvalidArgumentError: If ``sort_by`` is not a valid criterion, or
+                the interval is not positive.
+            ExtensionRequiredError: If pg_stat_statements is not installed.
+        """
+        _check_sort_by(sort_by)
+        sample_sort = {"resources": "resources", "mean_time": "mean", "total_time": "total"}[sort_by]
+        top_queries_tool = TopQueriesCalc(sql_driver=await self.sql_driver())
+        return await top_queries_tool.measure(interval_seconds, sort_by=sample_sort, limit=limit)  # type: ignore[arg-type]
+
+    async def sample_server_rates(self, interval_seconds: float = DEFAULT_RATES_INTERVAL) -> ServerRates:
+        """Measure the server's own counters over an interval, as rates per second.
+
+        Reads ``pg_stat_database`` for this database, how far WAL was written
+        (or replayed, on a standby), ``pg_stat_wal`` (PostgreSQL 14+), the
+        checkpointer and background writer, ``pg_stat_io`` (16+) by process
+        type and object, and the WAL each replication slot retains, twice,
+        ``interval_seconds`` apart.
+
+        Args:
+            interval_seconds: How long to wait between the two snapshots
+                (default 10). Backends report their counters about once a
+                second, so a few seconds misses some of what ran at the edges.
+
+        Returns:
+            A :class:`~pg_debug.server_rates.ServerRates`: one
+            :class:`~pg_debug.server_rates.RateGroup` per view row, each with
+            the interval measured between its own two reads and every
+            counter's delta and rate. A group whose counters were reset during
+            the interval, or a counter that went backwards, carries
+            ``refused`` with the reason instead of a rate; so does a view this
+            version does not have.
+
+        Raises:
+            InvalidArgumentError: If the interval is not positive.
+        """
+        return await ServerRatesSampler(await self.sql_driver()).sample(interval_seconds)
+
+    async def inspect_pooler(self, admin_url: str) -> PoolerReport:
+        """Read PgBouncer's admin console and report whether clients wait for a server connection.
+
+        A client waiting in the pool is not a backend yet, so the server
+        cannot show it. The console can: ``SHOW POOLS`` (clients active and
+        waiting, server connections active and idle, how long the oldest
+        waiter has waited), ``SHOW STATS`` (average wait, transaction and
+        query times), ``SHOW DATABASES`` and ``SHOW CONFIG`` (pool mode and
+        sizes). It is reached on a connection of its own, sending it only
+        those ``SHOW`` commands: see :mod:`pg_debug.pooler` for why not
+        through the driver.
+
+        When this client has a database URL, the server's
+        ``max_connections`` is read through it too, after the console, to
+        compare the pool sizes with; without one, the report says it was not.
+        Give the server's own address when you can: through a full pool the
+        read waits in line like every other client, up to PgBouncer's
+        ``query_wait_timeout``, and the report then says it could not be read.
+
+        Args:
+            admin_url: The admin console,
+                ``postgresql://user@host:6432/pgbouncer``, as a user in
+                ``admin_users`` or ``stats_users``.
+
+        Returns:
+            A :class:`~pg_debug.pooler.PoolerReport`: what the console
+            showed, and the ``findings`` of saturation, the most severe
+            first.
+
+        Raises:
+            InvalidArgumentError: If the URL is not the admin console's.
+            ConnectionFailedError: If the console could not be reached.
+        """
+        check_admin_url(admin_url)
+        try:
+            self.database_url  # noqa: B018 - raises when there is none
+        except InvalidArgumentError:
+            reason = "no database URL was given, so the pool sizes are not compared with the server's max_connections"
+            return await inspect_pgbouncer(admin_url, server_refused=reason)
+
+        async def read_server() -> dict[str, Any]:
+            return await read_server_connections(await self.sql_driver())
+
+        return await inspect_pgbouncer(admin_url, read_server=read_server)
+
+    # -- What the statistics views withhold ----------------------------------
+
+    async def statistics_access(self) -> StatisticsAccess:
+        """Whether the connecting role is shown every role's activity and statements.
+
+        Without ``pg_read_all_stats``, which ``pg_monitor`` includes,
+        PostgreSQL shows a role other roles' backends without their state,
+        query, wait or timings, and their statements without their text.
+        ``list_activity``, ``lock_tree``, ``vacuum_progress`` and
+        ``get_top_queries`` return what it showed.
+
+        Returns:
+            A :class:`~pg_debug.db.privileges.StatisticsAccess`: the role,
+            whether it is shown everything, whether it is a member of
+            ``pg_read_all_stats`` that does not inherit its privileges, and
+            the statement that would show it everything.
+        """
+        return await privileges.statistics_access(await self.sql_driver())
+
+    async def withheld_backends(self) -> list[dict[str, Any]]:
+        """The backends whose details PostgreSQL withholds from the connecting role, and what it still shows of them.
+
+        Returns:
+            One dict per backend, with its pid, database, user and
+            application, whether it is in a transaction, how many transactions
+            old its snapshot is, the locks it holds, and the pids waiting on
+            it. Empty for a role shown everything. See
+            :func:`pg_debug.db.privileges.withheld_backends`.
+        """
+        return await privileges.withheld_backends(await self.sql_driver())
+
+    async def counting_windows(self) -> dict[str, dict[str, Any] | None]:
+        """How long each set of counters pg-debug argues from has been counting.
+
+        A counter is a count since it last started from zero: an index
+        unscanned for a year and one unscanned since a crash an hour ago look
+        the same in it. A clean restart does not start them again; a crash,
+        an immediate shutdown, a failover, a restore or a reset does. See
+        :mod:`pg_debug.db.window`.
+
+        Returns:
+            ``tables`` for this database's table and index counters,
+            ``checkpoints`` for the checkpoint counters, and ``statements``
+            for pg_stat_statements (None when it is not installed here), each
+            with ``counting_since``, ``counting_seconds`` and
+            ``counting_began_with`` (``reset``, ``restart`` or None when
+            PostgreSQL did not record it). ``statements`` also has
+            ``statements_evicted`` from pg_stat_statements 1.9 on: entries
+            evicted for new ones, which counted for less than the window.
+        """
+        driver = await self.sql_driver()
+        stats = await locate_pg_stat_statements(driver)
+        return {
+            "tables": (await table_window(driver)).to_dict(),
+            "checkpoints": (await checkpoint_window(driver)).to_dict(),
+            "statements": (await statement_window(driver, stats)).to_dict() if stats else None,
+        }
 
     # -- Index tuning --------------------------------------------------------
 
@@ -695,6 +1165,7 @@ class PgDebug:
         max_index_size_mb: int = 10000,
         method: TuningMethod = "dta",
         llm_model: str | None = None,
+        max_regression_factor: float = DEFAULT_MAX_REGRESSION_FACTOR,
     ) -> dict[str, Any]:
         """Recommend indexes for the workload recorded by pg_stat_statements.
 
@@ -705,18 +1176,27 @@ class PgDebug:
                 requires the ``llm`` extra.
             llm_model: Model to use for the ``llm`` method, overriding the
                 client's own setting for this call.
+            max_regression_factor: How far the recommended set may raise any
+                one query's planner cost over its cost without it, as a
+                fraction: the default, 0.1, refuses an index that makes any
+                query cost more than 1.1 times what it did.
 
         Returns:
             A dict with ``summary``, ``recommendations`` and ``query_impact``.
             When nothing is worth recommending, ``recommendations`` says so.
+            Either way ``workload`` says where the queries came from and the
+            window pg_stat_statements counted them in, and
+            ``regression_check``, ``consolidations`` and
+            ``refused_candidates`` what was checked and refused.
 
         Raises:
-            InvalidArgumentError: If ``method`` is not ``dta`` or ``llm``.
+            InvalidArgumentError: If ``method`` is not ``dta`` or ``llm``, or
+                ``max_regression_factor`` is negative.
             ExtensionRequiredError: If HypoPG is not installed.
             IndexTuningError: If the tables have never been analyzed, none of
                 the workload could be analyzed, or the analysis failed.
         """
-        presentation = await self._index_tuning_presentation(method, llm_model)
+        presentation = await self._index_tuning_presentation(method, llm_model, max_regression_factor)
         return await presentation.analyze_workload(max_index_size_mb=max_index_size_mb)
 
     async def analyze_query_indexes(
@@ -725,6 +1205,7 @@ class PgDebug:
         max_index_size_mb: int = 10000,
         method: TuningMethod = "dta",
         llm_model: str | None = None,
+        max_regression_factor: float = DEFAULT_MAX_REGRESSION_FACTOR,
     ) -> dict[str, Any]:
         """Recommend indexes for a specific list of queries.
 
@@ -735,10 +1216,19 @@ class PgDebug:
             method: ``dta`` (default) or ``llm``.
             llm_model: Model to use for the ``llm`` method, overriding the
                 client's own setting for this call.
+            max_regression_factor: How far the recommended set may raise any
+                one query's planner cost over its cost without it, as a
+                fraction (0.1 is 10%).
 
         Returns:
-            A dict with ``summary``, ``recommendations`` and ``query_impact``.
-            When nothing is worth recommending, ``recommendations`` says so.
+            A dict with ``summary``, ``recommendations`` and ``query_impact``,
+            as :meth:`analyze_workload_indexes` returns. Where HypoPG can be
+            neither used nor created and ``method`` is ``dta``, instead a
+            dict with ``costed: False``, ``note``, ``hypopg`` (why it cannot
+            be had), ``candidates`` inferred from pg_stats, each graded and
+            marked ``candidate``, and ``refused``; and ``google_db_advisor``
+            where Cloud SQL's or AlloyDB's advisor is installed. None of
+            those was costed by the planner.
 
         Raises:
             InvalidArgumentError: If no queries are given, or too many.
@@ -755,22 +1245,46 @@ class PgDebug:
             # opening a connection rather than failing deep in the analysis.
             raise InvalidArgumentError("The 'llm' method analyzes one query at a time. Pass a single query, or use the 'dta' method.")
 
-        presentation = await self._index_tuning_presentation(method, llm_model)
+        if max_regression_factor < 0:
+            raise InvalidArgumentError(f"max_regression_factor must be 0 or more, not {max_regression_factor}.")
+        if method == "dta":
+            # Where HypoPG cannot be had, statistics can still suggest
+            # candidates, marked as never costed, rather than only the hint.
+            driver = await self.sql_driver()
+            unobtainable = await hypopg_unobtainable(driver, platform=self._detect_platform)
+            if unobtainable is not None:
+                advice = await StatisticsIndexAdvisor(driver).advise(queries, unobtainable, await self._detect_platform())
+                return advice.to_dict()
+
+        presentation = await self._index_tuning_presentation(method, llm_model, max_regression_factor)
         return await presentation.analyze_queries(queries=queries, max_index_size_mb=max_index_size_mb)
 
-    async def _index_tuning_presentation(self, method: TuningMethod, llm_model: str | None = None) -> TextPresentation:
+    async def _index_tuning_presentation(
+        self,
+        method: TuningMethod,
+        llm_model: str | None = None,
+        max_regression_factor: float = DEFAULT_MAX_REGRESSION_FACTOR,
+    ) -> TextPresentation:
         if method not in ("dta", "llm"):
             raise InvalidArgumentError(f"Unknown index tuning method: {method}. Valid values are: dta, llm.")
+        if max_regression_factor < 0:
+            raise InvalidArgumentError(f"max_regression_factor must be 0 or more, not {max_regression_factor}.")
 
         driver = await self.sql_driver()
+        advisor: IndexTuningBase
         if method == "dta":
-            return TextPresentation(driver, DatabaseTuningAdvisor(driver))
+            advisor = DatabaseTuningAdvisor(driver, max_regression_factor=max_regression_factor)
+        else:
+            # Here rather than at the top: the method needs the llm extra, and
+            # importing it without the extra raises MissingDependencyError.
+            from .index.llm import LLMOptimizerTool
 
-        # Here rather than at the top: the method needs the llm extra, and
-        # importing it without the extra raises MissingDependencyError.
-        from .index.llm import LLMOptimizerTool
+            advisor = LLMOptimizerTool(driver, model=llm_model or self.llm_model, max_regression_factor=max_regression_factor)
 
-        return TextPresentation(driver, LLMOptimizerTool(driver, model=llm_model or self.llm_model))
+        # The advisor checks for HypoPG as well, but it does not know the
+        # platform, which decides how to get HypoPG where it is missing.
+        await self._require_hypopg(driver)
+        return TextPresentation(driver, advisor)
 
 
 __all__ = [

@@ -111,7 +111,8 @@ ORDER BY dead_rows DESC
 # Which backends actually hold the horizon is narrower than the usual advice
 # about "idle in transaction". Measured on PostgreSQL 16: a READ COMMITTED
 # transaction that has only read holds neither an xid nor a snapshot once its
-# statement finishes, and blocks nothing. One that has written holds an xid;
+# statement finishes, so it holds back nothing vacuum needs (it still keeps its
+# locks, which the connection check judges). One that has written holds an xid;
 # one at REPEATABLE READ or above holds a snapshot. Only those two matter.
 HORIZON_SQL = """
 SELECT
@@ -121,23 +122,47 @@ SELECT
     CASE WHEN a.backend_xmin IS NOT NULL THEN 'a snapshot' ELSE 'a transaction id' END AS holds,
     age(coalesce(a.backend_xmin, a.backend_xid))::bigint AS transactions_held,
     extract(epoch FROM now() - a.xact_start)::bigint AS seconds_held,
-    left(coalesce(a.query, ''), 200) AS detail
+    left(coalesce(a.query, ''), 200) AS detail,
+    NULL::text AS application_name,
+    NULL::text AS standby
 FROM pg_stat_activity a
 WHERE (a.backend_xmin IS NOT NULL OR a.backend_xid IS NOT NULL)
   AND a.pid <> pg_backend_pid()
   AND a.xact_start IS NOT NULL
   AND now() - a.xact_start >= make_interval(secs => {})
+  -- A WAL sender's backend_xmin is its standby's, reported as the standby below.
+  AND a.backend_type IS DISTINCT FROM 'walsender'
 UNION ALL
 SELECT
     'replication slot',
     s.slot_name,
     CASE WHEN s.active THEN 'active' ELSE 'inactive' END,
-    'a snapshot',
+    -- A physical slot's xmin is what its standby's hot_standby_feedback
+    -- reported, kept while the standby is away.
+    CASE WHEN s.slot_type = 'physical' THEN 'its standby''s snapshot, through hot_standby_feedback' ELSE 'a snapshot' END,
     greatest(age(s.xmin), age(s.catalog_xmin))::bigint,
     NULL,
-    coalesce(s.plugin, s.slot_type)
+    coalesce(s.plugin, s.slot_type),
+    NULL,
+    r.application_name
 FROM pg_replication_slots s
+LEFT JOIN pg_stat_replication r ON r.pid = s.active_pid
 WHERE s.xmin IS NOT NULL OR s.catalog_xmin IS NOT NULL
+UNION ALL
+-- A standby with hot_standby_feedback and no slot: its WAL sender carries
+-- the xmin it reports. With a slot, the slot carries it and this is NULL.
+SELECT
+    'standby',
+    coalesce(nullif(r.application_name, ''), r.pid::text),
+    coalesce(r.state, 'unknown'),
+    'its snapshot, through hot_standby_feedback',
+    age(r.backend_xmin)::bigint,
+    NULL,
+    coalesce(host(r.client_addr), r.client_hostname, ''),
+    r.application_name,
+    r.application_name
+FROM pg_stat_replication r
+WHERE r.backend_xmin IS NOT NULL
 UNION ALL
 SELECT
     'prepared transaction',
@@ -146,7 +171,9 @@ SELECT
     'a transaction id',
     age(x.transaction)::bigint,
     extract(epoch FROM now() - x.prepared)::bigint,
-    x.database
+    x.database,
+    NULL,
+    NULL
 FROM pg_prepared_xacts x
 ORDER BY 5 DESC NULLS LAST
 """
@@ -218,9 +245,18 @@ class AutovacuumCalc:
         anything newer.
 
         Narrower than the usual "idle in transaction is bad": a READ COMMITTED
-        transaction that has only read holds nothing between statements and is
-        not reported. What is reported is a backend holding a snapshot, or one
+        transaction that has only read holds nothing vacuum needs between
+        statements and is not reported here; the locks it keeps are the
+        connection check's to judge. What is reported is a backend holding a snapshot, or one
         holding a transaction id because it has written.
+
+        A standby with ``hot_standby_feedback`` holds the horizon for the
+        queries it runs: through its physical slot's ``xmin`` when it uses a
+        slot, through its WAL sender's ``backend_xmin`` in
+        ``pg_stat_replication`` when it does not. Either is reported with
+        its age. PostgreSQL publishes no age at which a standby's hold
+        becomes harmful, so it is judged as a slot is: any hold is reported,
+        with how many transactions it holds back.
         """
         thresholds = {"min_transaction_seconds": self.min_transaction_seconds}
 
@@ -278,7 +314,16 @@ def _describe_horizon(finding: dict[str, Any]) -> str:
     age = f", holding it back {held:,} transactions" if held else ""
 
     if kind == "replication slot":
+        if finding.get("detail") == "physical":
+            if finding.get("standby"):
+                whose = f"for standby '{finding['standby']}', whose queries hold the horizon through hot_standby_feedback"
+            else:
+                whose = "and keeps the xmin its standby last reported through hot_standby_feedback"
+            return f"Physical replication slot '{finding['holder']}' is {finding['state']} {whose}{age}"
         return f"Replication slot '{finding['holder']}' is {finding['state']}{age}"
+    if kind == "standby":
+        address = f" at {finding['detail']}" if finding.get("detail") else ""
+        return f"Standby '{finding['holder']}'{address} ({finding['state']}) holds the horizon for its own queries through hot_standby_feedback{age}"
     duration = f" for {int(seconds) // 60} minutes" if seconds else ""
     if kind == "prepared transaction":
         return f"Prepared transaction '{finding['holder']}' has been uncommitted{duration}{age}"

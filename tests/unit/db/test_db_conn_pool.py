@@ -1,10 +1,23 @@
 # ruff: noqa: B017
+import asyncio
+import socket
+import struct
+import threading
+import time
+from collections.abc import Callable
+from contextlib import asynccontextmanager
+from contextlib import contextmanager
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+import psycopg
 import pytest
+from psycopg_pool import AsyncConnectionPool
+from psycopg_pool import PoolClosed
+from psycopg_pool import PoolTimeout
 
+from pg_debug.db.driver import POOL_MAX_IDLE
 from pg_debug.db.driver import DbConnPool
 from pg_debug.db.driver import SqlDriver
 from pg_debug.errors import ConnectionFailedError
@@ -216,6 +229,34 @@ async def test_connection_url_property():
 
 
 @pytest.mark.asyncio
+async def test_an_idle_pool_keeps_no_connection_open():
+    """An open connection keeps a scale-to-zero compute awake, and a
+    long-lived client that made one call would hold one for good."""
+    pool = DbConnPool("postgresql://localhost/db")
+
+    with patch("pg_debug.db.driver.AsyncConnectionPool") as built:
+        built.return_value.open.side_effect = RuntimeError("stop here")
+        with pytest.raises(Exception, match="stop here"):
+            await pool.pool_connect()
+
+    options = built.call_args.kwargs
+    assert options["min_size"] == 0
+    assert options["max_idle"] == POOL_MAX_IDLE
+    # Every connection the pool can grow to is closed within six intervals
+    # of going unused, inside the five minutes of Aurora's shortest pause.
+    assert (options["max_size"] + 1) * POOL_MAX_IDLE <= 300
+
+
+@pytest.mark.asyncio
+async def test_psycopg_pool_takes_an_empty_minimum():
+    """psycopg_pool refuses min_size 0 only with max_size 0 as well. CI runs
+    this at the lowest version the dependency allows, too."""
+    pool = AsyncConnectionPool("postgresql://localhost/db", min_size=0, max_size=5, max_idle=POOL_MAX_IDLE, open=False)
+
+    assert (pool.min_size, pool.max_size, pool.max_idle) == (0, 5, POOL_MAX_IDLE)
+
+
+@pytest.mark.asyncio
 async def test_pool_connect_without_a_url_is_an_argument_error():
     with pytest.raises(InvalidArgumentError, match="Database connection URL not provided"):
         await DbConnPool().pool_connect()
@@ -224,3 +265,246 @@ async def test_pool_connect_without_a_url_is_an_argument_error():
 def test_a_driver_needs_a_connection_or_a_url():
     with pytest.raises(InvalidArgumentError, match="Either conn or engine_url must be provided"):
         SqlDriver()
+
+
+# -- A connection the pool could not get ------------------------------------
+#
+# The pool keeps none open while idle, so a call after an idle spell waits for
+# it to connect. psycopg_pool only logs a failed attempt and tries again, and
+# the caller used to wait out the pool's 30 seconds and be told no more than
+# "couldn't get a connection", as a QueryError.
+
+
+@contextmanager
+def refusing_server():
+    """A local server that answers every connection the way PostgreSQL does
+    when max_connections is reached, and yields its port.
+
+    A closed port is no stand-in: Windows does not refuse a connection to
+    one, and libpq waits out its connect_timeout there.
+    """
+    refusal = b"SFATAL\0VFATAL\0C53300\0Msorry, too many clients already\0\0"
+    listener = socket.create_server(("127.0.0.1", 0))
+
+    def answer(client: socket.socket) -> None:
+        with client:
+            while header := client.recv(4, socket.MSG_WAITALL):
+                body = client.recv(struct.unpack("!i", header)[0] - 4, socket.MSG_WAITALL)
+                if body[:4] in (struct.pack("!i", 80877103), struct.pack("!i", 80877104)):
+                    client.sendall(b"N")  # no SSL, no GSS encryption: go on in the clear
+                    continue
+                client.sendall(b"E" + struct.pack("!i", len(refusal) + 4) + refusal)
+                return
+
+    def serve() -> None:
+        while True:
+            try:
+                client, _ = listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=answer, args=(client,), daemon=True).start()
+
+    threading.Thread(target=serve, daemon=True).start()
+    try:
+        yield listener.getsockname()[1]
+    finally:
+        listener.close()
+
+
+def test_a_refused_connection_fails_at_once_with_the_reason():
+    with refusing_server() as port:
+        pool = DbConnPool(f"postgresql://nobody@127.0.0.1:{port}/db")
+        started = time.monotonic()
+
+        with pytest.raises(ConnectionFailedError) as excinfo:
+            # psycopg connects asynchronously only on a selector loop, which is
+            # not the one Windows makes by default.
+            asyncio.run(asyncio.wait_for(pool.pool_connect(), timeout=15), loop_factory=asyncio.SelectorEventLoop)
+
+    assert time.monotonic() - started < 15
+    assert "sorry, too many clients already" in str(excinfo.value)
+    assert "couldn't get a connection" not in str(excinfo.value)
+    assert pool.pool is None
+
+
+class FakePool:
+    """Enough of psycopg_pool's pool for DbConnPool to decide on, and to borrow from."""
+
+    timeout = 30.0
+    max_size = 5
+
+    def __init__(self, available=0, waiting=1, error: Exception | None = None):
+        self.stats = {"pool_available": available, "requests_waiting": waiting}
+        self.error = error
+        self.closed = False
+        # What happens in the pool's own task while the caller waits.
+        self.meanwhile: Callable[[], None] = lambda: None
+
+    def get_stats(self):
+        return self.stats
+
+    async def close(self):
+        self.closed = True
+
+    @asynccontextmanager
+    async def connection(self):
+        self.meanwhile()
+        if self.error is not None:
+            raise self.error
+        yield "connection"
+
+
+def holding(fake: FakePool, borrowed: int = 0) -> DbConnPool:
+    pool = DbConnPool("postgresql://app@localhost/db")
+    pool.pool = fake  # type: ignore[assignment]
+    pool._is_valid = True
+    pool._borrowed = borrowed
+    return pool
+
+
+REFUSED = psycopg.OperationalError('connection failed: FATAL:  too many connections for role "app"')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("available", "waiting", "borrowed", "fails_the_waiter"),
+    [
+        (0, 1, 0, True),
+        # A connection can still come to the waiter: one that is idle, or one
+        # in use that will be given back. The pool tries again meanwhile.
+        (1, 1, 0, False),
+        (0, 1, 2, False),
+        # Nobody is waiting: the pool was growing ahead of demand.
+        (0, 0, 0, False),
+    ],
+)
+async def test_a_failed_attempt_ends_the_wait_only_when_no_connection_can_come(available, waiting, borrowed, fails_the_waiter):
+    fake = FakePool(available, waiting)
+    pool = holding(fake, borrowed)
+
+    pool._connect_failed([fake], REFUSED)  # type: ignore[list-item]
+    await asyncio.sleep(0)
+
+    assert fake.closed is fails_the_waiter
+    assert pool.is_valid is not fails_the_waiter
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        psycopg.OperationalError("connection failed: FATAL:  the database system is starting up"),
+        psycopg.OperationalError("connection failed: Connection refused\n\tIs the server running on that host?"),
+        psycopg.OperationalError("connection failed: server closed the connection unexpectedly"),
+    ],
+    ids=["starting-up", "refused-while-restarting", "closed"],
+)
+async def test_an_attempt_that_may_succeed_next_time_does_not_end_the_wait(error):
+    """A restart or a failover clears in seconds; the pool's next attempt may
+    connect, so the waiting caller waits for it rather than failing at once."""
+    fake = FakePool(0, 1)
+    pool = holding(fake, 0)
+    pool._has_connected = True
+
+    pool._connect_failed([fake], error)  # type: ignore[list-item]
+    await asyncio.sleep(0)
+
+    assert not fake.closed
+    assert pool.is_valid
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        psycopg.OperationalError('connection failed: FATAL:  password authentication failed for user "app"'),
+        psycopg.OperationalError('connection failed: FATAL:  database "nope" does not exist'),
+        REFUSED,
+    ],
+    ids=["password", "no-database", "too-many"],
+)
+def test_a_refusal_that_will_stay_is_recognised(error):
+    from pg_debug.db.driver import _will_not_clear
+
+    assert _will_not_clear(error)
+
+
+@pytest.mark.asyncio
+async def test_a_borrow_the_pool_gave_up_on_says_what_the_server_said():
+    """Closing the pool is what fails the waiting caller at once."""
+    fake = FakePool(error=PoolClosed("the pool is closed"))
+    pool = holding(fake)
+    fake.meanwhile = lambda: pool._connect_failed([fake], REFUSED)  # type: ignore[list-item]
+
+    with pytest.raises(ConnectionFailedError, match='too many connections for role "app"'):
+        async with pool.connection():
+            pass
+    await pool.close()
+    assert fake.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("borrowed", "said"),
+    [
+        (5, "No pooled connection came free within 30 seconds: all 5 are in use."),
+        (0, "Could not connect to database within 30 seconds: the attempt to connect had not finished."),
+    ],
+)
+async def test_a_wait_that_runs_out_says_why(borrowed, said):
+    pool = holding(FakePool(error=PoolTimeout("couldn't get a connection after 30.00 sec")), borrowed)
+
+    with pytest.raises(ConnectionFailedError) as excinfo:
+        async with pool.connection():
+            pass
+
+    assert str(excinfo.value) == said
+
+
+@pytest.mark.asyncio
+async def test_a_borrowed_connection_is_counted_until_it_is_given_back():
+    pool = holding(FakePool())
+
+    async with pool.connection() as connection:
+        assert (connection, pool._borrowed) == ("connection", 1)
+    assert pool._borrowed == 0
+
+
+@pytest.mark.asyncio
+async def test_a_caller_that_stops_waiting_does_not_leave_the_pool_trying():
+    """A timeout around the call cancels it while the pool is still connecting.
+    Left open, the pool's own task goes on trying and outlives the event loop,
+    which then never finishes."""
+    pool = DbConnPool("postgresql://app@localhost/db")
+    opened = FakePool()
+
+    async def connecting(conninfo):
+        pool.pool = opened  # type: ignore[assignment]
+        await asyncio.Event().wait()
+
+    with patch.object(pool, "_open", connecting), pytest.raises(TimeoutError):
+        await asyncio.wait_for(pool.pool_connect(), timeout=0.05)
+
+    assert opened.closed
+    assert pool.pool is None
+    assert not pool.is_valid
+
+
+@pytest.mark.parametrize(
+    ("url", "environment", "added"),
+    [
+        ("postgresql://app@localhost/db", {}, {"connect_timeout": 30}),
+        ("postgresql://app@localhost/db?connect_timeout=5", {}, {}),
+        ("host=localhost connect_timeout=5", {}, {}),
+        ("postgresql://app@localhost/db", {"PGCONNECT_TIMEOUT": "5"}, {}),
+    ],
+)
+def test_an_attempt_to_connect_is_bounded_unless_the_user_bounded_it(url, environment, added, monkeypatch):
+    """libpq sets no limit, so an attempt to a host that drops packets lasts
+    as long as the operating system keeps trying."""
+    from pg_debug.db.driver import _bounded
+
+    monkeypatch.delenv("PGCONNECT_TIMEOUT", raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    assert _bounded(url) == added

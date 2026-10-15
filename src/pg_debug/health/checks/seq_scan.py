@@ -27,6 +27,7 @@ import humanize
 from ...db import SafeSqlDriver
 from ...db import SqlDriver
 from ...db import get_postgres_version
+from ...db.window import table_window
 from ..result import HealthCheckResult
 
 SEQ_SCAN_HEALTH = "Sequential scan health"
@@ -57,11 +58,9 @@ SELECT
     s.seq_scan AS seq_scans,
     s.seq_tup_read AS seq_rows_read,
     COALESCE(s.idx_scan, 0) AS index_scans,
-    {last_scan},
-    d.stats_reset AS counting_since
+    {last_scan}
 FROM pg_stat_user_tables s
 JOIN pg_class c ON c.oid = s.relid
-CROSS JOIN (SELECT stats_reset FROM pg_stat_database WHERE datname = current_database()) d
 WHERE s.seq_scan > 0
   AND pg_table_size(s.relid) >= {{}}
 ORDER BY s.seq_scan::numeric * c.relpages DESC
@@ -120,8 +119,10 @@ class SeqScanHealthCalc:
         rows = await SafeSqlDriver.execute_param_query(self.sql_driver, query, [self.min_table_bytes])
         tables = [row.cells for row in rows] if rows else []
 
-        counting_since = tables[0].get("counting_since") if tables else None
-        metrics: dict[str, Any] = {**thresholds, "counting_since": str(counting_since) if counting_since else None}
+        # The database's stats_reset alone is NULL after a crash, which
+        # discards the counters without resetting the database.
+        window = await table_window(cast(SqlDriver, self.sql_driver))
+        metrics: dict[str, Any] = {**thresholds, **window.to_dict()}
 
         findings = [finding for finding in (self._assess(row) for row in tables) if finding is not None]
         findings.sort(key=lambda f: -f["estimated_bytes_read"])
@@ -130,11 +131,11 @@ class SeqScanHealthCalc:
             return HealthCheckResult(
                 name=SEQ_SCAN_HEALTH,
                 healthy=True,
-                summary="No table is being read sequentially more than its size and index use justify.",
+                summary=f"No table is being read sequentially more than its size and index use justify, counting {window.describe()}.",
                 metrics=metrics,
             )
 
-        lines = ["Tables read sequentially far more than through an index:"]
+        lines = [f"Tables read sequentially far more than through an index, counting {window.describe()}:"]
         for finding in findings:
             lines.append(self._describe(finding))
         lines.append(

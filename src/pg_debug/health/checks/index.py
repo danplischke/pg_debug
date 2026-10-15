@@ -2,6 +2,8 @@ from typing import Any
 
 from ...db import SafeSqlDriver
 from ...db import SqlDriver
+from ...db import get_postgres_version
+from ...db.window import table_window
 from ..result import HealthCheckResult
 
 INVALID_INDEXES = "Invalid index check"
@@ -10,11 +12,32 @@ INDEX_BLOAT = "Index bloat"
 UNUSED_INDEXES = "Unused index check"
 
 
+#: How long the counters must have been counting before an index they show
+#: unscanned is called unused. A judgment, not a measurement: a week covers a
+#: weekly job, which is the shortest history DBtune asks for before tuning;
+#: no source gives a figure for indexes. A month-end report needs longer.
+MIN_WINDOW_DAYS = 7.0
+
+#: Why the counters started again, for the reader who did not expect it.
+_WHAT_STARTED = {
+    "reset": "They were reset with pg_stat_reset().",
+    "restart": (
+        "They started again when PostgreSQL discarded its statistics: after a crash, an immediate shutdown, a "
+        "failover or a restore from a backup (or pg_stat_reset_shared('bgwriter'))."
+    ),
+}
+
+
+def _days(days: float) -> str:
+    return f"{days:g} day{'' if days == 1 else 's'}"
+
+
 class IndexHealthCalc:
     _cached_indexes: list[dict[str, Any]] | None = None
 
-    def __init__(self, sql_driver: SqlDriver):
+    def __init__(self, sql_driver: SqlDriver, min_window_days: float = MIN_WINDOW_DAYS):
         self.sql_driver = sql_driver
+        self.min_window_days = min_window_days
 
     async def invalid_index_check(self) -> HealthCheckResult:
         indexes = await self._indexes()
@@ -341,21 +364,43 @@ class IndexHealthCalc:
     async def unused_indexes(self, max_scans: int = 50) -> HealthCheckResult:
         """Check for unused or rarely used indexes.
 
+        An index is only called unused once the counters have been counting
+        for :attr:`min_window_days`: the day after a crash, a failover or
+        ``pg_stat_reset()``, every index has been scanned almost never.
+
         Args:
             max_scans: Maximum number of scans to consider an index as unused (default 50)
 
         Returns:
-            The rarely used indexes found, one finding each.
+            The rarely used indexes found, one finding each, or a result that
+            says why index use was not judged.
         """
+        window = await table_window(self.sql_driver)
+        metrics: dict[str, Any] = {"max_scans": max_scans, "min_window_days": self.min_window_days, **window.to_dict()}
+        if not window.at_least(self.min_window_days):
+            return HealthCheckResult(
+                name=UNUSED_INDEXES,
+                healthy=True,
+                summary=(
+                    f"Index use not judged: the index counters have been counting {window.describe()}, less than the "
+                    f"{_days(self.min_window_days)} an index has to go unscanned before it is called unused. "
+                    f"{_WHAT_STARTED.get(window.began_with or '', '')}"
+                ).strip(),
+                metrics={**metrics, "judged": False},
+            )
+
+        # PostgreSQL 16 records when each index was last scanned.
+        last_scan = "ui.last_idx_scan" if await get_postgres_version(self.sql_driver) >= 16 else "NULL::timestamptz"
         unused = await SafeSqlDriver.execute_param_query(
             self.sql_driver,
-            """
+            f"""
             SELECT
                 schemaname AS schema,
                 relname AS table,
                 indexrelname AS index,
                 pg_relation_size(i.indexrelid) AS size_bytes,
                 idx_scan as index_scans,
+                {last_scan} AS last_scan,
                 pg_get_indexdef(i.indexrelid) AS definition,
                 indisprimary AS primary
             FROM
@@ -364,7 +409,7 @@ class IndexHealthCalc:
                 pg_index i ON ui.indexrelid = i.indexrelid
             WHERE
                 NOT indisunique
-                AND idx_scan <= {}
+                AND idx_scan <= {{}}
             ORDER BY
                 pg_relation_size(i.indexrelid) DESC,
                 relname ASC
@@ -380,15 +425,17 @@ class IndexHealthCalc:
             return HealthCheckResult(
                 name=UNUSED_INDEXES,
                 healthy=True,
-                summary="No unused indexes found.",
-                metrics={"max_scans": max_scans},
+                summary=f"No unused indexes found in the counters, which have been counting {window.describe()}.",
+                metrics={**metrics, "judged": True},
             )
 
-        result = ["Rarely used indexes found:"]
+        result = [f"Rarely used indexes found, counting {window.describe()}:"]
         for idx in indexes:
             size_mb = int(idx["size_bytes"]) / (1024 * 1024)
+            last = f"; last scanned {idx['last_scan']:%Y-%m-%d}" if idx.get("last_scan") else ""
             result.append(
-                f"Index '{idx['index']}' on table '{idx['table']}' has only been scanned {idx['index_scans']} times and uses {size_mb:.1f}MB of space"
+                f"Index '{idx['index']}' on table '{idx['table']}' has only been scanned {idx['index_scans']} times "
+                f"and uses {size_mb:.1f}MB of space{last}"
             )
 
         return HealthCheckResult(
@@ -396,5 +443,5 @@ class IndexHealthCalc:
             healthy=False,
             summary="\n".join(result),
             findings=indexes,
-            metrics={"max_scans": max_scans},
+            metrics={**metrics, "judged": True},
         )

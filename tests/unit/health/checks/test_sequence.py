@@ -1,7 +1,11 @@
 """Unit tests for SequenceHealthCalc, specifically _parse_sequence_name parsing."""
 
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+
 import pytest
 
+from pg_debug.db import SqlDriver
 from pg_debug.health.checks.sequence import SequenceHealthCalc
 
 
@@ -73,3 +77,31 @@ class TestParseSequenceName:
         schema, name = calc._parse_sequence_name("nextval('\"my.seq\"'::regclass)")
         assert schema == "public"
         assert name == "my.seq"
+
+
+@pytest.mark.asyncio
+async def test_a_smallserial_column_is_judged_against_the_smallint_limit():
+    """A smallint runs out at 32,767. Judged against bigint's limit, a
+    smallserial at 32,000 looked as though it had barely started."""
+    driver = MagicMock(spec=SqlDriver)
+    driver.execute_query = AsyncMock(
+        side_effect=[
+            [
+                SqlDriver.RowResult(
+                    cells={
+                        "table_schema": "public",
+                        "table": "flags",
+                        "column": "id",
+                        "column_type": "smallint",
+                        "default_value": "nextval('flags_id_seq'::regclass)",
+                    }
+                )
+            ],
+            [SqlDriver.RowResult(cells={"readable": True, "last_value": 32_000})],
+        ]
+    )
+
+    result = await SequenceHealthCalc(driver).sequence_danger_check()
+
+    assert not result.healthy
+    assert result.findings[0]["max_value"] == 32_767

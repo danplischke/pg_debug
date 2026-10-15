@@ -6,6 +6,8 @@ from unittest.mock import patch
 import pytest
 
 from pg_debug import cli
+from pg_debug.db.privileges import HIDDEN_QUERY_TEXT
+from pg_debug.db.privileges import StatisticsAccess
 from pg_debug.errors import ExtensionRequiredError
 from pg_debug.errors import IndexTuningError
 from pg_debug.health import HealthCheckResult
@@ -15,15 +17,35 @@ from pg_debug.model import RuleId
 from pg_debug.model import Severity
 from pg_debug.plans.tree import ExplainPlanArtifact
 from pg_debug.plans.tree import PlanNode
+from pg_debug.rules import DOCS_URL
+from pg_debug.top_queries import QuerySample
+from pg_debug.waits import SampleTiming
+from pg_debug.waits import WaitClassification
+from pg_debug.waits import WaitDiagnosis
+from pg_debug.waits import WaitProfile
+
+#: A role shown every role's activity and statements, as a superuser is.
+MONITOR = StatisticsAccess(role="monitor", reads_all_stats=True)
+#: A role without pg_read_all_stats.
+PLAIN = StatisticsAccess(role="app_user", reads_all_stats=False, remedy="GRANT pg_monitor TO app_user")
 
 
 @pytest.fixture
 def pg_client():
-    """Patch PgDebug so commands run against a mock instead of a database."""
+    """Patch PgDebug so commands run against a mock instead of a database.
+
+    The connecting role is shown everything, unless a test says otherwise.
+    """
     with patch("pg_debug.cli.PgDebug") as client_cls:
         client = client_cls.return_value
         client.__aenter__ = AsyncMock(return_value=client)
         client.__aexit__ = AsyncMock(return_value=None)
+        client.statistics_access = AsyncMock(return_value=MONITOR)
+        client.withheld_backends = AsyncMock(return_value=[])
+        client.counting_windows = AsyncMock(return_value={"tables": None, "checkpoints": None, "statements": None})
+        client.classify_waits = AsyncMock(return_value=WaitDiagnosis())
+        # No finding names an object with a definition, unless a test says so.
+        client.definition_fingerprints = AsyncMock(side_effect=lambda command, keys: [None] * len(keys))
         yield client
 
 
@@ -224,7 +246,7 @@ def test_health_renders_one_line_per_check(pg_client):
 
     assert code == 0
     assert out.splitlines()[:2] == ["Connection health: ok", "Vacuum health: ok"]
-    pg_client.analyze_db_health.assert_awaited_once_with("connection,vacuum")
+    pg_client.analyze_db_health.assert_awaited_once_with("connection,vacuum", min_window_days=7.0, static=False)
 
 
 def test_health_json_includes_findings_and_metrics(pg_client):
@@ -247,8 +269,9 @@ def test_health_json_includes_findings_and_metrics(pg_client):
             "name": "Unused index check",
             "healthy": False,
             "summary": "Rarely used indexes found:",
-            "findings": [{"index": "orders_status_idx", "index_scans": 0}],
+            "findings": [{"rule": "unused_index", "docs": f"{DOCS_URL}#unused_index", "index": "orders_status_idx", "index_scans": 0}],
             "metrics": {"max_scans": 50},
+            "rules": [{"id": "unused_index", "docs": f"{DOCS_URL}#unused_index"}],
         }
     }
 
@@ -270,10 +293,61 @@ def test_health_exit_code_is_zero_when_healthy(pg_client):
     assert run(["health", "--exit-code"])[0] == 0
 
 
-def test_health_without_exit_code_flag_always_succeeds(pg_client):
+def test_health_without_exit_code_succeeds_when_a_check_finds_a_problem(pg_client):
     pg_client.analyze_db_health = AsyncMock(return_value=health_results(("Connection health", False, "too many connections", {})))
 
     assert run(["health"])[0] == 0
+
+
+def could_not_run(name, error="canceling statement due to statement timeout"):
+    return (name, False, f"Could not run: {error}", {"error": error})
+
+
+def test_health_prints_every_check_and_exits_1_when_one_could_not_run(pg_client):
+    pg_client.analyze_db_health = AsyncMock(
+        return_value=health_results(
+            could_not_run("Invalid index check"),
+            ("Vacuum health", True, "ok", {}),
+        )
+    )
+
+    code, out, err = run(["health"])
+
+    assert code == 1
+    assert out.splitlines() == ["Invalid index check: Could not run: canceling statement due to statement timeout", "Vacuum health: ok"]
+    assert "1 of 2 health checks could not run, so this run is incomplete: Invalid index check." in err
+
+
+def test_health_exit_code_is_1_when_the_only_failure_is_a_check_that_could_not_run(pg_client):
+    """3 says the database has a problem; a check that did not run has not found one."""
+    pg_client.analyze_db_health = AsyncMock(return_value=health_results(could_not_run("Invalid index check"), ("Vacuum health", True, "ok", {})))
+
+    assert run(["health", "--exit-code"])[0] == 1
+
+
+def test_health_exit_code_puts_a_problem_found_before_an_incomplete_run(pg_client):
+    pg_client.analyze_db_health = AsyncMock(
+        return_value=health_results(
+            could_not_run("Invalid index check"),
+            ("Vacuum health", False, "Tables approaching transaction ID wraparound:", {}),
+        )
+    )
+
+    code, _, err = run(["health", "--exit-code"])
+
+    assert code == cli.UNHEALTHY_EXIT_CODE
+    assert "could not run" in err
+
+
+def test_health_json_carries_the_reason_a_check_could_not_run(pg_client):
+    pg_client.analyze_db_health = AsyncMock(
+        return_value=health_results(could_not_run("Replication health", "permission denied for function pg_last_wal_replay_lsn"))
+    )
+
+    code, out, _ = run(["--json", "health", "--type", "replication"])
+
+    assert code == 1
+    assert json.loads(out)["Replication health"]["error"] == "permission denied for function pg_last_wal_replay_lsn"
 
 
 def model_findings(*findings):
@@ -303,6 +377,7 @@ def test_model_passes_its_options(pg_client):
         schema="reporting",
         min_rows=50,
         proven_only=True,
+        static=False,
     )
 
 
@@ -405,6 +480,108 @@ def test_config_exit_code_fires_only_on_high_severity(pg_client):
     assert run(["config", "--exit-code"])[0] == cli.UNHEALTHY_EXIT_CODE
 
 
+# -- upgrade-check and security ------------------------------------------------
+
+
+def audit(*findings, unknown=False, command="security"):
+    from pg_debug.audit import AuditReport
+    from pg_debug.audit import CheckOutcome
+    from pg_debug.audit import CheckStatus
+
+    checks = [CheckOutcome(check="ssl", status=CheckStatus.FOUND if findings else CheckStatus.CLEAR, examined="ssl = off")]
+    if unknown:
+        checks.append(CheckOutcome(check="hba_rules", status=CheckStatus.UNKNOWN, examined="nothing", reason="only a superuser may read them"))
+    return AuditReport(
+        command=command, server_version="16.4", findings=list(findings), checks=checks, target_version=18 if command == "upgrade-check" else None
+    )
+
+
+def audit_finding(severity=Severity.MEDIUM, subject="ssl", check="ssl"):
+    from pg_debug.audit import AuditFinding
+
+    return AuditFinding(
+        check=check,
+        subject=subject,
+        severity=severity,
+        confidence=Confidence.PROVEN,
+        summary="ssl is off.",
+        detail="detail",
+        remediation=["ALTER SYSTEM SET ssl = on;"],
+    )
+
+
+def test_upgrade_check_passes_its_target(pg_client):
+    pg_client.check_upgrade = AsyncMock(return_value=audit(command="upgrade-check"))
+
+    code, out, _ = run(["upgrade-check", "--to", "17"])
+
+    assert code == 0
+    pg_client.check_upgrade.assert_awaited_once_with(to=17)
+    assert out.startswith("Upgrade from PostgreSQL 16.4 to 18")
+
+
+def test_security_renders_findings_and_every_check(pg_client):
+    pg_client.audit_security = AsyncMock(return_value=audit(audit_finding()))
+
+    code, out, _ = run(["security"])
+
+    assert code == 0
+    assert "[medium] ssl: ssl" in out
+    assert "ALTER SYSTEM SET ssl = on;" in out
+    assert "found    ssl: ssl = off" in out
+    assert out.strip().endswith("1 finding (1 medium).")
+
+
+def test_a_check_that_could_not_tell_is_never_read_as_a_pass(pg_client):
+    pg_client.audit_security = AsyncMock(return_value=audit(unknown=True))
+
+    code, out, _ = run(["security", "--exit-code"])
+
+    assert code == 0
+    assert "unknown  hba_rules: only a superuser may read them" in out
+    assert "No findings; 1 check could not tell (hba_rules), so this is not a clean bill." in out
+
+
+def test_security_exit_code_fires_only_on_high_severity(pg_client):
+    pg_client.audit_security = AsyncMock(return_value=audit(audit_finding(Severity.MEDIUM)))
+    assert run(["security", "--exit-code"])[0] == 0
+
+    pg_client.audit_security = AsyncMock(return_value=audit(audit_finding(Severity.HIGH)))
+    assert run(["security", "--exit-code"])[0] == cli.UNHEALTHY_EXIT_CODE
+
+
+def test_an_audit_baseline_silences_what_was_accepted(pg_client, tmp_path):
+    path = tmp_path / "security.json"
+    pg_client.audit_security = AsyncMock(return_value=audit(audit_finding(Severity.HIGH)))
+    run(["security", "--save-baseline", str(path)])
+
+    code, out, _ = run(["security", "--exit-code", "--baseline", str(path)])
+    assert code == 0
+    assert "1 known finding(s), nothing new" in out
+
+    pg_client.audit_security = AsyncMock(
+        return_value=audit(audit_finding(Severity.HIGH), audit_finding(Severity.HIGH, subject="role app", check="privileged_roles"))
+    )
+    code, out, _ = run(["security", "--exit-code", "--baseline", str(path)])
+    assert code == cli.UNHEALTHY_EXIT_CODE
+    assert "privileged_roles: role app" in out
+
+
+def test_audit_json_marks_findings_against_the_baseline(pg_client, tmp_path):
+    path = tmp_path / "upgrade.json"
+    pg_client.check_upgrade = AsyncMock(return_value=audit(audit_finding(), command="upgrade-check"))
+    run(["upgrade-check", "--save-baseline", str(path)])
+    pg_client.check_upgrade = AsyncMock(return_value=audit(audit_finding(), audit_finding(subject="other"), unknown=True, command="upgrade-check"))
+
+    code, out, _ = run(["--json", "upgrade-check", "--baseline", str(path)])
+
+    payload = json.loads(out)
+    assert code == 0
+    assert payload["target_version"] == 18
+    assert [(f["subject"], f["baseline"]) for f in payload["findings"]] == [("ssl", "known"), ("other", "new")]
+    assert payload["checks"][1] == {"check": "hba_rules", "status": "unknown", "examined": "nothing", "reason": "only a superuser may read them"}
+
+
 def test_check_migration_reads_a_file(pg_client, tmp_path):
     pg_client.check_migration = AsyncMock(return_value=[])
     migration = tmp_path / "001_add_column.sql"
@@ -459,7 +636,10 @@ def test_tune_queries_reads_stdin_as_utf8_too(pg_client, monkeypatch):
 
     assert run(["tune-queries", "-"])[0] == 0
     pg_client.analyze_query_indexes.assert_awaited_once_with(
-        ["SELECT * FROM orders WHERE note = 'Größe'", "SELECT * FROM orders WHERE note = '表'"], max_index_size_mb=10000, method="dta"
+        ["SELECT * FROM orders WHERE note = 'Größe'", "SELECT * FROM orders WHERE note = '表'"],
+        max_index_size_mb=10000,
+        method="dta",
+        max_regression_factor=0.1,
     )
 
 
@@ -511,14 +691,14 @@ def test_top_queries_passes_options(pg_client):
     pg_client.get_top_queries = AsyncMock(return_value=[])
 
     assert run(["top-queries", "--sort-by", "mean_time", "--limit", "3"])[0] == 0
-    pg_client.get_top_queries.assert_awaited_once_with(sort_by="mean_time", limit=3, interval_seconds=None)
+    pg_client.get_top_queries.assert_awaited_once_with(sort_by="mean_time", limit=3)
 
 
 def test_top_queries_sampling_interval(pg_client):
-    pg_client.get_top_queries = AsyncMock(return_value=[])
+    pg_client.sample_top_queries = AsyncMock(return_value=QuerySample(queries=[]))
 
     assert run(["top-queries", "--interval", "5"])[0] == 0
-    pg_client.get_top_queries.assert_awaited_once_with(sort_by="resources", limit=10, interval_seconds=5.0)
+    pg_client.sample_top_queries.assert_awaited_once_with(5.0, sort_by="resources", limit=10)
 
 
 def test_activity_defaults(pg_client):
@@ -564,6 +744,136 @@ def test_activity_renders_blocking(pg_client):
     assert "UPDATE orders SET status = 'paid' WHERE id = 1" in out
 
 
+def a_ddl_queue_diagnosis() -> WaitDiagnosis:
+    return WaitDiagnosis(
+        classifications=[
+            WaitClassification(
+                kind="ddl_lock_queue",
+                confidence=Confidence.PROVEN,
+                severity=Severity.HIGH,
+                summary="pid 20 waits for ACCESS EXCLUSIVE on public.t, held up by pid 10 (ACCESS SHARE), and 1 statement queues behind it.",
+                detail="PostgreSQL grants a lock in the order it was asked for.",
+                pids=[20, 10, 30],
+                evidence={"waiter": 20},
+            )
+        ],
+        examined=3,
+    )
+
+
+def test_activity_says_what_the_waits_amount_to_beneath_the_rows(pg_client):
+    pg_client.list_activity = AsyncMock(return_value=[{"pid": 20, "state": "active", "query": "ALTER TABLE t ADD COLUMN y int"}])
+    pg_client.classify_waits = AsyncMock(return_value=a_ddl_queue_diagnosis())
+
+    code, out, _ = run(["activity"])
+
+    assert code == 0
+    assert out.index("ALTER TABLE t") < out.index("What the waits amount to:")
+    assert "[high, proven] pid 20 waits for ACCESS EXCLUSIVE on public.t" in out
+
+
+def test_activity_json_keeps_printing_the_rows(pg_client):
+    rows = [{"pid": 20, "state": "active", "query": "ALTER TABLE t ADD COLUMN y int"}]
+    pg_client.list_activity = AsyncMock(return_value=rows)
+    pg_client.classify_waits = AsyncMock(return_value=a_ddl_queue_diagnosis())
+
+    code, out, _ = run(["--json", "activity"])
+
+    assert code == 0
+    assert json.loads(out) == rows
+
+
+def test_locks_say_what_the_waits_amount_to(pg_client):
+    pg_client.lock_tree = AsyncMock(return_value=[{"pid": 10, "state": "idle in transaction", "blocking": [], "blocked_total": 0}])
+    pg_client.classify_waits = AsyncMock(return_value=a_ddl_queue_diagnosis())
+
+    code, out, _ = run(["locks"])
+
+    assert code == 0
+    assert "pid 10:" in out
+    assert "What the waits amount to:" in out
+
+
+def a_profile(**overrides) -> WaitProfile:
+    timing = SampleTiming(
+        samples=20,
+        requested_seconds=10,
+        requested_interval_seconds=0.5,
+        achieved_interval_seconds=0.52,
+        shortest_gap_seconds=0.5,
+        longest_gap_seconds=0.61,
+        span_seconds=9.88,
+        started_at=None,
+    )
+    fields = {
+        "source": "pg_stat_activity",
+        "timing": timing,
+        "active_sessions": 1.5,
+        "active_sessions_max": 3,
+        "active_client_sessions": 1.5,
+        "waits": [{"wait": "Lock:transactionid", "active_sessions": 1.0, "share": 0.6667, "samples": 20}],
+        "queries": [
+            {
+                "active_sessions": 1.0,
+                "share": 0.6667,
+                "waits": [{"wait": "Lock:transactionid", "share_of_query": 1.0}],
+                "query": "UPDATE t SET n = n + 1",
+                "backend_type": "client backend",
+            }
+        ],
+        "notes": ["Each of the 20 samples is exact; the profile is a sample of the interval."],
+    }
+    fields.update(overrides)
+    return WaitProfile(**fields)
+
+
+def test_activity_sample_reports_samples_taken_and_the_interval_achieved(pg_client):
+    pg_client.sample_waits = AsyncMock(return_value=a_profile())
+
+    code, out, _ = run(["activity", "--sample", "10"])
+
+    assert code == 0
+    pg_client.sample_waits.assert_awaited_once_with(10.0, interval=0.5)
+    assert "20 samples of pg_stat_activity over 9.88s, one every 0.52s (asked: 0.5s" in out
+    assert "Average active sessions: 1.5" in out
+    assert "Lock:transactionid" in out
+    assert "UPDATE t SET n = n + 1" in out
+    assert "candidate" in out
+    pg_client.list_activity.assert_not_called()
+
+
+def test_activity_sample_json_is_the_profile(pg_client):
+    pg_client.sample_waits = AsyncMock(return_value=a_profile())
+
+    code, out, _ = run(["--json", "activity", "--sample", "10", "--sample-interval", "0.25"])
+
+    assert code == 0
+    pg_client.sample_waits.assert_awaited_once_with(10.0, interval=0.25)
+    payload = json.loads(out)
+    assert payload["timing"]["samples"] == 20
+    assert payload["timing"]["achieved_interval_seconds"] == 0.52
+    assert payload["exactness"] == "each sample is exact; the profile is a sample of the interval"
+
+
+def test_activity_sample_says_what_was_withheld(pg_client):
+    plain = StatisticsAccess(role="app", reads_all_stats=False, remedy="GRANT pg_monitor TO app")
+    pg_client.sample_waits = AsyncMock(return_value=a_profile(withheld_per_sample=4, statistics_access=plain))
+
+    code, _, err = run(["activity", "--sample", "10"])
+
+    assert code == 0
+    assert "Up to 4 backends in a sample were shown without state" in err
+    assert "GRANT pg_monitor TO app" in err
+
+
+@pytest.mark.parametrize("option", [["--all"], ["--blocked"], ["--min-duration", "5"]])
+def test_activity_sample_refuses_options_for_a_list(pg_client, option):
+    code, _, err = run(["activity", "--sample", "10", *option])
+
+    assert code == 1
+    assert "do not combine with it" in err
+
+
 def test_vacuum_progress_when_idle(pg_client):
     pg_client.vacuum_progress = AsyncMock(return_value=[])
 
@@ -600,6 +910,144 @@ def test_vacuum_progress_renders_percentage(pg_client):
     assert "1m05s" in out
 
 
+# -- What PostgreSQL withheld from the role ---------------------------------
+
+
+def withheld(pid, **fields):
+    """A backend as list_activity returns it to a role without pg_read_all_stats."""
+    return {"pid": pid, "datname": "shop", "usename": "postgres", "application_name": "worker", "state": None, "blocked_by": [], **fields}
+
+
+#: What list_activity returned: the role's own waiter, and the other role's
+#: backend in a transaction that it waits on.
+LISTED = [
+    {"pid": 42, "usename": "app_user", "state": "active", "blocked_by": [41], "in_transaction": True, "query": "SELECT 1"},
+    withheld(41, in_transaction=True, query=HIDDEN_QUERY_TEXT),
+]
+#: What withheld_backends returned: that backend, and an idle one.
+WITHHELD = [
+    {**withheld(41), "in_transaction": True, "locks": ["AccessExclusiveLock on public.orders"], "blocking": [42]},
+    {**withheld(43), "in_transaction": False, "locks": [], "blocking": []},
+]
+
+
+def test_activity_lists_a_withheld_backend_in_a_transaction_and_says_what_it_left_out(pg_client):
+    """The reported failure: "(nothing running)" while another role's query held a lock."""
+    pg_client.list_activity = AsyncMock(return_value=LISTED)
+    pg_client.statistics_access = AsyncMock(return_value=PLAIN)
+    pg_client.withheld_backends = AsyncMock(return_value=WITHHELD)
+
+    code, out, err = run(["activity"])
+
+    assert code == 0
+    (row,) = [line for line in out.splitlines() if line.startswith("41")]
+    assert "in a transaction" in row
+    assert "holds AccessExclusiveLock on public.orders; blocking 42; database shop, application worker" in row
+    assert err.startswith("pg-debug: 1 of these backends, of postgres, is in a transaction")
+    assert "1 other backend, of postgres, is not listed: it shows no sign of a transaction" in err
+    assert err.rstrip().endswith("GRANT pg_monitor TO app_user grants it.")
+
+
+def test_activity_json_prints_the_rows_as_returned_and_the_note_on_standard_error(pg_client):
+    """Scripts read the array with `jq '.[]'`."""
+    pg_client.list_activity = AsyncMock(return_value=LISTED)
+    pg_client.statistics_access = AsyncMock(return_value=PLAIN)
+    pg_client.withheld_backends = AsyncMock(return_value=WITHHELD)
+
+    code, out, err = run(["--json", "activity"])
+
+    assert code == 0
+    assert json.loads(out) == LISTED
+    assert err.startswith("pg-debug: 1 of these backends, of postgres, is in a transaction")
+
+
+def test_activity_asks_a_role_shown_everything_nothing_more(pg_client):
+    pg_client.list_activity = AsyncMock(return_value=[LISTED[0]])
+
+    code, out, err = run(["activity"])
+
+    assert code == 0
+    assert "SELECT 1" in out
+    assert err == ""
+    pg_client.statistics_access.assert_awaited_once()
+    pg_client.withheld_backends.assert_not_awaited()
+
+
+@pytest.mark.parametrize("argv", [["activity", "--all"], ["activity", "--blocked"]])
+def test_activity_asks_nothing_when_the_rows_show_nothing_withheld(pg_client, argv):
+    """With --all every backend is listed; with --blocked and nothing blocked, nothing is withheld that matters."""
+    pg_client.list_activity = AsyncMock(return_value=[] if "--blocked" in argv else [LISTED[0]])
+
+    assert run(argv)[0] == 0
+    pg_client.statistics_access.assert_not_awaited()
+
+
+def test_activity_blocked_describes_a_withheld_blocker(pg_client):
+    pg_client.list_activity = AsyncMock(return_value=[LISTED[0]])
+    pg_client.statistics_access = AsyncMock(return_value=PLAIN)
+    pg_client.withheld_backends = AsyncMock(return_value=WITHHELD)
+
+    code, _, err = run(["activity", "--blocked"])
+
+    assert code == 0
+    assert "Pid 41 (postgres@shop worker), which blocks 42, is in a transaction and holds AccessExclusiveLock on public.orders" in err
+
+
+def test_locks_say_which_backends_in_the_trees_are_withheld(pg_client):
+    pg_client.lock_tree = AsyncMock(return_value=[{**withheld(41, in_transaction=True, query=HIDDEN_QUERY_TEXT), "blocked_total": 0, "blocking": []}])
+    pg_client.statistics_access = AsyncMock(return_value=PLAIN)
+
+    code, out, err = run(["locks"])
+
+    assert code == 0
+    assert out.startswith("pid 41: in a transaction; state, query and wait withheld (postgres@shop worker)")
+    assert err.startswith("pg-debug: 1 of the backends in these trees, of postgres, is shown without state")
+
+
+def test_vacuum_progress_says_which_vacuums_are_withheld(pg_client):
+    pg_client.vacuum_progress = AsyncMock(return_value=[{"pid": 7, "heap_blks_total": None, "heap_blks_scanned": None, "query": HIDDEN_QUERY_TEXT}])
+    pg_client.statistics_access = AsyncMock(return_value=PLAIN)
+
+    code, out, err = run(["vacuum-progress"])
+
+    assert code == 0
+    assert "None" not in out
+    assert err.startswith("pg-debug: 1 of these vacuums is shown without table, phase or progress")
+
+
+def test_top_queries_say_how_many_texts_were_withheld(pg_client):
+    queries = [{"query": HIDDEN_QUERY_TEXT, "calls": 3}, {"query": "SELECT 1", "calls": 1}]
+    pg_client.get_top_queries = AsyncMock(return_value=queries)
+    pg_client.statistics_access = AsyncMock(return_value=PLAIN)
+
+    code, out, err = run(["--json", "top-queries"])
+
+    assert code == 0
+    assert json.loads(out) == queries
+    assert err.startswith("pg-debug: 1 of these queries is another role's: pg_stat_statements shows app_user its counters but not its text.")
+
+
+def test_a_sample_says_how_many_statements_it_could_not_rank(pg_client):
+    ranked = [{"queryid": 1, "query": "SELECT 1", "calls": 3}]
+    pg_client.sample_top_queries = AsyncMock(return_value=QuerySample(queries=ranked, withheld=4))
+    pg_client.statistics_access = AsyncMock(return_value=PLAIN)
+
+    code, out, err = run(["--json", "top-queries", "--interval", "2", "--sort-by", "total_time"])
+
+    assert code == 0
+    assert json.loads(out) == ranked
+    assert err.startswith("pg-debug: 4 statements of other roles ran during the interval and are not ranked")
+
+
+def test_a_sample_with_nothing_withheld_asks_nothing_more(pg_client):
+    pg_client.sample_top_queries = AsyncMock(return_value=QuerySample(queries=[{"queryid": 1, "query": "SELECT 1"}]))
+
+    code, _, err = run(["top-queries", "--interval", "2"])
+
+    assert (code, err) == (0, "")
+    pg_client.statistics_access.assert_not_awaited()
+
+
 def test_column_stats_renders_both_sections(pg_client):
     pg_client.column_stats = AsyncMock(return_value=[{"column": "user_id", "n_distinct": 500.0, "correlation": 0.01}])
     pg_client.extended_statistics = AsyncMock(return_value=[{"name": "orders_user_status", "columns": ["user_id", "status"], "kinds": ["d", "f"]}])
@@ -626,7 +1074,7 @@ def test_tune_queries_collects_queries(pg_client):
     pg_client.analyze_query_indexes = AsyncMock(return_value={"recommendations": []})
 
     assert run(["tune-queries", "SELECT 1", "SELECT 2", "--max-index-size-mb", "50"])[0] == 0
-    pg_client.analyze_query_indexes.assert_awaited_once_with(["SELECT 1", "SELECT 2"], max_index_size_mb=50, method="dta")
+    pg_client.analyze_query_indexes.assert_awaited_once_with(["SELECT 1", "SELECT 2"], max_index_size_mb=50, method="dta", max_regression_factor=0.1)
 
 
 def test_tune_workload_renders_recommendations(pg_client):
@@ -917,6 +1365,43 @@ def test_diagnose_json_carries_the_evidence(pg_client):
     assert payload[0]["share_of_time"] == 0.87
 
 
+def test_diagnose_marks_a_candidate_and_shows_the_plan_control_advice(pg_client):
+    from pg_debug.severity import Confidence
+
+    finding = plan_finding(confidence=Confidence.CANDIDATE, plan_control=["pg_hint_plan is installed: …"])
+    pg_client.diagnose_query = AsyncMock(return_value=[finding])
+
+    _, out, _ = run(["diagnose", "SELECT 1"])
+
+    assert "Seq Scan on public.visits  (candidate)" in out
+    assert "pg-debug applies none of it" in out
+    assert "- pg_hint_plan is installed: …" in out
+
+
+def test_diagnose_says_what_a_time_no_node_includes_is_a_share_of(pg_client):
+    finding = plan_finding(evidence={"share_of": "execution_time"})
+    pg_client.diagnose_query = AsyncMock(return_value=[finding])
+
+    _, out, _ = run(["diagnose", "SELECT 1"])
+
+    assert "87% of the execution time" in out
+
+
+def test_diagnose_shows_the_costliest_findings_and_says_how_many_it_left_out(pg_client):
+    from pg_debug.cli.render import PLAN_FINDINGS_SHOWN
+
+    findings = [plan_finding(summary=f"finding {i}") for i in range(PLAN_FINDINGS_SHOWN + 2)]
+    pg_client.diagnose_query = AsyncMock(return_value=findings)
+
+    _, out, _ = run(["diagnose", "SELECT 1"])
+    assert f"finding {PLAN_FINDINGS_SHOWN - 1}" in out
+    assert f"finding {PLAN_FINDINGS_SHOWN}" not in out
+    assert "The 2 smaller ones are not shown; --json lists every one." in out
+
+    _, out, _ = run(["--json", "diagnose", "SELECT 1"])
+    assert len(json.loads(out)) == PLAN_FINDINGS_SHOWN + 2
+
+
 def test_diagnose_passes_the_threshold_through(pg_client):
     pg_client.diagnose_query = AsyncMock(return_value=[])
 
@@ -1164,6 +1649,75 @@ def test_json_output_marks_each_finding_against_the_baseline(pg_client, tmp_path
     assert [(f["index"], f["baseline"]) for f in findings] == [("orders_a", "known"), ("orders_b", "new")]
 
 
+def test_a_run_in_which_a_check_could_not_run_saves_no_baseline(pg_client, tmp_path):
+    """A baseline of it would hold nothing for that check, so what it finds
+    once it runs would fail as new; saved over the accepted baseline, a lock
+    during one run threw away everything the team had accepted."""
+    path = tmp_path / "health.json"
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a"))
+    run(["health", "--save-baseline", str(path)])
+    accepted = path.read_text()
+    pg_client.analyze_db_health = AsyncMock(
+        return_value={
+            **health_results(could_not_run("Index bloat"), could_not_run("Unused index check")),
+            **health_results(("Vacuum health", False, "Tables approaching transaction ID wraparound:", {})),
+        }
+    )
+
+    code, out, err = run(["health", "--exit-code", "--save-baseline", str(path)])
+
+    assert code == 1
+    assert path.read_text() == accepted
+    assert "Index bloat: Could not run" in out
+    assert "2 of 3 health checks could not run, so this run is incomplete: Index bloat, Unused index check." in err
+    assert f"Nothing was written to {path}" in err
+    assert "Saved a baseline" not in err
+
+
+def test_against_a_baseline_an_incomplete_run_is_not_reported_as_a_pass(pg_client, tmp_path):
+    """Nothing new, said of a run in which nothing ran, reads as a pass."""
+    path = tmp_path / "health.json"
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a"))
+    run(["health", "--save-baseline", str(path)])
+    pg_client.analyze_db_health = AsyncMock(return_value=health_results(could_not_run("Index bloat"), could_not_run("Unused index check")))
+
+    code, out, _ = run(["health", "--exit-code", "--baseline", str(path)])
+
+    assert code == 1
+    assert out.splitlines()[-1] == (
+        f"Baseline {path}: 0 known finding(s), nothing new among the checks that ran. "
+        "2 checks could not run and were not compared, so this is not a pass."
+    )
+
+    pg_client.analyze_db_health = AsyncMock(
+        return_value={**unhealthy_index_results("orders_a", "orders_b"), **health_results(could_not_run("Replication health"))}
+    )
+    code, out, _ = run(["health", "--exit-code", "--baseline", str(path)])
+
+    assert code == cli.UNHEALTHY_EXIT_CODE
+    assert out.splitlines()[-3:] == [
+        f"Baseline {path}: 1 known finding(s) ignored, 1 new among the checks that ran:",
+        "  Index bloat: public.orders orders_b",
+        "1 check could not run and was not compared.",
+    ]
+
+
+def test_against_a_baseline_an_incomplete_run_still_fails(pg_client, tmp_path):
+    """Nothing new was found, but only among the checks that ran."""
+    path = tmp_path / "health.json"
+    pg_client.analyze_db_health = AsyncMock(return_value=unhealthy_index_results("orders_a"))
+    run(["health", "--save-baseline", str(path)])
+    pg_client.analyze_db_health = AsyncMock(
+        return_value={**unhealthy_index_results("orders_a"), **health_results(could_not_run("Replication health"))}
+    )
+
+    code, out, err = run(["--json", "health", "--exit-code", "--baseline", str(path)])
+
+    assert code == 1
+    assert "baseline" not in json.loads(out)["Replication health"]
+    assert "1 of 3 health checks could not run" in err
+
+
 def test_model_baseline_gates_only_new_high_severity_findings(pg_client, tmp_path):
     path = tmp_path / "model.json"
     pg_client.review_data_model = AsyncMock(return_value=model_findings((RuleId.MISSING_PRIMARY_KEY, Confidence.PROVEN, Severity.HIGH, "events")))
@@ -1195,3 +1749,70 @@ def test_a_baseline_from_another_command_is_an_error(pg_client, tmp_path):
 
     assert code == 1
     assert "baseline for `pg-debug health`, not `pg-debug model`" in err
+
+
+def test_the_window_an_unused_index_needs_is_passed_through(pg_client):
+    """A crash, a failover or pg_stat_reset() starts the counters again."""
+    pg_client.analyze_db_health = AsyncMock(return_value=health_results(("Unused index check", True, "ok", {})))
+
+    run(["health", "--type", "index", "--min-window-days", "30"])
+
+    pg_client.analyze_db_health.assert_awaited_once_with("index", min_window_days=30.0, static=False)
+
+
+def test_cumulative_top_queries_say_since_when_they_counted(pg_client):
+    """A total since a migration months ago and one since a reset this
+    morning look alike; the ranking says neither."""
+    pg_client.get_top_queries = AsyncMock(return_value=[{"query": "SELECT 1", "calls": 3}])
+    pg_client.counting_windows = AsyncMock(
+        return_value={
+            "tables": None,
+            "checkpoints": None,
+            "statements": {
+                "counting_since": "2026-10-14T09:00:00+00:00",
+                "counting_seconds": 3 * 3600,
+                "counting_began_with": "reset",
+                "statements_evicted": 12,
+            },
+        }
+    )
+
+    code, out, err = run(["--json", "top-queries"])
+
+    assert code == 0
+    assert json.loads(out) == [{"query": "SELECT 1", "calls": 3}]
+    assert "These totals are counts since 2026-10-14 09:00 UTC (3 hours), when pg_stat_statements was last reset" in err
+    assert "evicted statements 12 times since" in err
+
+
+def test_top_queries_before_pg_stat_statements_1_9_say_their_span_is_not_dated(pg_client):
+    pg_client.get_top_queries = AsyncMock(return_value=[])
+    pg_client.counting_windows = AsyncMock(
+        return_value={
+            "tables": None,
+            "checkpoints": None,
+            "statements": {"counting_since": None, "counting_seconds": None, "counting_began_with": None},
+        }
+    )
+
+    _, _, err = run(["top-queries"])
+
+    assert "does not record when it was last reset" in err
+
+
+def test_cumulative_top_queries_say_a_crash_lost_statements(pg_client):
+    """A crash leaves pg_stat_statements' stats_reset alone and loses what it
+    recorded since the last clean shutdown."""
+    pg_client.get_top_queries = AsyncMock(return_value=[])
+    pg_client.counting_windows = AsyncMock(
+        return_value={
+            "tables": {"counting_since": "2026-10-14T10:00:00+00:00", "counting_seconds": 7200, "counting_began_with": "restart"},
+            "checkpoints": None,
+            "statements": {"counting_since": "2026-10-01T00:00:00+00:00", "counting_seconds": 13 * 86400, "counting_began_with": "reset"},
+        }
+    )
+
+    _, _, err = run(["top-queries"])
+
+    assert "PostgreSQL discarded its statistics at 2026-10-14 10:00 UTC" in err
+    assert "lost what it had recorded since its last clean shutdown" in err

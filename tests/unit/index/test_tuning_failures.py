@@ -43,7 +43,7 @@ def answering(answers: dict[str, Any]) -> MagicMock:
     return driver
 
 
-ANALYZED = {"pg_stat_user_tables": [Row({"last_analyze": "2024-01-01"})]}
+ANALYZED = {"AS analyzed": [Row({"analyzed": True})]}
 
 
 def hypopg(installed: bool):
@@ -66,9 +66,9 @@ async def test_without_hypopg_tuning_is_an_extension_error():
 
 @pytest.mark.asyncio
 async def test_a_database_never_analyzed_is_refused():
-    advisor = DatabaseTuningAdvisor(answering({"pg_stat_user_tables": [Row({"last_analyze": None})]}))
+    advisor = DatabaseTuningAdvisor(answering({"AS analyzed": [Row({"analyzed": False})]}))
 
-    with hypopg(installed=True), pytest.raises(IndexTuningError, match="Statistics are not up-to-date"):
+    with hypopg(installed=True), pytest.raises(IndexTuningError, match="No table in this database has planner statistics"):
         await advisor.analyze_workload(query_list=["SELECT * FROM orders WHERE id = 1"])
 
 
@@ -85,7 +85,9 @@ async def test_a_workload_with_nothing_usable_says_why():
 @pytest.mark.asyncio
 async def test_an_empty_workload_is_not_a_failure():
     """Nothing in pg_stat_statements over the thresholds is an answer, not an error."""
-    advisor = DatabaseTuningAdvisor(answering({**ANALYZED, "pg_stat_statements": []}))
+    advisor = DatabaseTuningAdvisor(
+        answering({**ANALYZED, "FROM pg_extension e": [Row({"schema": "public", "version": "1.10"})], "pg_stat_statements": []})
+    )
 
     with hypopg(installed=True):
         session = await advisor.analyze_workload()
@@ -124,10 +126,10 @@ async def test_presenting_no_queries_is_an_argument_error():
 
 @pytest.mark.asyncio
 async def test_presentation_lets_a_tuning_failure_through():
-    advisor = DatabaseTuningAdvisor(answering({"pg_stat_user_tables": [Row({"last_analyze": None})]}))
+    advisor = DatabaseTuningAdvisor(answering({"AS analyzed": [Row({"analyzed": False})]}))
     presentation = TextPresentation(MagicMock(), advisor)
 
-    with hypopg(installed=True), pytest.raises(IndexTuningError, match="Statistics are not up-to-date"):
+    with hypopg(installed=True), pytest.raises(IndexTuningError, match="No table in this database has planner statistics"):
         await presentation.analyze_queries(["SELECT * FROM orders WHERE id = 1"])
 
 

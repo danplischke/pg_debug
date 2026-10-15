@@ -1,4 +1,5 @@
 # ruff: noqa: B017
+import logging
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
@@ -11,6 +12,7 @@ from psycopg_pool import PoolTimeout
 
 from pg_debug.db import DbConnPool
 from pg_debug.db import SqlDriver
+from pg_debug.errors import ConnectionFailedError
 from pg_debug.errors import QueryError
 
 
@@ -459,13 +461,48 @@ async def test_a_statement_rejected_while_rolled_back_is_a_query_error():
     assert excinfo.value.__cause__ is error
 
 
-@pytest.mark.asyncio
-async def test_a_connection_the_pool_cannot_hand_out_is_a_query_error():
-    error = PoolTimeout("couldn't get a connection after 30.00 sec")
-    driver = SqlDriver(conn=OneConnectionPool(error=error))
+class TimingOutPool:
+    """psycopg_pool's pool when no connection came within its timeout."""
 
-    with pytest.raises(QueryError, match="couldn't get a connection"):
+    timeout = 30.0
+    max_size = 5
+
+    @asynccontextmanager
+    async def connection(self):
+        raise PoolTimeout("couldn't get a connection after 30.00 sec")
+        yield
+
+
+@pytest.mark.asyncio
+async def test_a_connection_the_pool_cannot_hand_out_is_a_connection_error():
+    """Not a QueryError, which is PostgreSQL refusing a statement: no
+    statement reached it."""
+    pool = DbConnPool("postgresql://localhost/test")
+    pool.pool = TimingOutPool()  # type: ignore[assignment]
+    pool._is_valid = True
+    driver = SqlDriver(conn=pool)
+
+    with pytest.raises(ConnectionFailedError, match="the attempt to connect had not finished"):
         await driver.execute_query("SELECT 1")
-    with pytest.raises(QueryError, match="couldn't get a connection"):
+    pool._is_valid = True
+    with pytest.raises(ConnectionFailedError, match="the attempt to connect had not finished"):
         async with driver.session():
             pass
+
+
+# -- What a failed statement logs -------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_failed_statement_is_logged_in_one_line_and_its_text_only_at_debug(caplog):
+    """A health run carries on past a check that fails. With every failed
+    statement logged in full at ERROR, six checks timing out behind a lock
+    printed some 290 lines of pg-debug's own SQL to stderr."""
+    driver = SqlDriver(conn=RejectingConnection(undefined_table()))
+
+    with caplog.at_level(logging.DEBUG, logger="pg_debug.db.driver"), pytest.raises(QueryError):
+        await driver.execute_query("SELECT *\n  FROM nope\n WHERE true")
+
+    shown = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    assert shown == ['Error executing query: relation "nope" does not exist']
+    assert any("FROM nope" in record.getMessage() for record in caplog.records if record.levelno == logging.DEBUG)

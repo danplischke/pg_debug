@@ -115,8 +115,8 @@ class IndexUse:
         node_type: The plan node that reads it when ``used``, such as
             ``Index Scan`` or ``Bitmap Index Scan``.
         findings: Why it is not used. Empty when it is.
-        notes: What could not be checked and why, such as the forced plan in
-            restricted mode.
+        notes: What could not be checked and why, such as a plan with
+            sequential scans disabled that could not be taken.
     """
 
     index: str

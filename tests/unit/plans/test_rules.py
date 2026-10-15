@@ -16,11 +16,16 @@ from pg_debug.plans.rules import _statistics_name
 from pg_debug.plans.rules import correlated_columns
 from pg_debug.plans.rules import discarded_rows
 from pg_debug.plans.rules import hash_spilled
+from pg_debug.plans.rules import heap_fetches
+from pg_debug.plans.rules import jit_time
+from pg_debug.plans.rules import large_offset
 from pg_debug.plans.rules import lossy_bitmap
 from pg_debug.plans.rules import nested_loop_blowup
+from pg_debug.plans.rules import planning_time
 from pg_debug.plans.rules import row_estimate
 from pg_debug.plans.rules import sort_spilled
 from pg_debug.plans.rules import stale_statistics
+from pg_debug.plans.rules import trigger_time
 from pg_debug.plans.rules import workers_not_launched
 from pg_debug.plans.tree import PlanNode
 from pg_debug.severity import Severity
@@ -365,3 +370,98 @@ def test_a_healthy_plan_produces_no_findings_from_any_rule():
     ctx = context(root, columns={"s.visits": {"country", "city"}})
 
     assert [finding for rule in RULES for finding in rule(root, ctx)] == []
+
+
+# -- unpruned_partitions ----------------------------------------------------
+
+
+def partition_scans(count=8, matching=1, condition="(date(p_{n}.ts) = '2026-03-05'::date)", loops=1):
+    return [
+        node(
+            "Seq Scan",
+            actual_rows=50 if n < matching else 0,
+            ms=2.0,
+            loops=loops,
+            relation_name=f"pr_{n}",
+            schema_name="public",
+            alias=f"p_{n}",
+            filter=condition.format(n=n),
+        )
+        for n in range(count)
+    ]
+
+
+def partitions_of(count=8, key=("ts",)):
+    return {f"public.pr_{n}": {"root": "public.pr", "partitions": count, "key_columns": list(key)} for n in range(count)}
+
+
+def test_an_append_that_kept_every_partition_it_filtered_on_the_key_is_a_candidate():
+    from pg_debug.plans.rules import unpruned_partitions
+
+    append = node("Append", ms=20.0, children=partition_scans(), subplans_removed=0)
+    (finding,) = unpruned_partitions(append, context(append, partitions=partitions_of()))
+
+    assert finding.issue is PlanIssue.UNPRUNED_PARTITIONS
+    assert finding.relation == "public.pr"
+    assert "scanned 8 of 8 partitions" in finding.summary and "7 of them returned no rows" in finding.summary
+    assert finding.evidence["confidence"] == "candidate"
+    assert finding.evidence["partition_key"] == ["ts"]
+
+
+@pytest.mark.parametrize(
+    ("append_kwargs", "scans_kwargs", "partitions"),
+    [
+        ({"subplans_removed": 3}, {}, partitions_of()),  # run-time pruning worked
+        ({}, {"count": 3}, partitions_of(3)),  # too few to matter
+        ({}, {"condition": "(p_{n}.v = 3)"}, partitions_of()),  # not filtered on the key
+        ({}, {"matching": 6}, partitions_of()),  # most partitions had rows: the condition covered them
+        ({}, {}, {}),  # not partitions, as far as the catalog says
+    ],
+)
+def test_unpruned_partitions_stays_quiet_when_the_plan_does_not_argue_it(append_kwargs, scans_kwargs, partitions):
+    from pg_debug.plans.rules import unpruned_partitions
+
+    append = node("Append", ms=20.0, children=partition_scans(**scans_kwargs), **append_kwargs)
+    assert unpruned_partitions(append, context(append, partitions=partitions)) == []
+
+
+def test_a_partition_never_executed_means_run_time_pruning_did_its_job():
+    from pg_debug.plans.rules import unpruned_partitions
+
+    scans = partition_scans()
+    scans[3].actual_loops = 0
+    append = node("Append", ms=20.0, children=scans)
+    assert unpruned_partitions(append, context(append, partitions=partitions_of())) == []
+
+
+# -- The rules that stay quiet without their evidence --------------------------
+
+
+def test_a_limit_with_no_offset_is_not_an_offset():
+    """A LIMIT stops its input once it has enough, so the input produced
+    exactly what was returned."""
+    scan = node("Index Scan", plan_rows=300000, actual_rows=20, parent_relationship="Outer")
+    root = node("Limit", plan_rows=20, actual_rows=20, ms=11.0, children=[scan])
+    assert large_offset(root, context(root)) == []
+
+
+def test_planning_one_relation_is_a_cold_cache_not_the_query():
+    root = node(relation_name="todos")
+    assert planning_time(root, context(root, planning_ms=240.0, execution_ms=180.0)) == []
+
+
+def test_a_trigger_that_is_a_small_share_of_the_execution_is_not_reported():
+    root = node()
+    triggers = [{"Trigger Name": "audit", "Relation": "t", "Time": 3.0, "Calls": 10}]
+    assert trigger_time(root, context(root, execution_ms=200.0, triggers=triggers)) == []
+
+
+def test_an_index_only_scan_that_rarely_visits_the_table_is_fine():
+    root = node("Index Only Scan", actual_rows=100000, heap_fetches=500)
+    assert heap_fetches(root, context(root)) == []
+
+
+def test_jit_on_a_long_query_is_not_reported():
+    root = node()
+    jit = {"Functions": 7, "Timing": {"Total": 40.0}}
+    assert jit_time(root, context(root, execution_ms=60000.0, jit=jit)) == []

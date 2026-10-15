@@ -24,6 +24,12 @@ from typing import TYPE_CHECKING
 from typing import Any
 
 from .activity import ActivityInspector
+from .audit import AuditFinding
+from .audit import AuditReport
+from .audit import CheckOutcome
+from .audit import CheckStatus
+from .audit import SecurityAuditor
+from .audit import UpgradeChecker
 from .client import DATABASE_URL_ENV_VARS
 from .client import AccessMode
 from .client import PgDebug
@@ -46,6 +52,7 @@ from .errors import QueryError
 from .health import DatabaseHealthTool
 from .health import HealthCheckResult
 from .health import HealthType
+from .history import HistoryReport
 from .index import MAX_NUM_INDEX_TUNING_QUERIES
 from .index import DatabaseTuningAdvisor
 from .index import IndexRecommendation
@@ -53,6 +60,8 @@ from .index_use import IndexUse
 from .index_use import IndexUseAnalyzer
 from .index_use import IndexUseFinding
 from .index_use import IndexUseReason
+from .logs import LogReport
+from .logs import analyze_logs
 from .migration import LockLevel
 from .migration import MigrationLinter
 from .migration import StatementReview
@@ -68,12 +77,14 @@ from .plans import PlanFinding
 from .plans import PlanIssue
 from .plans import diagnose_plan
 from .plans.hypothetical import IndexDefinition
+from .plans.shape import PlanShape
 from .plans.tree import ExplainPlanArtifact
 from .plans.tree import PlanNode
 from .schema import ObjectType
 from .schema import SchemaInspector
 from .severity import Confidence
 from .severity import Severity
+from .sharding import ShardReadiness
 from .statistics import StatisticsInspector
 from .sync import SyncPgDebug
 from .top_queries import TopQueriesCalc
@@ -98,6 +109,10 @@ __all__ = [
     "MAX_NUM_INDEX_TUNING_QUERIES",
     "AccessMode",
     "ActivityInspector",
+    "AuditFinding",
+    "AuditReport",
+    "CheckOutcome",
+    "CheckStatus",
     "Confidence",
     "ConfigFinding",
     "ConfigurationReviewer",
@@ -111,6 +126,7 @@ __all__ = [
     "ExtensionRequiredError",
     "HealthCheckResult",
     "HealthType",
+    "HistoryReport",
     "IndexDefinition",
     "IndexRecommendation",
     "IndexTuningError",
@@ -121,6 +137,7 @@ __all__ = [
     "InvalidArgumentError",
     "LLMOptimizerTool",
     "LockLevel",
+    "LogReport",
     "MigrationLinter",
     "MissingDependencyError",
     "ModelFinding",
@@ -135,19 +152,24 @@ __all__ = [
     "PlanFinding",
     "PlanIssue",
     "PlanNode",
+    "PlanShape",
     "QueryContext",
     "QueryError",
     "RuleId",
     "SafeSqlDriver",
     "SchemaInspector",
+    "SecurityAuditor",
     "Severity",
+    "ShardReadiness",
     "SqlDriver",
     "StatementReview",
     "StatisticsInspector",
     "Strategy",
     "SyncPgDebug",
     "TopQueriesCalc",
+    "UpgradeChecker",
     "__version__",
+    "analyze_logs",
     "diagnose_plan",
     "resolve_database_url",
 ]

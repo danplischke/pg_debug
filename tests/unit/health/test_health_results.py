@@ -1,18 +1,23 @@
 """The structured output of the individual health calculators."""
 
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 
 from pg_debug.configuration import MIN_BLOCK_READS
 from pg_debug.db import SqlDriver
+from pg_debug.db.window import CountingWindow
 from pg_debug.health import HealthCheckResult
 from pg_debug.health.checks.buffer import BufferHealthCalc
-from pg_debug.health.checks.connection import ConnectionHealthCalc
 from pg_debug.health.checks.constraint import ConstraintHealthCalc
 from pg_debug.health.checks.index import IndexHealthCalc
 from pg_debug.health.checks.vacuum import VacuumHealthCalc
+from pg_debug.rules import DOCS_URL
 
 
 def make_driver(*result_sets):
@@ -34,8 +39,9 @@ def test_result_to_dict_round_trips():
         "name": "Index bloat",
         "healthy": False,
         "summary": "Bloated indexes found:",
-        "findings": [{"index": "orders_pkey"}],
+        "findings": [{"rule": "index_bloat", "docs": f"{DOCS_URL}#index_bloat", "index": "orders_pkey"}],
         "metrics": {"min_bloat_bytes": 100},
+        "rules": [{"id": "index_bloat", "docs": f"{DOCS_URL}#index_bloat"}],
     }
 
 
@@ -43,6 +49,23 @@ def test_result_defaults_to_no_findings():
     result = HealthCheckResult(name="Vacuum health", healthy=True, summary="ok")
     assert result.findings == []
     assert result.metrics == {}
+    assert result.error is None
+
+
+def test_a_check_that_could_not_run_says_so_and_is_not_healthy():
+    """Not healthy, because it never looked: a caller reading only the flag
+    must not take a check that failed for one that passed."""
+    result = HealthCheckResult.could_not_run("Index bloat", "canceling statement due to statement timeout")
+
+    assert result.to_dict() == {
+        "name": "Index bloat",
+        "healthy": False,
+        "summary": "Could not run: canceling statement due to statement timeout",
+        "findings": [],
+        "metrics": {},
+        "error": "canceling statement due to statement timeout",
+        "rules": [{"id": "index_bloat", "docs": f"{DOCS_URL}#index_bloat"}],
+    }
 
 
 # -- Buffer -----------------------------------------------------------------
@@ -123,43 +146,6 @@ async def test_buffer_hit_rate_without_statistics_is_not_a_problem():
     assert result.healthy is True
     assert result.summary == "No index cache statistics available."
     assert result.metrics["hit_rate_percent"] is None
-
-
-# -- Connections ------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_connection_health_reports_counts():
-    result = await ConnectionHealthCalc(make_driver([{"count": 7}], [{"count": 2}])).connection_health_check()
-
-    assert result.healthy is True
-    assert result.summary == "Connections healthy: 7 total, 2 idle"
-    assert result.metrics == {
-        "total_connections": 7,
-        "idle_connections": 2,
-        "max_total_connections": 500,
-        "max_idle_connections": 100,
-    }
-
-
-@pytest.mark.asyncio
-async def test_connection_health_flags_too_many_connections():
-    calc = ConnectionHealthCalc(make_driver([{"count": 600}], [{"count": 2}]), max_total_connections=500)
-
-    result = await calc.connection_health_check()
-
-    assert result.healthy is False
-    assert result.summary == "High number of connections: 600"
-
-
-@pytest.mark.asyncio
-async def test_connection_health_flags_idle_in_transaction():
-    calc = ConnectionHealthCalc(make_driver([{"count": 10}], [{"count": 200}]), max_idle_connections=100)
-
-    result = await calc.connection_health_check()
-
-    assert result.healthy is False
-    assert result.summary == "High number of connections idle in transaction: 200"
 
 
 # -- Constraints ------------------------------------------------------------
@@ -294,35 +280,118 @@ async def test_duplicate_index_check_reports_the_covering_index():
     ]
 
 
+NOW = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+
+
+def counting(days: float | None, began_with: str | None = "restart"):
+    """The index counters, counting for this many days, or since a start PostgreSQL did not record."""
+    since = NOW - timedelta(days=days) if days is not None else None
+    return patch(
+        "pg_debug.health.checks.index.table_window",
+        AsyncMock(return_value=CountingWindow(since=since, now=NOW, began_with=began_with if since else None)),
+    )
+
+
+def on_version(version: int):
+    return patch("pg_debug.health.checks.index.get_postgres_version", AsyncMock(return_value=version))
+
+
+UNUSED_ROW = {
+    "schema": "public",
+    "table": "orders",
+    "index": "orders_status_idx",
+    "size_bytes": 2 * 1024 * 1024,
+    "index_scans": 3,
+    "last_scan": None,
+    "definition": "CREATE INDEX orders_status_idx ON public.orders USING btree (status)",
+    "primary": False,
+}
+
+
 @pytest.mark.asyncio
 async def test_unused_index_check_reports_scans_and_size():
-    rows = [
-        {
-            "schema": "public",
-            "table": "orders",
-            "index": "orders_status_idx",
-            "size_bytes": 2 * 1024 * 1024,
-            "index_scans": 3,
-            "definition": "CREATE INDEX orders_status_idx ON public.orders USING btree (status)",
-            "primary": False,
-        }
-    ]
+    driver = make_driver([UNUSED_ROW])
 
-    result = await IndexHealthCalc(make_driver(rows)).unused_indexes()
+    with counting(30), on_version(15):
+        result = await IndexHealthCalc(driver).unused_indexes()
 
     assert result.name == "Unused index check"
     assert result.healthy is False
     assert "scanned 3 times and uses 2.0MB" in result.summary
-    assert result.findings == rows
-    assert result.metrics == {"max_scans": 50}
+    assert result.summary.startswith("Rarely used indexes found, counting since 2026-09-14 12:00 UTC (a month):")
+    assert result.findings == [UNUSED_ROW]
+    assert result.metrics == {
+        "max_scans": 50,
+        "min_window_days": 7.0,
+        "counting_since": "2026-09-14T12:00:00+00:00",
+        "counting_seconds": 30 * 86400,
+        "counting_began_with": "restart",
+        "judged": True,
+    }
 
 
 @pytest.mark.asyncio
 async def test_unused_index_check_when_clean():
-    result = await IndexHealthCalc(make_driver([])).unused_indexes()
+    with counting(30), on_version(15):
+        result = await IndexHealthCalc(make_driver([])).unused_indexes()
 
     assert result.healthy is True
-    assert result.summary == "No unused indexes found."
+    assert result.summary == "No unused indexes found in the counters, which have been counting since 2026-09-14 12:00 UTC (a month)."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("began_with", "cause"),
+    [("restart", "after a crash, an immediate shutdown, a failover or a restore"), ("reset", "reset with pg_stat_reset()")],
+)
+async def test_an_index_is_not_called_unused_on_counters_that_started_too_recently(began_with, cause):
+    """The day after a crash every index has been scanned almost never."""
+    driver = make_driver([UNUSED_ROW])
+
+    with counting(0.5, began_with), on_version(15):
+        result = await IndexHealthCalc(driver).unused_indexes()
+
+    assert result.healthy is True
+    assert result.findings == []
+    assert result.summary.startswith(
+        "Index use not judged: the index counters have been counting since 2026-10-14 00:00 UTC (12 hours), "
+        "less than the 7 days an index has to go unscanned before it is called unused."
+    )
+    assert cause in result.summary
+    assert result.metrics["judged"] is False
+    assert result.metrics["counting_seconds"] == 43200
+    # Not even asked: the index statistics would only be ignored.
+    assert driver.execute_query.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_window_postgresql_did_not_record_is_not_long_enough():
+    with counting(None), on_version(15):
+        result = await IndexHealthCalc(make_driver([UNUSED_ROW])).unused_indexes()
+
+    assert result.metrics["judged"] is False
+    assert "counting since a time PostgreSQL did not record" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_the_window_it_takes_can_be_moved():
+    with counting(3), on_version(15):
+        result = await IndexHealthCalc(make_driver([UNUSED_ROW]), min_window_days=2).unused_indexes()
+
+    assert result.healthy is False
+    assert result.metrics["min_window_days"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("version", "selected"), [(16, "ui.last_idx_scan AS last_scan"), (15, "NULL::timestamptz AS last_scan")])
+async def test_when_an_index_was_last_scanned_is_read_from_16(version, selected):
+    driver = make_driver([{**UNUSED_ROW, "last_scan": datetime(2026, 8, 1, tzinfo=UTC) if version >= 16 else None}])
+
+    with counting(30), on_version(version):
+        result = await IndexHealthCalc(driver).unused_indexes()
+
+    assert selected in driver.execute_query.await_args.args[0]
+    assert ("last scanned 2026-08-01" in result.summary) is (version >= 16)
 
 
 @pytest.mark.asyncio

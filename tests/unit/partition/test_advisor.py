@@ -22,7 +22,7 @@ from pg_debug.partition.advisor import _hash_modulus
 from pg_debug.partition.advisor import _months
 from pg_debug.partition.advisor import _parse_bound
 from pg_debug.partition.advisor import _strategy_for
-from pg_debug.partition.advisor import _weigh_workload
+from pg_debug.partition.advisor import weigh_workload
 from pg_debug.partition.result import Strategy
 
 
@@ -88,7 +88,7 @@ def test_a_type_that_cannot_be_a_sensible_key_is_refused():
 
 
 def test_time_is_split_between_what_touches_the_table_and_what_prunes():
-    touching, pruning, _deleting = _weigh_workload(
+    touching, pruning, _deleting = weigh_workload(
         workload(
             ("SELECT * FROM events WHERE created_at > now()", 70.0),
             ("SELECT count(*) FROM events", 30.0),
@@ -102,7 +102,7 @@ def test_time_is_split_between_what_touches_the_table_and_what_prunes():
 
 
 def test_a_query_against_another_table_is_not_counted():
-    touching, _pruning, _deleting = _weigh_workload(
+    touching, _pruning, _deleting = weigh_workload(
         workload(("SELECT * FROM orders WHERE created_at > now()", 500.0)),
         "events",
         "public.events",
@@ -114,7 +114,7 @@ def test_a_query_against_another_table_is_not_counted():
 def test_a_same_named_table_in_another_schema_is_a_different_table():
     """Counting its queries here would dilute the share of the table being
     assessed with time it never spent."""
-    touching, _pruning, _deleting = _weigh_workload(
+    touching, _pruning, _deleting = weigh_workload(
         workload(("SELECT * FROM archive.events WHERE created_at > now()", 500.0)),
         "events",
         "public.events",
@@ -126,7 +126,7 @@ def test_a_same_named_table_in_another_schema_is_a_different_table():
 def test_a_delete_that_prunes_is_recorded_separately():
     """It is the strongest argument there is, because the delete becomes a
     DROP rather than a scan and a vacuum."""
-    _touching, _pruning, deleting = _weigh_workload(
+    _touching, _pruning, deleting = weigh_workload(
         workload(("DELETE FROM events WHERE created_at < now()", 40.0)),
         "events",
         "public.events",
@@ -136,7 +136,7 @@ def test_a_delete_that_prunes_is_recorded_separately():
 
 
 def test_an_unparseable_query_does_not_stop_the_rest_being_weighed():
-    touching, _pruning, _deleting = _weigh_workload(
+    touching, _pruning, _deleting = weigh_workload(
         workload(
             ("this is not sql <<<", 999.0),
             ("SELECT * FROM events WHERE created_at > now()", 10.0),
@@ -157,6 +157,8 @@ def advisor_with(tables, columns, keys, queries):
     advisor = PartitionAdvisor(driver, min_table_bytes=0)
 
     async def answer(query, params=None):
+        if "FROM pg_extension e" in query:
+            return [SqlDriver.RowResult(cells={"schema": "public", "version": "1.10"})]
         if "pg_stat_statements" in query:
             return [SqlDriver.RowResult(cells=row) for row in queries]
         if "indisunique" in query:

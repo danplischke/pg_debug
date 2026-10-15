@@ -87,14 +87,14 @@ def test_the_method_keyword_reaches_the_client(pg, tuning_method):
     with patch.object(pg.client, "analyze_query_indexes", AsyncMock(return_value={})) as analyze:
         pg.analyze_query_indexes(["SELECT 1"], method=tuning_method)
 
-    analyze.assert_awaited_once_with(["SELECT 1"], max_index_size_mb=10000, method=tuning_method, llm_model=None)
+    analyze.assert_awaited_once_with(["SELECT 1"], max_index_size_mb=10000, method=tuning_method, llm_model=None, max_regression_factor=0.1)
 
 
 def test_the_method_keyword_reaches_the_client_for_workloads(pg):
     with patch.object(pg.client, "analyze_workload_indexes", AsyncMock(return_value={})) as analyze:
         pg.analyze_workload_indexes(method="llm", max_index_size_mb=50)
 
-    analyze.assert_awaited_once_with(max_index_size_mb=50, method="llm", llm_model=None)
+    analyze.assert_awaited_once_with(max_index_size_mb=50, method="llm", llm_model=None, max_regression_factor=0.1)
 
 
 def test_exceptions_propagate_to_the_caller(pg):
@@ -172,7 +172,7 @@ def test_sync_forwards_the_llm_model(pool):
 def test_review_data_model_delegates_to_the_async_client(pg):
     with patch.object(type(pg.client), "review_data_model", AsyncMock(return_value=[])) as review:
         assert pg.review_data_model(schema="reporting", proven_only=True) == []
-        review.assert_awaited_once_with(rules=RuleId.ALL, schema="reporting", min_rows=DEFAULT_MIN_ROWS, proven_only=True)
+        review.assert_awaited_once_with(rules=RuleId.ALL, schema="reporting", min_rows=DEFAULT_MIN_ROWS, proven_only=True, static=False)
 
 
 def test_diagnose_query_delegates_to_the_async_client(pg):
