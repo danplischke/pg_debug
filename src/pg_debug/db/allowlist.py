@@ -512,6 +512,14 @@ ALLOWED_FUNCTIONS: set[str] = {
     "pg_last_wal_receive_lsn",
     "pg_last_wal_replay_lsn",
     "pg_last_xact_replay_timestamp",
+    # WAL position and distance, multixact age and collation library versions:
+    # each reads a counter or asks the C library or ICU for a version string,
+    # and writes nothing
+    "pg_current_wal_lsn",
+    "pg_wal_lsn_diff",
+    "mxid_age",
+    "pg_collation_actual_version",
+    "pg_database_collation_actual_version",
     # Hypopg functions
     "hypopg",
     "hypopg_create_index",

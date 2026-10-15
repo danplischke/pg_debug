@@ -49,6 +49,7 @@ HEALTH_IDENTITY_KEYS = (
     "sequence",
     "column",
     "constraint",
+    "collation",
     "slot_name",
     "database",
     "kind",
@@ -254,7 +255,7 @@ def describe_key(key: Mapping[str, Any]) -> str:
         parts.append(f"{schema}.{table}")
     elif table:
         parts.append(str(table))
-    for name in ("index", "name", "sequence", "column", "constraint", "slot_name", "setting", "kind", "covered_by"):
+    for name in ("index", "name", "sequence", "column", "constraint", "collation", "slot_name", "database", "setting", "kind", "covered_by"):
         if key.get(name):
             parts.append(str(key[name]))
     # A session's identity reads as nothing without the field names.
