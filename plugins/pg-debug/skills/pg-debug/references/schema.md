@@ -112,9 +112,57 @@ If nothing is recommended, that is a finding, not a failure to find one.
 ## Once a table is partitioned
 
 `partitions` judges plain tables only, so on a table that is already
-partitioned it says nothing. What goes wrong afterwards shows in plans, in the
-lock manager and in the DDL that maintains the partitions, and pg-debug reaches
-those through `explain`, `activity`, `check-migration` and `execute`.
+partitioned it says nothing. `health --type partition` is the check for those:
+
+```bash
+pg-debug health --type partition
+pg-debug --json health --type partition     # each finding's kind, evidence and recipe
+```
+
+Each finding has a `kind`, a `severity`, a `confidence` and its `evidence`:
+
+- `premade_partitions`: a range partition on one time column whose last
+  partition ends within one partition's width of `now()` (medium), or has
+  ended (high). Rows for later times go to the DEFAULT partition, or fail to
+  insert with "no partition of relation found for row" when there is none. It
+  carries a `recipe` for the next partition, the lock-aware one below. It says
+  itself that a table no longer receiving new rows makes this expected; ask
+  before relaying it as urgent on an archive.
+- `default_partition_rows`: the DEFAULT partition holds rows. Every later
+  ATTACH or `PARTITION OF` scans it under ACCESS EXCLUSIVE, and a partition
+  whose range covers any of its rows is refused until they are moved out.
+- `unique_per_partition` (candidate): a unique index created on partitions
+  and on no index of the parent holds within each partition only. Whether
+  anyone expects it to be global is the guess; ask.
+- `pruning_disabled`: `enable_partition_pruning` is off in the configuration,
+  for a role or database (`usename`, `datname`), or in the query context.
+- `lock_pressure` (candidate): a query can lock more relations than the fast
+  path holds (below). Estimated from `pg_stat_statements`: the share of the
+  recorded time on the table that does not filter on the partition key. With
+  nothing recorded it is the worst case, said in `evidence.basis`; `confirm`
+  says how to count a real query's locks.
+- `partition_count`: over 1,000 partitions, or three levels deep.
+
+What goes wrong otherwise shows in plans, in the lock manager and in the DDL
+that maintains the partitions, and pg-debug reaches those through `diagnose`,
+`explain`, `activity`, `check-migration` and `execute`.
+
+### Adding a partition without blocking the table
+
+`CREATE TABLE ... PARTITION OF` takes ACCESS EXCLUSIVE on the parent, and
+scans a DEFAULT partition holding rows under it. `ATTACH PARTITION` takes
+SHARE UPDATE EXCLUSIVE on the parent, ACCESS EXCLUSIVE on the table being
+attached and on the DEFAULT, and scans both unless a validated CHECK on the
+new table implies the bound and one on the DEFAULT excludes the range
+(measured on PostgreSQL 16). The recipe `premade_partitions` and the
+`partitions` sketch give is that: create the table `LIKE` the parent, add the
+CHECK `NOT VALID`, load it, `VALIDATE` it (no blocking), the same exclusion
+on the DEFAULT, attach, drop the CHECKs. `check-migration` reports every step
+of it at low severity, and reports `CREATE TABLE ... PARTITION OF` with the
+recipe as its safer form, and `DETACH PARTITION` with `CONCURRENTLY`
+(PostgreSQL 14 and later, outside a transaction block, not with a DEFAULT
+partition). A VALIDATE on the DEFAULT fails if it holds rows for the new range:
+that is the rows to move first, not a reason to skip the CHECK.
 
 ### Pruning
 
@@ -156,7 +204,9 @@ timestamp key `ts`, that was the outcome when the comparison was on an
 expression of the key (`ts::date = ...`, `date_trunc('day', ts) = ...`) and
 when it called a volatile function (`clock_timestamp()`); comparing the bare
 key, with a constant or with `now()`, pruned. Rewrite the predicate to compare
-the key itself.
+the key itself. `diagnose` reports that shape as `unpruned_partitions`, a
+candidate: every partition scanned and filtered on the key, nothing removed,
+most of them returning no rows.
 
 A generic plan is a different matter. It is planned with no values, so the
 planner prunes nothing, and the pruning moves to execution start: a prepared

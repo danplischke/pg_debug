@@ -30,7 +30,12 @@ statement), `vacuum` (transaction ID wraparound, autovacuum backlog, and what
 is holding the vacuum horizon), `sequence` (approaching
 maximum), `replication`, `buffer` (cache hit rates), `constraint` (invalid
 constraints), `statistics` (never analyzed or drifted), `scan` (tables read
-sequentially far more than through an index, charged in bytes read), `all`.
+sequentially far more than through an index, charged in bytes read),
+`partition` (partitioned tables that exist: the next time partition not
+created yet, rows in a DEFAULT partition, unique indexes that hold only per
+partition, pruning switched off, and trees a query can lock more of than the
+fast path holds; see [schema.md](schema.md#once-a-table-is-partitioned)),
+`all`.
 
 In JSON each check has `healthy`, `summary`, `findings` (the flagged objects)
 and `metrics` (the numbers and thresholds behind the verdict). A check that

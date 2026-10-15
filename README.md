@@ -153,7 +153,7 @@ options: `--role ROLE`, `--set NAME=VALUE` (repeatable), `--config FILE` and
 `--no-config`.
 
 Health checks are `index`, `connection`, `vacuum`, `sequence`, `replication`,
-`buffer`, `constraint`, `statistics`, `table`, `scan` and `all`.
+`buffer`, `constraint`, `statistics`, `table`, `scan`, `partition` and `all`.
 
 `health`, `model` and `config` can gate a build with `--exit-code`. The
 trouble with adopting such a gate is the first run: an existing database has
@@ -187,6 +187,37 @@ reading reaches 1 GB, the table is at least 10 MB, and sequential scans
 outnumber index scans. The queries behind the scans are not visible from the
 counters; `top-queries` lists them and `tune-queries` says which index serves
 them.
+
+`partition` looks at the partitioned tables that already exist, where
+`partitions` only advises whether to create one. Each finding has a `kind`:
+`premade_partitions` (a range-partitioned time table whose last partition ends
+within one partition's width of `now()`, or has ended, with the statements that
+add the next one), `default_partition_rows` (rows in a DEFAULT partition, which
+every later ATTACH must scan under ACCESS EXCLUSIVE and which block a partition
+whose range covers them), `unique_per_partition` (a unique index created on
+partitions but on no index of the parent, so unique within each partition
+only), `pruning_disabled` (`enable_partition_pruning = off` in the
+configuration, for a role or database, or in the query context),
+`lock_pressure` (a query that can lock more of the tree's tables and indexes
+than the 16 fast-path lock slots a backend has before PostgreSQL 18, or than
+`max_locks_per_transaction` rounded up to a power of two from 18; estimated
+from how much of the recorded time in `pg_stat_statements` filters on the
+partition key, and stated as the worst case where nothing is recorded) and
+`partition_count` (more than 1,000 partitions, or partitioned three levels
+deep). `lock_pressure` and `unique_per_partition` are candidates, with
+`confidence: "candidate"`; the rest are read from the catalog.
+
+The statements for the next partition are the lock-aware way to add one:
+`CREATE TABLE ... PARTITION OF` takes ACCESS EXCLUSIVE on the parent, while
+`ATTACH PARTITION` takes SHARE UPDATE EXCLUSIVE, and a validated CHECK on the
+new table, and one on the DEFAULT partition excluding the new range, let it
+skip both scans. `check-migration` reviews `ATTACH PARTITION`,
+`DETACH PARTITION` and `CREATE TABLE ... PARTITION OF` the same way (measured
+on PostgreSQL 16), and reports the recipe at low severity throughout.
+`partitions` ends its range sketch with the same recipe for the month after
+the last one, and `diagnose` reports an Append that scanned every partition it
+filtered on the partition key, most of them for no rows
+(`unpruned_partitions`), which is a condition pruning could not read.
 
 `table` estimates how much of each table's heap holds no live rows, from
 `pg_stats` and `pg_class` — no extension needed. It builds a row the way
