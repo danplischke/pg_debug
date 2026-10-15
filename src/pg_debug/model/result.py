@@ -39,6 +39,9 @@ class RuleId(str, Enum):
     BLANK_PADDED_CHAR = "blank_padded_char"
     NULLABLE_NEVER_NULL = "nullable_never_null"
     LOW_CARDINALITY_TEXT = "low_cardinality_text"
+    JSON_COLUMN = "json_column"
+    PRIMARY_KEY_OVERFLOW = "primary_key_overflow"
+    MOSTLY_NULL_INDEX = "mostly_null_index"
     ALL = "all"
 
     @classmethod

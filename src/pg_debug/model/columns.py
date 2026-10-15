@@ -29,6 +29,16 @@ MAX_DISTINCT_VALUES = 32
 #: than that has nothing to gain from becoming one.
 _LOOKUP_KEY_BYTES = 4
 
+# json keeps the text it was given; jsonb keeps the parsed value. Only the text
+# can hold duplicate keys, so a duplicate is what would make the conversion
+# change a value rather than just its spelling. Checked at the top level, where
+# json_object_keys reads; CASE, because a scalar or array has no keys to count.
+_DUPLICATE_KEYS = (
+    "CASE WHEN json_typeof({column}) = 'object' "
+    "THEN (SELECT count(*) FROM json_object_keys({column})) <> (SELECT count(*) FROM jsonb_object_keys({column}::jsonb)) "
+    "ELSE false END"
+)
+
 # The statistics-driven rules need pg_stats in the FROM list rather than in an
 # EXISTS, so they can report the numbers they judged on. `inherited` rows
 # describe a partitioned parent's whole tree and would double-count.
@@ -67,6 +77,12 @@ NAIVE_TIMESTAMP_SQL = f"""
 SELECT {_COLUMN_IDENTITY}
 {_column_source()}
   AND t.typname = 'timestamp'
+"""
+
+JSON_COLUMN_SQL = f"""
+SELECT {_COLUMN_IDENTITY}
+{_column_source()}
+  AND t.typname = 'json'
 """
 
 BLANK_PADDED_CHAR_SQL = f"""
@@ -169,6 +185,55 @@ def _naive_timestamp_finding(row: dict[str, Any]) -> ModelFinding:
             "row_count": int(row["row_count"] or 0),
             "table_bytes": int(row["table_bytes"] or 0),
         },
+        rank=float(row["table_bytes"] or 0),
+    )
+
+
+async def json_columns(sql_driver: SqlDriver, options: ReviewOptions) -> list[ModelFinding]:
+    """Find ``json`` columns, where ``jsonb`` is almost always what was meant.
+
+    ``json`` stores the text exactly as it arrived and parses it again every
+    time an operator reads it; it has no equality, no containment and no GIN
+    index. ``jsonb`` stores the parsed value. What ``jsonb`` gives up is the
+    text itself: whitespace, the order of keys and duplicate keys (the last
+    one wins). The catalog cannot say whether anything relies on those, so
+    this is a candidate, and the verify query counts the rows whose value the
+    conversion would change rather than respell.
+    """
+    sql, params = scoped(JSON_COLUMN_SQL, options, "n.nspname")
+    rows = await SafeSqlDriver.execute_param_query(sql_driver, sql, params)
+    return [_json_column_finding(dict(row.cells)) for row in rows or []]
+
+
+def _json_column_finding(row: dict[str, Any]) -> ModelFinding:
+    table_ident = row["table_ident"]
+    column_ident = row["column_ident"]
+    return ModelFinding(
+        rule=RuleId.JSON_COLUMN,
+        confidence=Confidence.CANDIDATE,
+        severity=Severity.LOW,
+        schema=row["schema"],
+        table=row["table"],
+        columns=[row["column"]],
+        summary=f"{row['schema']}.{row['table']}.{row['column']} is json; jsonb would store the parsed value.",
+        detail=(
+            "json keeps the text exactly as written and parses it again on every read, and it has no equality "
+            "operator, no containment (@>) and no GIN index. jsonb stores the parsed value and has all three. "
+            "It is a candidate rather than a fact because the catalog cannot say whether anything reads the "
+            "text back expecting its original key order, whitespace or duplicate keys, which jsonb does not "
+            "keep. The verify query counts the rows with a duplicate top-level key, the one case where the "
+            "conversion changes a value rather than its spelling. The conversion rewrites the table under an "
+            "ACCESS EXCLUSIVE lock."
+        ),
+        remediation=[
+            f"ALTER TABLE {table_ident} ALTER COLUMN {column_ident} TYPE jsonb USING {column_ident}::jsonb;",
+        ],
+        evidence={
+            "column_type": row["column_type"],
+            "row_count": int(row["row_count"] or 0),
+            "table_bytes": int(row["table_bytes"] or 0),
+        },
+        verify=f"SELECT count(*) FROM {table_ident} WHERE {_DUPLICATE_KEYS.format(column=column_ident)};",
         rank=float(row["table_bytes"] or 0),
     )
 
@@ -351,6 +416,7 @@ def _low_cardinality_finding(row: dict[str, Any]) -> ModelFinding:
 __all__ = [
     "MAX_DISTINCT_VALUES",
     "blank_padded_chars",
+    "json_columns",
     "low_cardinality_text",
     "naive_timestamps",
     "nullable_never_null",
