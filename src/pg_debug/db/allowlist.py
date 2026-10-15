@@ -512,6 +512,13 @@ ALLOWED_FUNCTIONS: set[str] = {
     "pg_last_wal_receive_lsn",
     "pg_last_wal_replay_lsn",
     "pg_last_xact_replay_timestamp",
+    # The WAL write position: a read of shared memory, which shard readiness
+    # samples twice for the write rate where pg_stat_wal (14) is missing.
+    "pg_current_wal_lsn",
+    # Aurora's history: pg_stat_statements with storage columns, and one row
+    # per tracked plan. Both only read what Aurora has recorded.
+    "aurora_stat_statements",
+    "aurora_stat_plans",
     # Hypopg functions
     "hypopg",
     "hypopg_create_index",

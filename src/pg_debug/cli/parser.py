@@ -23,6 +23,7 @@ from ..partition import DEFAULT_MIN_PRUNING_SHARE
 from ..partition import DEFAULT_MIN_TABLE_BYTES
 from ..plans import DEFAULT_MIN_RATIO
 from ..schema import ObjectType
+from ..sharding import DEFAULT_INTERVAL_SECONDS
 from .commands import cmd_activity
 from .commands import cmd_check_migration
 from .commands import cmd_column_stats
@@ -32,12 +33,14 @@ from .commands import cmd_diagnose
 from .commands import cmd_execute
 from .commands import cmd_explain
 from .commands import cmd_health
+from .commands import cmd_history
 from .commands import cmd_index_use
 from .commands import cmd_locks
 from .commands import cmd_model
 from .commands import cmd_objects
 from .commands import cmd_partitions
 from .commands import cmd_schemas
+from .commands import cmd_shard_readiness
 from .commands import cmd_top_queries
 from .commands import cmd_tune_queries
 from .commands import cmd_tune_workload
@@ -50,6 +53,7 @@ from .render import render_activity
 from .render import render_column_stats
 from .render import render_configuration_review
 from .render import render_health_checks
+from .render import render_history
 from .render import render_index_recommendations
 from .render import render_index_use
 from .render import render_lock_tree
@@ -60,6 +64,7 @@ from .render import render_partition_candidates
 from .render import render_plan
 from .render import render_plan_findings
 from .render import render_rows
+from .render import render_shard_readiness
 from .render import render_vacuum_progress
 
 PROG = "pg-debug"
@@ -431,6 +436,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="How many recorded queries to judge by (default: 200).",
     )
     partitions.set_defaults(func=cmd_partitions, render=render_partition_candidates)
+
+    shard_readiness = subparsers.add_parser("shard-readiness", help='Say whether to shard, usually "not yet", with the figure behind each reason')
+    shard_readiness.add_argument(
+        "-i",
+        "--interval",
+        type=float,
+        default=DEFAULT_INTERVAL_SECONDS,
+        metavar="SECONDS",
+        help=f"Sample the WAL, buffer evictions and checkpoints over this many seconds (default: {DEFAULT_INTERVAL_SECONDS:g}).",
+    )
+    shard_readiness.set_defaults(func=cmd_shard_readiness, render=render_shard_readiness)
+
+    history = subparsers.add_parser(
+        "history", help="Read the history the platform keeps (Azure Query Store, Aurora, Cloud SQL/AlloyDB, Neon) and pg_qualstats, pg_wait_sampling"
+    )
+    history.add_argument("-n", "--limit", type=int, default=10, help="Rows to read from each source (default: 10).")
+    history.set_defaults(func=cmd_history, render=render_history)
 
     check_migration = subparsers.add_parser("check-migration", help="Review a migration for the locks it takes before running it")
     check_migration.add_argument("sql", help="Migration file, SQL, or - to read it from stdin")

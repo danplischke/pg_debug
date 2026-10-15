@@ -28,6 +28,7 @@ from .db.privileges import StatisticsAccess
 from .health import HealthCheckResult
 from .health import HealthType
 from .health.checks.index import MIN_WINDOW_DAYS
+from .history import HistoryReport
 from .index_use import IndexUse
 from .migration import StatementReview
 from .model import DEFAULT_MIN_ROWS
@@ -41,6 +42,8 @@ from .plans import PlanFinding
 from .plans import PlanInput
 from .plans.tree import ExplainPlanArtifact
 from .schema import ObjectType
+from .sharding import DEFAULT_INTERVAL_SECONDS
+from .sharding import ShardReadiness
 from .top_queries import QuerySample
 
 T = TypeVar("T")
@@ -256,6 +259,14 @@ class SyncPgDebug:
             min_pruning_share=min_pruning_share,
             limit=limit,
         )
+
+    def assess_shard_readiness(self, interval_seconds: float = DEFAULT_INTERVAL_SECONDS) -> ShardReadiness:
+        """Say whether to shard, which usually means "not yet", with the figure behind each reason."""
+        return self._call(self._client.assess_shard_readiness, interval_seconds=interval_seconds)
+
+    def read_history(self, limit: int = 10) -> HistoryReport:
+        """Read the history the platform and the installed extensions keep, and how far back each goes."""
+        return self._call(self._client.read_history, limit=limit)
 
     # -- Live activity -------------------------------------------------------
 

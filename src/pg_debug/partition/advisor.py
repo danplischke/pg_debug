@@ -224,6 +224,14 @@ class PartitionAdvisor:
             by_table.setdefault(f"{cells['schema']}.{cells['table']}", []).append(cells)
         return by_table
 
+    async def read_workload(self, limit: int = 200) -> list[dict[str, Any]]:
+        """The recorded workload this advisor judges by: ``query``, ``weight`` (total execution time) and ``calls``.
+
+        Shard readiness weighs a routing key with the same arithmetic, so it
+        reads the same statements.
+        """
+        return await self._workload(None, limit)
+
     async def _workload(self, query_list: list[str] | None, limit: int) -> list[dict[str, Any]]:
         """The queries to judge by, with the weight each one carries."""
         if query_list:
