@@ -193,6 +193,10 @@ ALLOWED_FUNCTIONS: set[str] = {
     "trim_array",
     "unnest",
     "any",
+    # Set-returning functions that compute values and read nothing. A call in
+    # FROM is checked against this list like any other.
+    "generate_series",
+    "generate_subscripts",
     # String functions
     "ascii",
     "bit_length",

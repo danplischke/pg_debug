@@ -788,3 +788,42 @@ async def test_a_statement_that_failed_is_logged_once_and_a_timeout_in_one_line(
     shown = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
     assert shown == ["Query execution timed out after 0.01 seconds"]
     assert any("pg_class" in record.getMessage() for record in caplog.records if record.levelno == logging.DEBUG)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query",
+    [
+        "SELECT * FROM pg_terminate_backend(123)",
+        "SELECT * FROM pg_catalog.pg_cancel_backend(123) AS c",
+        "SELECT * FROM pg_stat_activity a, LATERAL pg_terminate_backend(a.pid)",
+        "SELECT * FROM ROWS FROM (pg_reload_conf())",
+        "SELECT * FROM (VALUES (pg_terminate_backend(123))) v",
+        "VALUES (pg_reload_conf())",
+    ],
+    ids=["from", "from-qualified", "lateral", "rows-from", "values-in-from", "values"],
+)
+async def test_a_function_is_checked_wherever_the_query_calls_it(safe_driver, mock_sql_driver, query):
+    """pglast nests a function in FROM, and a VALUES row, a sequence deeper
+    than anything else. A walk one level into sequences never reached them,
+    and restricted mode ran pg_terminate_backend from FROM."""
+    with pytest.raises(QueryError, match=r"function [a-z_.]+ is not allowed"):
+        await safe_driver.execute_query(query)
+
+    mock_sql_driver.execute_query.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query",
+    [
+        "SELECT n FROM generate_series(1, 3) AS g(n)",
+        "SELECT * FROM unnest(ARRAY[1, 2]) WITH ORDINALITY AS u(v, i)",
+        "SELECT * FROM hypopg()",
+        "SELECT * FROM (VALUES (1, 'a'), (2, 'b')) v(n, s)",
+    ],
+)
+async def test_an_allowed_function_in_from_still_runs(safe_driver, mock_sql_driver, query):
+    await safe_driver.execute_query(query)
+
+    mock_sql_driver.execute_query.assert_awaited_once()

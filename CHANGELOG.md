@@ -882,6 +882,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drops its hypothetical indexes in the transaction that created them, after
   the plan, and when the plan fails or is cancelled, as restricted mode's
   timeout and Ctrl-C cancel it.
+- Restricted mode ran functions its allowlist refuses when the query called
+  them in `FROM` or in a `VALUES` list: `SELECT * FROM
+  pg_terminate_backend(12345)` terminated the session it named, where
+  `SELECT pg_terminate_backend(12345)` was refused. The validator walked one
+  level into each list in the parse tree, and pglast nests a function in
+  `FROM`, and the rows of `VALUES`, a list deeper. The read-only transaction
+  stopped writes to tables, but not a function that signals another backend,
+  reloads the configuration or reaches outside the transaction. Every call is
+  now checked wherever it appears. `generate_series` and
+  `generate_subscripts`, which only compute values, join the allowlist, since
+  they had passed only through the gap.
 
 - The skill's Python reference ran a query with a setting by issuing
   `SET LOCAL` in a pinned session. Every statement commits on its own, so the
