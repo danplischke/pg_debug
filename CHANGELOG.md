@@ -447,6 +447,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `file:line` it came from, and a kind of event that is absent is reported
   with the setting it depends on (`log_lock_waits`, `log_temp_files`,
   `log_autovacuum_min_duration`), since a quiet log is not a healthy server.
+- Index tuning checks its own answer before giving it, and says what it
+  refused. The search optimises the workload's total cost, so an index that
+  made one query dearer could ride on another's improvement, two indexes
+  where one would serve both were both recommended, and an index the greedy
+  search chose early could stay in the set after a later one took over its
+  queries, costing writes for nothing. Now every query is re-costed against
+  the final set and an index that makes any query cost more than 1.1 times
+  its baseline is refused (`--max-regression-factor`,
+  `max_regression_factor=`; Azure's default, and a cost bound, not a time
+  bound); indexes sharing a leading column are merged where one serves every
+  query within that bound; and an index no plan reads is refused. Each
+  recommendation lists the queries whose plan reads it (`queries_using`), the
+  `llm` method lists the alternatives it did not choose with their costs, and
+  the result carries `regression_check`, `consolidations`,
+  `refused_candidates` and `workload`, which for `tune-workload` holds the
+  window `pg_stat_statements` counted the sample in.
+
+- `tune-queries` without HypoPG returns index candidates instead of only the
+  hint. Where HypoPG can be neither used nor created (Cloud SQL, Lakebase and
+  the other platforms that do not offer it, or a server without the package),
+  the dta method used to stop with `ExtensionRequiredError`. It now infers
+  candidates from `pg_stats` with PgHero's heuristic, grades each, marks it
+  `candidate`, and says in the result that the planner costed none of them;
+  what it examined and refused is listed with the figure. On Cloud SQL and
+  AlloyDB it adds `google_db_advisor_recommend_indexes()` where that
+  extension is installed, outside restricted mode. That call is untested:
+  neither platform was available.
 
 ### Changed
 
@@ -949,6 +976,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bigint`'s limit, so one at 32,000 of its 32,767 values looked as though it
   had barely started. Every type but `integer` was taken for `bigint`; it now
   uses the limit of the column's own type.
+- Two runs of `tune-queries` or `tune-workload` over the same workload could
+  recommend different indexes: `(b, a)` in one, `(a, b)` in the next, or
+  another set altogether. Each candidate's column order, and the order the
+  search broke ties in, came from iterating a Python set, which changes from
+  one process to the next. Both are now sorted, so the same workload and
+  statistics give the same recommendations; apply order follows each index's
+  benefit on its own.
 
 ## [0.2.0] - 2026-10-06
 

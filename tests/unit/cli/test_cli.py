@@ -636,7 +636,10 @@ def test_tune_queries_reads_stdin_as_utf8_too(pg_client, monkeypatch):
 
     assert run(["tune-queries", "-"])[0] == 0
     pg_client.analyze_query_indexes.assert_awaited_once_with(
-        ["SELECT * FROM orders WHERE note = 'Größe'", "SELECT * FROM orders WHERE note = '表'"], max_index_size_mb=10000, method="dta"
+        ["SELECT * FROM orders WHERE note = 'Größe'", "SELECT * FROM orders WHERE note = '表'"],
+        max_index_size_mb=10000,
+        method="dta",
+        max_regression_factor=0.1,
     )
 
 
@@ -1071,7 +1074,7 @@ def test_tune_queries_collects_queries(pg_client):
     pg_client.analyze_query_indexes = AsyncMock(return_value={"recommendations": []})
 
     assert run(["tune-queries", "SELECT 1", "SELECT 2", "--max-index-size-mb", "50"])[0] == 0
-    pg_client.analyze_query_indexes.assert_awaited_once_with(["SELECT 1", "SELECT 2"], max_index_size_mb=50, method="dta")
+    pg_client.analyze_query_indexes.assert_awaited_once_with(["SELECT 1", "SELECT 2"], max_index_size_mb=50, method="dta", max_regression_factor=0.1)
 
 
 def test_tune_workload_renders_recommendations(pg_client):

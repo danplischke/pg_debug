@@ -62,7 +62,14 @@ async def test_static_model_review_runs_only_the_catalog_rules():
     with patch.dict(reviewer.RULES, rules):
         await ModelReviewer(driver).review(static=True)
 
-    assert sorted(ran) == ["blank_padded_char", "foreign_key_type_mismatch", "json_column", "missing_primary_key", "naive_timestamp", "unindexed_foreign_key"]
+    assert sorted(ran) == [
+        "blank_padded_char",
+        "foreign_key_type_mismatch",
+        "json_column",
+        "missing_primary_key",
+        "naive_timestamp",
+        "unindexed_foreign_key",
+    ]
 
 
 @pytest.mark.asyncio

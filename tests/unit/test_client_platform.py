@@ -68,9 +68,15 @@ async def test_tuning_without_hypopg_says_what_this_platform_offers(pg):
         patch("pg_debug.client.detect_platform", AsyncMock(return_value=CLOUD_SQL)),
         patch("pg_debug.client.TextPresentation") as presentation_cls,
     ):
+        result = await pg.analyze_query_indexes(["SELECT 1"])
         with pytest.raises(ExtensionRequiredError) as excinfo:
-            await pg.analyze_query_indexes(["SELECT 1"])
+            await pg.analyze_query_indexes(["SELECT 1"], method="llm")
 
+    # The dta method falls back to candidates from statistics, and says why.
+    assert result["costed"] is False
+    assert "Cloud SQL does not offer" in result["hypopg"]
+    assert "apt-get" not in result["hypopg"]
+    # The llm method cannot do without the planner, and refuses as before.
     assert "Cloud SQL does not offer" in str(excinfo.value)
     assert "apt-get" not in str(excinfo.value)
     presentation_cls.return_value.analyze_queries.assert_not_called()

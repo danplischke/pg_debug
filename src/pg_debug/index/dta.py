@@ -19,23 +19,15 @@ from ..errors import IndexTuningError
 from ..parsing import ColumnCollector
 from ..parsing import TableAliasVisitor
 from ..parsing import resolve_table_reference
-from ..queries.hypopg import HYPOPG_RESET_SQL
+from .base import DEFAULT_MAX_REGRESSION_FACTOR
 from .base import DEFAULT_WRITE_WEIGHT
+from .base import HYPOTHETICAL_INDEX_SIZES_SQL as HYPOTHETICAL_INDEX_SIZES_SQL
 from .base import IndexRecommendation
 from .base import IndexTuningBase
 from .base import candidate_str
 from .base import pp_list
 
 logger = logging.getLogger(__name__)
-
-# Sizes of the hypothetical indexes created so far.
-#
-# This reads the hypopg() function rather than the hypopg_list_indexes view it
-# backs. HypoPG's extension script grants no privileges on its views, and a
-# view is private to its owner by default, so any role that did not create the
-# extension gets "permission denied for view hypopg_list_indexes". Functions
-# default to EXECUTE for PUBLIC, and hypopg() exposes both columns needed here.
-HYPOTHETICAL_INDEX_SIZES_SQL = "SELECT indexname AS index_name, hypopg_relation_size(indexrelid) AS index_size FROM hypopg();"
 
 #: Below this average width, an unbounded text column holds short strings — a
 #: status flag, a country code — and warning that its index rows might not fit
@@ -57,6 +49,7 @@ class DatabaseTuningAdvisor(IndexTuningBase):
         pareto_alpha: float = 2.0,
         write_weight: float = DEFAULT_WRITE_WEIGHT,
         min_time_improvement: float = 0.1,
+        max_regression_factor: float = DEFAULT_MAX_REGRESSION_FACTOR,
     ):
         """
         :param sql_driver: Database access
@@ -69,8 +62,10 @@ class DatabaseTuningAdvisor(IndexTuningBase):
         :param write_weight: how heavily index maintenance weighs against query
             time. 0 ignores writes, as this did before it was measured.
         :param min_time_improvement: stop when relative improvement falls below this threshold
+        :param max_regression_factor: how far the recommended set may raise
+            any one query's planner cost over its baseline, as a fraction
         """
-        super().__init__(sql_driver)
+        super().__init__(sql_driver, max_regression_factor=max_regression_factor)
         self.budget_mb = budget_mb
         self.max_runtime_seconds = max_runtime_seconds
         self.max_index_width = max_index_width
@@ -170,9 +165,11 @@ class DatabaseTuningAdvisor(IndexTuningBase):
             table_columns = {table: cols for table, cols in table_columns.items() if table in indexable}
 
         candidates = []
-        for table, cols in table_columns.items():
+        for table, cols in sorted(table_columns.items()):
             # TODO: Optimize by prioritizing columns from filters/joins; current approach generates all combinations
-            col_list = list(cols)
+            # Sorted, so each combination's column order is the same on every
+            # run; a set's order changes from one process to the next.
+            col_list = sorted(cols)
             for width in range(1, min(self.max_index_width, len(cols)) + 1):
                 for combo in combinations(col_list, width):
                     candidates.append(IndexRecommendation(table=table, columns=tuple(combo)))
@@ -190,34 +187,8 @@ class DatabaseTuningAdvisor(IndexTuningBase):
         self.dta_trace(f"Filtered to {len(filtered_candidates)} after removing existing indexes.")
         self.dta_trace(f"Filtered to {len(condition_filtered1)} after removing unused columns.")
         self.dta_trace(f"Filtered to {len(condition_filtered)} after removing long text columns.")
-        # Batch create all hypothetical indexes and store their size estimates.
-        #
-        # The creates and the measurement go in one transaction on purpose.
-        # Hypothetical indexes live in the backend that created them, and
-        # neither the connection pool nor a transaction pooler in front of the
-        # server promises the next statement the same backend — measuring in a
-        # second call can land on another and see no indexes at all, which
-        # would silently make every candidate look free. Only the last
-        # statement's results come back, so the size query goes last, and the
-        # reset runs after it in the same transaction.
-        if len(condition_filtered) > 0:
-            create_and_measure = (
-                SafeSqlDriver.param_sql_to_query(
-                    "SELECT hypopg_create_index({});" * len(condition_filtered),
-                    [idx.definition for idx in condition_filtered],
-                )
-                + HYPOTHETICAL_INDEX_SIZES_SQL
-            )
-            result = await self.sql_driver.execute_query(cast(LiteralString, create_and_measure), cleanup=HYPOPG_RESET_SQL)
-            if result is not None:
-                index_map = {r.cells["index_name"]: r.cells["index_size"] for r in result}
-                for idx in condition_filtered:
-                    if idx.name in index_map:
-                        idx.estimated_size_bytes = index_map[idx.name]
-                        # The planner's own number, so the objective function,
-                        # the size budget and the reported size all use it
-                        # instead of the pg_stats guess.
-                        self.record_measured_index_size(idx.table, idx.columns, idx.estimated_size_bytes)
+        # Measured by HypoPG, all in one transaction; see measure_index_sizes.
+        await self.measure_index_sizes(condition_filtered)
         return condition_filtered
 
     async def _enumerate_greedy(
@@ -297,7 +268,10 @@ class DatabaseTuningAdvisor(IndexTuningBase):
             best_objective = current_objective
             best_time_improvement = 0
 
-            for candidate in candidate_indexes:
+            # In a fixed order: ties go to the first candidate seen, and a
+            # set's order changes from one process to the next, which made
+            # two runs over the same workload recommend different indexes.
+            for candidate in sorted(candidate_indexes, key=lambda idx: (idx.table, idx.columns, idx.using)):
                 self.dta_trace(f"Evaluating candidate: {candidate_str([candidate])}")
                 # Calculate additional size from this index
                 index_size = await self._estimate_index_size(candidate.table, list(candidate.columns))

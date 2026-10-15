@@ -390,11 +390,49 @@ The size is what HypoPG measures for the candidate index, and it is also what
 `--max-index-size-mb` budgets against, so a small budget really does drop
 recommendations.
 
+What the advisor checks before it recommends, each in the result:
+
+- **A regression bound.** The search optimises the workload's total, which an
+  improvement to one query can carry past a regression in another. So every
+  query is re-costed against the final set, and an index is refused if any
+  query then costs more than `1 + --max-regression-factor` times its cost
+  without the set (default 0.1, Azure's default; `0` refuses any rise). It is a
+  planner-cost bound, not a time bound. `regression_check` lists what was
+  refused, with each query's baseline and new cost.
+- **Merging.** Two recommended indexes on one table with the same first column
+  are replaced by one, the wider or the two merged, when no query then costs
+  more than the bound over what it cost with both. `consolidations` lists each
+  merge and each refused merge with the query and ratio it failed on.
+- **What each index serves.** `queries_using` lists the queries whose plan
+  reads the index with the whole set in place. An index no query reads, which
+  the greedy search can leave behind when a later index displaces it, is
+  refused under `refused_candidates`. For `--method llm` that list also holds
+  every alternative the model proposed and the planner did not choose, with
+  its cost and why.
+- **The workload's window.** HypoPG's costs are deterministic for a given set
+  of queries, statistics and indexes; the workload is not. `tune-workload`
+  reports the window `pg_stat_statements` counted its sample in (and evictions
+  since, from 1.9), since another run after a reset or more traffic can tune
+  for other queries.
+
 Two things routinely surprise people:
 
-- **Requires HypoPG.** Without it, tuning fails with a message saying how to
-  get it on this platform, or that the platform does not offer it
-  (`ExtensionRequiredError` from Python). `top-queries` and `tune-workload` additionally need
+- **Requires HypoPG.** Where the server lists it but it is not created, tuning
+  fails with a message saying how to create it (`ExtensionRequiredError` from
+  Python). Where it can be neither used nor created (the platform does not
+  offer it, or the package is not installed), `tune-queries` instead returns
+  candidates inferred from `pg_stats` and says so in capitals: `costed: False`,
+  each candidate `confidence: candidate` with a severity, the column statistics
+  and expected rows behind it, and how to confirm it. They follow PgHero's
+  heuristic: the most selective equality columns first, a range column last,
+  stopping once about 50 rows are expected to be left; a table under 500 rows,
+  a filter that leaves more than a fifth of the table, and a candidate an
+  existing index's leading columns already serve are refused with the figure.
+  Never present them as costed: confirm one with EXPLAIN on a copy before
+  building it. On Cloud SQL and AlloyDB with `google_db_advisor` installed,
+  its own recommendations come too, for the workload it tracked; restricted
+  mode does not run it, since pg-debug cannot confirm it writes nothing.
+  `tune-workload` and `--method llm` still refuse without HypoPG. `top-queries` and `tune-workload` additionally need
   `pg_stat_statements`. No superuser is needed — pg_debug uses HypoPG's
   functions, which any role can execute, not its views, which are private to
   the role that created the extension.

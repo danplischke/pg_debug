@@ -30,6 +30,7 @@ from .health import HealthCheckResult
 from .health import HealthType
 from .health.checks.index import MIN_WINDOW_DAYS
 from .history import HistoryReport
+from .index.base import DEFAULT_MAX_REGRESSION_FACTOR
 from .index_use import IndexUse
 from .migration import StatementReview
 from .model import DEFAULT_MIN_ROWS
@@ -388,6 +389,7 @@ class SyncPgDebug:
         max_index_size_mb: int = 10000,
         method: TuningMethod = "dta",
         llm_model: str | None = None,
+        max_regression_factor: float = DEFAULT_MAX_REGRESSION_FACTOR,
     ) -> dict[str, Any]:
         """Recommend indexes for the workload recorded by pg_stat_statements."""
         return self._call(
@@ -395,6 +397,7 @@ class SyncPgDebug:
             max_index_size_mb=max_index_size_mb,
             method=method,
             llm_model=llm_model,
+            max_regression_factor=max_regression_factor,
         )
 
     def analyze_query_indexes(
@@ -403,6 +406,7 @@ class SyncPgDebug:
         max_index_size_mb: int = 10000,
         method: TuningMethod = "dta",
         llm_model: str | None = None,
+        max_regression_factor: float = DEFAULT_MAX_REGRESSION_FACTOR,
     ) -> dict[str, Any]:
         """Recommend indexes for a specific list of queries."""
         return self._call(
@@ -411,6 +415,7 @@ class SyncPgDebug:
             max_index_size_mb=max_index_size_mb,
             method=method,
             llm_model=llm_model,
+            max_regression_factor=max_regression_factor,
         )
 
 

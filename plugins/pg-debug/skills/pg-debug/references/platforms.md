@@ -588,6 +588,10 @@ extensions.
 
 Where HypoPG is not offered, pg-debug cannot simulate an index. `explain`,
 `diagnose` and `index-use` still work, and the plan is the evidence there is.
+`tune-queries` returns candidates inferred from `pg_stats` instead, marked as
+never costed by the planner, and on Cloud SQL and AlloyDB adds
+`google_db_advisor_recommend_indexes()` where that extension is installed
+(unrestricted mode only; not tried against either platform).
 On Cloud SQL Enterprise Plus the platform's own index advisor, above, is the
 nearest substitute; elsewhere, testing an index means building it on a branch
 or a copy of the database and measuring.

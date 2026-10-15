@@ -246,7 +246,9 @@ async def cmd_server_rates(pg: PgDebug, args: argparse.Namespace) -> Any:
 
 
 async def cmd_tune_workload(pg: PgDebug, args: argparse.Namespace) -> Any:
-    return await pg.analyze_workload_indexes(max_index_size_mb=args.max_index_size_mb, method=args.method)
+    return await pg.analyze_workload_indexes(
+        max_index_size_mb=args.max_index_size_mb, method=args.method, max_regression_factor=args.max_regression_factor
+    )
 
 
 async def cmd_tune_queries(pg: PgDebug, args: argparse.Namespace) -> Any:
@@ -256,7 +258,9 @@ async def cmd_tune_queries(pg: PgDebug, args: argparse.Namespace) -> Any:
             queries.extend(line.strip() for line in read_stdin().splitlines() if line.strip())
         else:
             queries.append(query)
-    return await pg.analyze_query_indexes(queries, max_index_size_mb=args.max_index_size_mb, method=args.method)
+    return await pg.analyze_query_indexes(
+        queries, max_index_size_mb=args.max_index_size_mb, method=args.method, max_regression_factor=args.max_regression_factor
+    )
 
 
 async def cmd_plans(pg: PgDebug, args: argparse.Namespace) -> Any:

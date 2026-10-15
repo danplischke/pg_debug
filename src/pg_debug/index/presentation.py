@@ -136,9 +136,12 @@ class TextPresentation:
         include_trace = os.environ.get("PG_DEBUG_INCLUDE_TRACE", "false").lower() == "true"
         langfuse_trace = {"_trace": session.dta_traces} if include_trace else {}
 
+        checks = self._checks(session)
+
         if not session.recommendations:
             return {
                 "recommendations": "No index recommendations found.",
+                **checks,
                 **langfuse_trace,
             }
 
@@ -167,8 +170,47 @@ class TextPresentation:
             },
             "recommendations": recommendations,
             "query_impact": query_impact,
+            **checks,
             **langfuse_trace,
         }
+
+    def _checks(self, session: IndexTuningResult) -> dict[str, Any]:
+        """What the advisor checked and refused on the way, and what the workload was.
+
+        Each part is present only when there is something in it, except the
+        workload, which every result describes.
+        """
+        checks: dict[str, Any] = {}
+        if session.regression_check is not None:
+            checks["regression_check"] = session.regression_check
+        if session.consolidations:
+            checks["consolidations"] = session.consolidations
+        if session.refused_candidates:
+            checks["refused_candidates"] = session.refused_candidates
+        checks["workload"] = self._describe_workload(session)
+        return checks
+
+    @staticmethod
+    def _describe_workload(session: IndexTuningResult) -> dict[str, Any]:
+        """Where the workload came from, how many queries were tuned for, and what would change on another run."""
+        workload = {
+            "source": session.workload_source,
+            "queries": len(session.workload or []),
+        }
+        if session.workload_source == "query_store":
+            workload["counting_window"] = session.workload_window
+            workload["note"] = (
+                "HypoPG's costs are deterministic: the same queries, planner statistics and index set cost the same on "
+                "every run. The workload is not: it is the costliest statements pg_stat_statements recorded in its "
+                "counting window, so a run after more traffic, a reset of pg_stat_statements or an eviction from it can "
+                "tune for other queries and recommend other indexes."
+            )
+        else:
+            workload["note"] = (
+                "HypoPG's costs are deterministic: these queries, with the same planner statistics and index set, cost "
+                "the same on every run. They change when ANALYZE refreshes the statistics."
+            )
+        return workload
 
     def _build_recommendations_list(self, session: IndexTuningResult) -> list[dict[str, Any]]:
         recommendations = []
@@ -189,6 +231,10 @@ class TextPresentation:
                 },
                 "index_estimated_size": humanize.naturalsize(rec.estimated_size_bytes),
                 "index_definition": rec.definition,
+                # Read from each query's plan with the whole set in place.
+                "queries_using_index": len(rec.queries_using),
+                "workload_queries": len(set(rec.queries)),
+                "queries_using": rec.queries_using,
             }
             write_cost = self._describe_write_cost(rec)
             if write_cost:
