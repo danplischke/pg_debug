@@ -418,3 +418,150 @@ async def test_offline_an_ordinary_build_says_what_a_partitioned_table_would_cha
     review = await one(MigrationLinter(), "CREATE INDEX events_at ON events (at)")
 
     assert "On a partitioned table CONCURRENTLY is refused" in review.detail
+
+
+# -- Partitions -------------------------------------------------------------
+#
+# Measured on PostgreSQL 16: CREATE TABLE ... PARTITION OF holds ACCESS
+# EXCLUSIVE on the parent and the DEFAULT partition; ATTACH PARTITION holds
+# SHARE UPDATE EXCLUSIVE on the parent and ACCESS EXCLUSIVE on the attached
+# table and the DEFAULT, and a validated CHECK on each lets it skip the scan;
+# DETACH PARTITION holds ACCESS EXCLUSIVE on the parent.
+
+
+def partitioned(name: str, size: int, default: str | None = None, default_bytes: int = 0, range_key: str | None = "ts") -> SqlDriver.RowResult:
+    """The catalog's answer for a partitioned parent: its DEFAULT partition and its range key."""
+    row = sized(name, size, [(f"{name}_2026_09", False)])
+    row.cells.update({"default_partition": default, "default_bytes": default_bytes if default else None, "range_key": range_key})
+    return row
+
+
+@pytest.mark.asyncio
+async def test_attaching_a_table_with_no_check_scans_it_under_access_exclusive(linter):
+    review = await one(linter, "ALTER TABLE events ATTACH PARTITION events_new FOR VALUES FROM ('2026-11-01') TO ('2026-12-01')")
+
+    assert review.kind == "attach_partition_scan"
+    assert review.lock is LockLevel.ACCESS_EXCLUSIVE
+    assert review.table == "events_new"
+    assert review.severity is Severity.HIGH
+    assert any("VALIDATE CONSTRAINT" in step for step in review.safer)
+
+
+@pytest.mark.asyncio
+async def test_attaching_after_a_validated_check_is_low_and_blocks_nothing_on_the_parent(linter):
+    reviews = await linter.review(
+        """
+        ALTER TABLE events_new ADD CONSTRAINT events_new_bound CHECK (ts >= '2026-11-01' AND ts < '2026-12-01') NOT VALID;
+        ALTER TABLE events_new VALIDATE CONSTRAINT events_new_bound;
+        ALTER TABLE events ATTACH PARTITION events_new FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
+        """
+    )
+    attach = next(review for review in reviews if review.kind.startswith("attach"))
+
+    assert attach.kind == "attach_partition"
+    assert attach.lock is LockLevel.SHARE_UPDATE_EXCLUSIVE
+    assert attach.severity is Severity.LOW
+
+
+@pytest.mark.asyncio
+async def test_a_check_added_not_valid_and_never_validated_does_not_count(linter):
+    reviews = await linter.review(
+        """
+        ALTER TABLE events_new ADD CONSTRAINT events_new_bound CHECK (ts >= '2026-11-01') NOT VALID;
+        ALTER TABLE events ATTACH PARTITION events_new FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
+        """
+    )
+    assert any(review.kind == "attach_partition_scan" for review in reviews)
+
+
+@pytest.mark.asyncio
+async def test_attaching_a_table_created_empty_in_the_same_migration_is_low(linter):
+    reviews = await linter.review(
+        "CREATE TABLE events_new (LIKE events);\nALTER TABLE events ATTACH PARTITION events_new FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');"
+    )
+    (attach,) = reviews
+    assert attach.kind == "attach_partition"
+
+    filled = await linter.review(
+        "CREATE TABLE events_new (LIKE events);\nINSERT INTO events_new SELECT * FROM staging;\n"
+        "ALTER TABLE events ATTACH PARTITION events_new FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');"
+    )
+    assert [review.kind for review in filled] == ["attach_partition_scan"]
+
+
+@pytest.mark.asyncio
+async def test_attaching_scans_a_default_partition_holding_rows_and_says_how_big_it_is():
+    linter = MigrationLinter(catalog(partitioned("events", 4096, default="public.events_default", default_bytes=2 * 1024**3)))
+    reviews = await linter.review(
+        """
+        ALTER TABLE events_new ADD CONSTRAINT events_new_bound CHECK (ts >= '2026-11-01' AND ts < '2026-12-01') NOT VALID;
+        ALTER TABLE events_new VALIDATE CONSTRAINT events_new_bound;
+        ALTER TABLE events ATTACH PARTITION events_new FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
+        """
+    )
+    attach = reviews[0]
+
+    assert attach.kind == "attach_partition_scans_default"
+    assert attach.table == "public.events_default"
+    assert attach.severity is Severity.HIGH
+    assert "2.0 GB" in attach.detail
+    recipe = "\n".join(attach.safer)
+    assert "ALTER TABLE public.events_default ADD CONSTRAINT events_default_excludes_events_new CHECK (NOT (ts IS NOT NULL" in recipe
+    assert "CREATE TABLE" not in recipe, "the table being attached exists already"
+
+
+@pytest.mark.asyncio
+async def test_the_attach_recipe_passes_its_own_review_against_a_default_holding_rows():
+    """The recipe is the safe way, so reviewing it must not raise the alarm it answers."""
+    from pg_debug.partition.recipes import attach_partition_recipe
+
+    linter = MigrationLinter(catalog(partitioned("public.events", 4096, default="public.events_default", default_bytes=2 * 1024**3)))
+    recipe = attach_partition_recipe("public.events", "public.events_2026_11", "ts", "'2026-11-01'", "'2026-12-01'", default="public.events_default")
+    reviews = await linter.review("\n".join(recipe))
+
+    assert {review.severity for review in reviews} == {Severity.LOW}, [(r.kind, r.severity) for r in reviews]
+
+
+@pytest.mark.asyncio
+async def test_create_partition_of_locks_the_parent_and_offers_the_attach_recipe():
+    linter = MigrationLinter(catalog(partitioned("events", 4096)))
+    review = await one(linter, "CREATE TABLE events_2026_11 PARTITION OF events FOR VALUES FROM ('2026-11-01') TO ('2026-12-01')")
+
+    assert review.kind == "create_partition_of"
+    assert review.lock is LockLevel.ACCESS_EXCLUSIVE
+    assert review.duration is Duration.INSTANT
+    assert review.severity is Severity.LOW
+    assert "ALTER TABLE events ATTACH PARTITION events_2026_11 FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');" in "\n".join(review.safer)
+
+
+@pytest.mark.asyncio
+async def test_create_partition_of_on_a_parent_whose_default_holds_rows_scans_it_under_the_parents_lock():
+    linter = MigrationLinter(catalog(partitioned("events", 4096, default="public.events_default", default_bytes=50 * 1024**2)))
+    review = await one(linter, "CREATE TABLE events_2026_11 PARTITION OF events FOR VALUES FROM ('2026-11-01') TO ('2026-12-01')")
+
+    assert review.kind == "create_partition_of_scans_default"
+    assert review.severity is Severity.MEDIUM, "50 MB is a pause rather than an outage"
+    assert "public.events_default or events" in review.detail
+
+
+@pytest.mark.asyncio
+async def test_partitions_of_a_parent_created_in_the_same_migration_need_no_recipe(linter):
+    reviews = await linter.review(
+        "CREATE TABLE events_p (id int, ts date) PARTITION BY RANGE (ts);\n"
+        "CREATE TABLE events_p_2026 PARTITION OF events_p FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');"
+    )
+    (review,) = reviews
+    assert review.severity is Severity.LOW
+    assert review.safer == []
+
+
+@pytest.mark.asyncio
+async def test_detach_locks_the_parent_and_suggests_concurrently(linter):
+    review = await one(linter, "ALTER TABLE events DETACH PARTITION events_2020")
+    concurrent = await one(linter, "ALTER TABLE events DETACH PARTITION events_2020 CONCURRENTLY")
+
+    assert review.kind == "detach_partition"
+    assert review.lock is LockLevel.ACCESS_EXCLUSIVE
+    assert review.safer == ["ALTER TABLE events DETACH PARTITION events_2020 CONCURRENTLY;  -- PostgreSQL 14 and later, outside a transaction block"]
+    assert concurrent.kind == "detach_partition_concurrently"
+    assert concurrent.lock is LockLevel.SHARE_UPDATE_EXCLUSIVE

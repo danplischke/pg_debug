@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
 
+from ..severity import Confidence
 from ..severity import Severity
 from .metrics import conditions
 from .metrics import inclusive_ms
@@ -46,6 +47,10 @@ DISCARD_RATIO = 10.0
 #: A nested loop has to have run at least this many iterations before the
 #: count is worth reading anything into.
 MIN_LOOP_ITERATIONS = 100
+
+#: An Append has to scan at least this many partitions of one table before
+#: the ones it scanned for nothing are worth a finding.
+MIN_SCANNED_PARTITIONS = 4
 
 #: Longest identifier PostgreSQL will accept, which bounds a generated
 #: statistics name.
@@ -94,6 +99,10 @@ class RuleContext:
     columns: dict[str, set[str]] = field(default_factory=dict)
     work_mem: str | None = None
     catalog: bool = True
+    #: For each relation that is a partition, keyed by qualified name: the
+    #: ``root`` table it belongs to, how many leaf ``partitions`` that root
+    #: has, and the ``key_columns`` of every level of partitioning above it.
+    partitions: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def share(self, ms: float) -> float:
         """``ms`` as a share of the query's work."""
@@ -565,6 +574,81 @@ def workers_not_launched(root: PlanNode, context: RuleContext) -> list[PlanFindi
     return findings
 
 
+def unpruned_partitions(root: PlanNode, context: RuleContext) -> list[PlanFinding]:
+    """An Append that scanned many partitions it filtered on the partition key, most of them for nothing.
+
+    A condition on the partition key that pruning can use removes partitions
+    from the plan, or from the run ("Subplans Removed", or a child "never
+    executed"). When every partition is still there, each filtered on the key,
+    and most return no rows, the condition was in a form pruning cannot read:
+    the key inside a function or a cast, a comparison with another type, or
+    pruning switched off. That is an inference from the plan's shape, so the
+    finding is a candidate and says how to confirm it.
+    """
+    findings: list[PlanFinding] = []
+    for node in walk(root):
+        if node.node_type not in ("Append", "Merge Append") or node.subplans_removed:
+            continue
+        by_root: dict[str, list[PlanNode]] = {}
+        for child in node.children:
+            info = context.partitions.get(qualified_relation(child) or "")
+            if info:
+                by_root.setdefault(info["root"], []).append(child)
+
+        for table, scans in by_root.items():
+            if len(scans) < MIN_SCANNED_PARTITIONS or any(not scan.actual_loops for scan in scans):
+                # Too few to matter, or run-time pruning skipped some.
+                continue
+            info = context.partitions[qualified_relation(scans[0]) or ""]
+            keys = set(info.get("key_columns") or [])
+            filtered = [_columns_in(" AND ".join(conditions(scan)), keys) for scan in scans]
+            if not keys or not all(filtered):
+                continue
+            empty = [scan for scan in scans if not scan.actual_rows]
+            if len(empty) < max(2, (len(scans) + 1) // 2):
+                continue
+
+            cost = sum(inclusive_ms(scan) for scan in empty)
+            share = context.share(cost)
+            used = sorted({column for columns in filtered for column in columns})
+            total = info.get("partitions")
+            findings.append(
+                PlanFinding(
+                    issue=PlanIssue.UNPRUNED_PARTITIONS,
+                    severity=severity_for_share(share),
+                    node_type=node.node_type,
+                    relation=table,
+                    summary=(
+                        f"The {node.node_type} scanned {_fmt(len(scans))}{f' of {_fmt(total)}' if total else ''} partitions of {table}, "
+                        f"each filtered on its partition key ({', '.join(used)}), and {_fmt(len(empty))} of them returned no rows."
+                    ),
+                    detail=(
+                        "No partition was pruned, at plan time or at run time, although the query restricts on the key. "
+                        "Pruning reads only conditions that compare the key itself with a value of the key's type: the key "
+                        "inside a function or a cast, a comparison with another type, or enable_partition_pruning = off "
+                        "keeps every partition in. Inferred from the plan's shape; to confirm, run EXPLAIN with the condition "
+                        "written as key-operator-constant, and the partitions that cannot match drop out of the plan."
+                    ),
+                    cost_ms=cost,
+                    share_of_time=share,
+                    evidence={
+                        "confidence": Confidence.CANDIDATE.value,
+                        "partitions_scanned": len(scans),
+                        "partitions_total": total,
+                        "partitions_returning_no_rows": len(empty),
+                        "partition_key": sorted(keys),
+                        "condition": " AND ".join(conditions(scans[0])),
+                        "subplans_removed": node.subplans_removed,
+                    },
+                    remediation=[
+                        f"-- Compare {', '.join(used)} directly with a constant of its own type (for a timestamp key, "
+                        "ts >= '2026-01-01' AND ts < '2026-02-01', not date(ts) = '2026-01-01'), then EXPLAIN again."
+                    ],
+                )
+            )
+    return findings
+
+
 #: Every rule, in the order they are run. Findings are sorted afterwards, so
 #: this order only decides ties.
 RULES = (
@@ -577,6 +661,7 @@ RULES = (
     hash_spilled,
     lossy_bitmap,
     workers_not_launched,
+    unpruned_partitions,
 )
 
 
@@ -621,5 +706,6 @@ __all__ = [
     "row_estimate",
     "sort_spilled",
     "stale_statistics",
+    "unpruned_partitions",
     "workers_not_launched",
 ]

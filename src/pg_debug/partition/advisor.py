@@ -42,6 +42,7 @@ from ..db.statements import StatementStatistics
 from ..db.statements import locate_pg_stat_statements
 from ..parsing import TableAliasVisitor
 from .predicates import extract_predicates
+from .recipes import attach_partition_recipe
 from .result import PartitionCandidate
 from .result import Strategy
 
@@ -236,21 +237,7 @@ class PartitionAdvisor:
         """The queries to judge by, with the weight each one carries."""
         if query_list:
             return [{"query": query, "weight": 1.0, "calls": 1} for query in query_list]
-
-        try:
-            stats = await locate_pg_stat_statements(self.sql_driver)
-            if stats is None:
-                return []
-            rows = await SafeSqlDriver.execute_param_query(self.sql_driver, cast(LiteralString, _workload_sql(stats)), [limit])
-        except Exception as e:
-            logger.debug("Could not read the workload: %s", e)
-            return []
-
-        workload = []
-        for row in rows or []:
-            cells = row.cells
-            workload.append({"query": cells["query"], "weight": float(cells["total_exec_time"] or 0.0), "calls": int(cells["calls"] or 0)})
-        return workload
+        return await read_workload(self.sql_driver, limit) or []
 
     # -- Assessment ---------------------------------------------------------
 
@@ -266,7 +253,7 @@ class PartitionAdvisor:
         if not table_columns:
             return None
 
-        touching, pruning, deleting = _weigh_workload(workload, table["table"], name)
+        touching, pruning, deleting = weigh_workload(workload, table["table"], name)
         if touching <= 0:
             # Nothing recorded touches it, so there is nothing to judge by.
             return None
@@ -324,10 +311,35 @@ class PartitionAdvisor:
         )
 
 
+async def read_workload(sql_driver: SqlDriver | SafeSqlDriver, limit: int = 200) -> list[dict[str, Any]] | None:
+    """This database's recorded statements, heaviest first, each with its weight.
+
+    Returns:
+        ``{"query", "weight", "calls"}`` per statement, weighted by total
+        execution time; None when there is no record to read, because
+        pg_stat_statements is not installed or could not be read, which a
+        caller has to tell apart from a record with nothing in it.
+    """
+    try:
+        stats = await locate_pg_stat_statements(sql_driver)
+        if stats is None:
+            return None
+        rows = await SafeSqlDriver.execute_param_query(sql_driver, cast(LiteralString, _workload_sql(stats)), [limit])
+    except Exception as e:
+        logger.debug("Could not read the workload: %s", e)
+        return None
+
+    workload = []
+    for row in rows or []:
+        cells = row.cells
+        workload.append({"query": cells["query"], "weight": float(cells["total_exec_time"] or 0.0), "calls": int(cells["calls"] or 0)})
+    return workload
+
+
 # -- Weighing ---------------------------------------------------------------
 
 
-def _weigh_workload(workload: list[dict[str, Any]], table: str, qualified: str) -> tuple[float, dict[str, dict[str, Any]], dict[str, float]]:
+def weigh_workload(workload: list[dict[str, Any]], table: str, qualified: str) -> tuple[float, dict[str, dict[str, Any]], dict[str, float]]:
     """Split the recorded time into what touches the table and what prunes.
 
     Returns ``(touching, pruning, deleting)``: total weight of queries naming
@@ -500,6 +512,7 @@ def _ddl(table: dict[str, Any], column: dict[str, Any], strategy: Strategy, keys
 
     if strategy is Strategy.RANGE:
         ddl.extend(_range_partitions(ident, column))
+        ddl.extend(_next_partition(ident, column))
     elif strategy is Strategy.LIST:
         values = sorted(column.get("common_values") or [])
         shown = values[:5]
@@ -555,6 +568,33 @@ def _range_partitions(ident: str, column: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _next_partition(ident: str, column: dict[str, Any]) -> list[str]:
+    """How to add each partition after the first ones, once the table is in use.
+
+    The sketch above creates its partitions with PARTITION OF, which is right
+    for a table nothing uses yet and wrong for one that is busy: it takes
+    ACCESS EXCLUSIVE on the parent. So the month after the last one is written
+    out the way that does not.
+    """
+    bounds = list(column.get("bounds") or [])
+    last = _parse_bound(str(bounds[-1])) if bounds else None
+    if last is None:
+        return []
+    start = _next_month(last.replace(day=1, hour=0, minute=0, second=0, microsecond=0))
+    end = _next_month(start)
+    return [
+        "-- Once it is in use, add each later partition by attaching it; for the month after the last one:",
+        *attach_partition_recipe(
+            f"{ident}_partitioned",
+            f"{ident}_{start.strftime('%Y_%m')}",
+            column["column_ident"],
+            f"'{start.date()}'",
+            f"'{end.date()}'",
+            default=f"{ident}_default",
+        ),
+    ]
+
+
 def _parse_bound(value: str) -> datetime | None:
     """A histogram bound as a datetime, or None if it is not one we can read."""
     text = value.strip()
@@ -600,4 +640,6 @@ __all__ = [
     "MAX_LIST_VALUES",
     "MIN_HASH_DISTINCT",
     "PartitionAdvisor",
+    "read_workload",
+    "weigh_workload",
 ]

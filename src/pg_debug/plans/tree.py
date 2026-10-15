@@ -90,6 +90,11 @@ class PlanNode:
     workers_planned: int | None = None
     workers_launched: int | None = None
 
+    # Partitions an Append or MergeAppend dropped when execution began, by
+    # run-time pruning. Present, and zero, whenever run-time pruning was
+    # possible; absent when it was not.
+    subplans_removed: int | None = None
+
     #: JSON key -> attribute, for the fields that are copied across unchanged.
     _SIMPLE_FIELDS: ClassVar[dict[str, str]] = {
         "Relation Name": "relation_name",
@@ -115,6 +120,7 @@ class PlanNode:
         "Lossy Heap Blocks": "lossy_heap_blocks",
         "Workers Planned": "workers_planned",
         "Workers Launched": "workers_launched",
+        "Subplans Removed": "subplans_removed",
     }
 
     @classmethod

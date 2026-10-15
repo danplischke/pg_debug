@@ -33,6 +33,8 @@ from .checks.index import UNUSED_INDEXES
 from .checks.index import IndexHealthCalc
 from .checks.multixact import MULTIXACT_HEALTH
 from .checks.multixact import MultixactCalc
+from .checks.partition import PARTITION_HEALTH
+from .checks.partition import PartitionHealthCalc
 from .checks.replication import REPLICATION_HEALTH
 from .checks.replication import ReplicationCalc
 from .checks.seq_scan import SEQ_SCAN_HEALTH
@@ -65,6 +67,7 @@ class HealthType(str, Enum):
     SCAN = "scan"
     COLLATION = "collation"
     CHECKSUM = "checksum"
+    PARTITION = "partition"
     ALL = "all"
 
     @classmethod
@@ -121,7 +124,7 @@ class DatabaseHealthTool:
             health_type: A single health type, a comma-separated string, or an
                 iterable of health types. Valid values: index, connection,
                 vacuum, sequence, replication, buffer, constraint, statistics,
-                table, scan, collation, checksum, all.
+                table, scan, collation, checksum, partition, all.
 
         Returns:
             An ordered mapping of check name to its
@@ -213,6 +216,8 @@ class DatabaseHealthTool:
 
         if HealthType.CHECKSUM in health_types:
             checks.append((CHECKSUM_HEALTH, ChecksumHealthCalc(self.sql_driver).checksum_failure_check))
+        if HealthType.PARTITION in health_types:
+            checks.append((PARTITION_HEALTH, PartitionHealthCalc(self.sql_driver).partition_health_check))
 
         return checks
 

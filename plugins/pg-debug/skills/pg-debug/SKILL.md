@@ -114,7 +114,7 @@ and answering the question.
 | Is the schema built well? | `pg-debug model` | [schema.md](references/schema.md) |
 | Is this migration safe to run? | `pg-debug check-migration <file>` | [schema.md](references/schema.md) |
 | Should this table be partitioned? | `pg-debug partitions` | [schema.md](references/schema.md) |
-| Partition maintenance: pruning, attach and detach, pg_partman | `pg-debug explain "<query>"` against the partitioned table | [schema.md](references/schema.md) |
+| Partition maintenance: pruning, attach and detach, pg_partman | `pg-debug health --type partition`; `diagnose "<query>"` against the partitioned table; `check-migration` for the partition DDL | [schema.md](references/schema.md) |
 | What tables, columns and indexes exist? | `pg-debug schemas`, `objects`, `describe` | below |
 | Running it behind a connection pooler (PgBouncer, Supavisor, a `-pooler` host) | `pg-debug --version` and `--help`, as Connecting says; a build that sets `--search-path` "on the connection" needs the direct or session endpoint | [platforms.md](references/platforms.md) |
 | On a managed or serverless platform (Neon, Supabase, RDS/Aurora, Cloud SQL/AlloyDB, Azure) | the connection URL's host and port, to name the platform, then the command for the question | [platforms.md](references/platforms.md) |

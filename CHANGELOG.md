@@ -257,6 +257,37 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `pg_current_wal_lsn`, `pg_wal_lsn_diff`, `pg_collation_actual_version` and
   `pg_database_collation_actual_version` are allowed in restricted mode,
   since each only reads, so all of these run there.
+- `pg-debug health --type partition` checks the partitioned tables that
+  already exist. Before, `partitions` only advised whether to partition, and
+  said nothing about a table that was; the skill pointed at `explain` and
+  hand-written catalog queries. It now reports a time-range table whose last
+  partition ends within one partition's width (or has ended), with the
+  statements that add the next one; rows in a DEFAULT partition, which every
+  later ATTACH scans under ACCESS EXCLUSIVE; unique indexes created on
+  partitions and on no index of the parent, so unique per partition only;
+  `enable_partition_pruning = off` in the configuration, for a role or
+  database, or in the query context; trees a query can lock more of than the
+  fast path holds (16 slots before PostgreSQL 18, `max_locks_per_transaction`
+  rounded up to a power of two from 18), estimated from what
+  `pg_stat_statements` records filtering on the partition key and stated as
+  the worst case otherwise; and more than 1,000 partitions or three levels.
+  The lock estimate and the per-partition unique index are candidates.
+
+- `check-migration` reviews `ATTACH PARTITION`, `DETACH PARTITION` and
+  `CREATE TABLE ... PARTITION OF`, which it used to pass over in silence.
+  Measured on PostgreSQL 16: `PARTITION OF` takes ACCESS EXCLUSIVE on the
+  parent; ATTACH takes SHARE UPDATE EXCLUSIVE on it and scans the attached
+  table and a DEFAULT partition holding rows under ACCESS EXCLUSIVE, unless a
+  validated CHECK proves each; DETACH takes ACCESS EXCLUSIVE unless
+  CONCURRENTLY. Connected, a DEFAULT partition's size decides the severity.
+  The safer form is the attach recipe, which the review itself reports at low
+  severity throughout, and which `partitions` now appends to its range sketch.
+
+- `diagnose` reports `unpruned_partitions`: an Append or MergeAppend that
+  scanned four or more partitions of one table, each filtered on the
+  partition key, none removed at plan or run time, most of them for no rows.
+  That is a condition pruning cannot read (the key in a function or cast,
+  another type, pruning off); it is a candidate and says how to confirm it.
 
 ### Changed
 

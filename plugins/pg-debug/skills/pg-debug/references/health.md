@@ -33,7 +33,11 @@ rates), `constraint` (invalid constraints), `statistics` (never analyzed or
 drifted), `scan` (tables read sequentially far more than through an index,
 charged in bytes read), `collation` (collation versions that no longer match
 their library, with the indexes on them), `checksum` (pages that failed their
-checksum), `all`.
+checksum), `partition` (partitioned tables that exist: the next time partition
+not created yet, rows in a DEFAULT partition, unique indexes that hold only per
+partition, pruning switched off, and trees a query can lock more of than the
+fast path holds; see [schema.md](schema.md#once-a-table-is-partitioned)),
+`all`.
 
 "Multixact wraparound" flags a database or table whose oldest multixact is
 past 200 million (`level: approaching`), past

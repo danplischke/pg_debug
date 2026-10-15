@@ -34,6 +34,7 @@ from pglast.stream import RawStream
 from ..db import SafeSqlDriver
 from ..db import SqlDriver
 from ..errors import InvalidArgumentError
+from ..partition.recipes import attach_partition_recipe
 from ..severity import SEVERITY_ORDER
 from ..severity import Severity
 from .locks import Duration
@@ -214,6 +215,23 @@ class MigrationLinter:
         self._partitions: dict[str, list[tuple[str, bool]]] = {}
         # The tables the catalog was asked about and answered for.
         self._known_tables: set[str] = set()
+        # What the migration does before each statement, in the order written:
+        # the tables it creates, the ones it writes rows into, and the ones
+        # given a validated CHECK constraint, which is what lets ATTACH
+        # PARTITION skip its scan. CHECK constraints added NOT VALID wait here
+        # until a VALIDATE CONSTRAINT names them.
+        self._created: set[str] = set()
+        self._written: set[str] = set()
+        self._validated_checks: set[str] = set()
+        self._unvalidated_checks: dict[tuple[str, str], bool] = {}
+        # Each partition statement's parent, its partition and its bound, to
+        # weigh again once the catalog says whether the parent has a DEFAULT
+        # partition: (parent, partition, bound, kind of statement).
+        self._partition_statements: dict[int, tuple[str, str, Any, str]] = {}
+        # Each partitioned parent's DEFAULT partition and its size, and its
+        # partition key when that is one plain column of a range.
+        self._defaults: dict[str, tuple[str, int]] = {}
+        self._range_keys: dict[str, str] = {}
 
     async def review(self, sql: str) -> list[StatementReview]:
         """Review every statement in a migration.
@@ -239,6 +257,10 @@ class MigrationLinter:
         self._index_statements = {}
         self._partitions = {}
         self._known_tables = set()
+        self._created, self._written, self._validated_checks = set(), set(), set()
+        self._unvalidated_checks = {}
+        self._partition_statements = {}
+        self._defaults, self._range_keys = {}, {}
         reviews: list[StatementReview] = []
         # The timeouts the migration has SET so far, as written.
         set_so_far: dict[str, str] = {}
@@ -261,6 +283,7 @@ class MigrationLinter:
         await self._resolve_default_volatility(reviews)
         await self._add_table_sizes(reviews)
         reviews = [self._settle_index(review) for review in reviews]
+        reviews = [self._settle_partition(review) for review in reviews]
         for review in reviews:
             self._weigh(review)
         await self._review_timeouts(reviews)
@@ -328,7 +351,8 @@ class MigrationLinter:
         if self.sql_driver is None:
             return
 
-        tables = sorted({review.table for review in reviews if review.table})
+        parents = {parent for parent, _partition, _bound, _kind in self._partition_statements.values()}
+        tables = sorted({review.table for review in reviews if review.table} | parents)
         if not tables:
             return
 
@@ -348,7 +372,19 @@ class MigrationLinter:
                         FROM pg_inherits AS i WHERE i.inhparent = c.oid) AS partitions,
                        (SELECT array_agg(pc.relkind = 'p' ORDER BY i.inhrelid::regclass::text)
                         FROM pg_inherits AS i JOIN pg_class AS pc ON pc.oid = i.inhrelid
-                        WHERE i.inhparent = c.oid) AS partitions_partitioned
+                        WHERE i.inhparent = c.oid) AS partitions_partitioned,
+                       (SELECT format('%I.%I', dn.nspname, d.relname)
+                        FROM pg_partitioned_table AS pt
+                        JOIN pg_class AS d ON d.oid = pt.partdefid
+                        JOIN pg_namespace AS dn ON dn.oid = d.relnamespace
+                        WHERE pt.partrelid = c.oid) AS default_partition,
+                       (SELECT pg_relation_size(pt.partdefid)
+                        FROM pg_partitioned_table AS pt
+                        WHERE pt.partrelid = c.oid AND pt.partdefid <> 0) AS default_bytes,
+                       (SELECT quote_ident(a.attname)
+                        FROM pg_partitioned_table AS pt
+                        JOIN pg_attribute AS a ON a.attrelid = pt.partrelid AND a.attnum = pt.partattrs[0]
+                        WHERE pt.partrelid = c.oid AND pt.partstrat = 'r' AND pt.partnatts = 1) AS range_key
                 FROM unnest({}::text[]) AS t(name)
                 JOIN pg_class c ON c.oid = to_regclass(t.name)
                 """,
@@ -369,6 +405,10 @@ class MigrationLinter:
                 names = row.cells["partitions"] or []
                 nested = row.cells["partitions_partitioned"] or [False] * len(names)
                 self._partitions[name] = list(zip(names, nested, strict=True))
+            if row.cells.get("default_partition"):
+                self._defaults[name] = (row.cells["default_partition"], int(row.cells.get("default_bytes") or 0))
+            if row.cells.get("range_key"):
+                self._range_keys[name] = row.cells["range_key"]
 
         for review in reviews:
             if review.table in sizes:
@@ -465,6 +505,13 @@ class MigrationLinter:
         stmt = raw.stmt if isinstance(raw, ast.RawStmt) else raw
         text = _statement_text(raw, sql)
 
+        if isinstance(stmt, ast.CreateStmt):
+            return self._create_table(stmt, text)
+        if isinstance(stmt, (ast.InsertStmt, ast.CopyStmt)):
+            name = _relation_name(stmt.relation)
+            if name:
+                self._written.add(name)
+            return None
         if isinstance(stmt, ast.IndexStmt):
             return self._index(stmt, text)
         if isinstance(stmt, ast.DropStmt):
@@ -722,9 +769,18 @@ class MigrationLinter:
             )
 
         if subtype == AlterTableType.AT_AddConstraint:
+            self._note_check(cmd, table)
             return self._add_constraint(cmd, text, table)
 
+        if subtype == AlterTableType.AT_AttachPartition:
+            return self._attach_partition(cmd, text, table)
+
+        if subtype == AlterTableType.AT_DetachPartition:
+            return self._detach_partition(cmd, text, table)
+
         if subtype == AlterTableType.AT_ValidateConstraint:
+            if table and (table, str(cmd.name)) in self._unvalidated_checks:
+                self._validated_checks.add(table)
             return _review(
                 text,
                 "validate_constraint",
@@ -968,8 +1024,221 @@ class MigrationLinter:
 
         return None
 
+    # -- Partitions ---------------------------------------------------------
+
+    def _note_check(self, cmd: ast.AlterTableCmd, table: str | None) -> None:
+        """Remember a CHECK constraint, which ATTACH PARTITION can use to skip its scan once it is validated."""
+        constraint = cmd.def_ if isinstance(cmd.def_, ast.Constraint) else None
+        if constraint is None or table is None or constraint.contype != ConstrType.CONSTR_CHECK:
+            return
+        if constraint.skip_validation:
+            self._unvalidated_checks[(table, constraint.conname or "")] = True
+        else:
+            self._validated_checks.add(table)
+
+    def _create_table(self, stmt: ast.CreateStmt, text: str) -> StatementReview | None:
+        """CREATE TABLE, which matters here only as PARTITION OF: that locks the parent."""
+        name = _relation_name(stmt.relation)
+        if stmt.partbound is None or not stmt.inhRelations or name is None:
+            if name:
+                self._created.add(name)
+            return None
+        parent = _relation_name(stmt.inhRelations[0]) or ""
+        self._created.add(name)
+        if parent in self._created:
+            # A parent this migration created has nobody using it to block.
+            return _review(
+                text,
+                "create_partition_of",
+                LockLevel.ACCESS_EXCLUSIVE,
+                Duration.INSTANT,
+                rewrites=False,
+                table=parent,
+                summary="CREATE TABLE ... PARTITION OF takes an ACCESS EXCLUSIVE lock on the parent table.",
+                detail=f"{parent} is created earlier in this migration, so nothing else is using it to be blocked.",
+            )
+        review = _review(
+            text,
+            "create_partition_of",
+            LockLevel.ACCESS_EXCLUSIVE,
+            Duration.INSTANT,
+            rewrites=False,
+            table=parent,
+            summary="CREATE TABLE ... PARTITION OF takes an ACCESS EXCLUSIVE lock on the parent table.",
+            detail=(
+                f"Nothing can read or write {parent} while the statement waits for the lock and holds it: briefly, unless "
+                f"{parent} has a DEFAULT partition holding rows, which is scanned under it. ATTACH PARTITION adds the same "
+                "partition under SHARE UPDATE EXCLUSIVE on the parent, which blocks no reads or writes."
+            ),
+            safer=self._partition_recipe(parent, name, stmt.partbound, create=True),
+        )
+        self._partition_statements[id(review)] = (parent, name, stmt.partbound, "create")
+        return review
+
+    def _attach_partition(self, cmd: ast.AlterTableCmd, text: str, table: str | None) -> StatementReview | None:
+        """ATTACH PARTITION: cheap on the parent, a scan of the attached table and the DEFAULT unless constraints prove them."""
+        command = cmd.def_ if isinstance(cmd.def_, ast.PartitionCmd) else None
+        partition = _relation_name(command.name) if command is not None else None
+        if command is None or partition is None or table is None:
+            return None
+        checked = partition in self._validated_checks
+        empty = partition in self._created and partition not in self._written
+        if checked or empty:
+            why = (
+                "the validated CHECK constraint added to it earlier in this migration lets PostgreSQL skip the scan that "
+                'proves its rows fit the bound, provided it implies the bound (PostgreSQL logs "partition constraint ... '
+                'is implied by existing constraints" at DEBUG1 when it does)'
+                if checked
+                else (
+                    "it is created earlier in this migration with nothing written into it, so the scan that proves its rows "
+                    "fit the bound reads nothing"
+                )
+            )
+            review = _review(
+                text,
+                "attach_partition",
+                LockLevel.SHARE_UPDATE_EXCLUSIVE,
+                Duration.INSTANT,
+                rewrites=False,
+                table=table,
+                summary="ATTACH PARTITION takes SHARE UPDATE EXCLUSIVE on the parent, which blocks no reads or writes.",
+                detail=f"{partition} itself is locked ACCESS EXCLUSIVE, and {why}.",
+            )
+        else:
+            review = _review(
+                text,
+                "attach_partition_scan",
+                LockLevel.ACCESS_EXCLUSIVE,
+                Duration.SCAN,
+                rewrites=False,
+                table=partition,
+                summary=f"ATTACH PARTITION scans {partition} under an ACCESS EXCLUSIVE lock to prove every row fits the partition bound.",
+                detail=(
+                    f"The parent {table} takes only SHARE UPDATE EXCLUSIVE, but nothing can read or write {partition} "
+                    "until the scan ends. A validated CHECK constraint on it that implies the bound lets PostgreSQL skip the scan."
+                ),
+                safer=self._partition_recipe(table, partition, command.bound, create=False),
+            )
+        self._partition_statements[id(review)] = (table, partition, command.bound, "attach")
+        return review
+
+    def _detach_partition(self, cmd: ast.AlterTableCmd, text: str, table: str | None) -> StatementReview | None:
+        command = cmd.def_ if isinstance(cmd.def_, ast.PartitionCmd) else None
+        if command is None:
+            return None
+        if command.concurrent:
+            return _review(
+                text,
+                "detach_partition_concurrently",
+                LockLevel.SHARE_UPDATE_EXCLUSIVE,
+                Duration.INSTANT,
+                rewrites=False,
+                table=table,
+                summary="DETACH PARTITION CONCURRENTLY does not block reads or writes on the parent.",
+                detail=(
+                    "It waits out running transactions twice and cannot run inside a transaction block (PostgreSQL 14 and "
+                    "later). Interrupted, it is finished with ALTER TABLE ... DETACH PARTITION ... FINALIZE."
+                ),
+            )
+        return _review(
+            text,
+            "detach_partition",
+            LockLevel.ACCESS_EXCLUSIVE,
+            Duration.INSTANT,
+            rewrites=False,
+            table=table,
+            summary="DETACH PARTITION takes an ACCESS EXCLUSIVE lock on the parent table, briefly.",
+            detail=(
+                "A catalog update, but every query on the parent queues behind it while it waits for the lock. "
+                "CONCURRENTLY takes SHARE UPDATE EXCLUSIVE instead, from PostgreSQL 14, outside a transaction block "
+                "and only where the parent has no DEFAULT partition."
+            ),
+            safer=[text.rstrip(";") + " CONCURRENTLY;  -- PostgreSQL 14 and later, outside a transaction block"],
+        )
+
+    def _settle_partition(self, review: StatementReview) -> StatementReview:
+        """Weigh a partition statement again, now that the catalog says whether the parent has a DEFAULT partition."""
+        entry = self._partition_statements.get(id(review))
+        if entry is None:
+            return review
+        parent, partition, bound, kind = entry
+        if review.safer:
+            review.safer = self._partition_recipe(parent, partition, bound, create=kind == "create")
+        default = self._defaults.get(parent)
+        if default is None or bound is None or bound.is_default:
+            return review
+        default_name, default_bytes = default
+        if default_bytes <= 0 or _named(default_name, self._validated_checks):
+            return review
+
+        statement = "ATTACH PARTITION" if kind == "attach" else "CREATE TABLE ... PARTITION OF"
+        held = default_name if kind == "attach" else f"{default_name} or {parent}"
+        detail = (
+            f"It proves none of the DEFAULT partition's rows belongs to the new partition, and nothing can read or write "
+            f"{held} until it finishes; a query on {parent} not pruned away from the DEFAULT waits with it. A validated "
+            f"CHECK constraint on {default_name} that excludes the new range lets PostgreSQL skip the scan."
+        )
+        if review.kind == "attach_partition_scan":
+            detail += f" {partition} is scanned under its own ACCESS EXCLUSIVE lock as well."
+        settled = _review(
+            review.statement,
+            f"{'attach_partition' if kind == 'attach' else 'create_partition_of'}_scans_default",
+            LockLevel.ACCESS_EXCLUSIVE,
+            Duration.SCAN,
+            rewrites=False,
+            table=default_name,
+            summary=f"{statement} scans {parent}'s DEFAULT partition {default_name} under an ACCESS EXCLUSIVE lock.",
+            detail=detail,
+            safer=self._partition_recipe(parent, partition, bound, create=kind == "create"),
+        )
+        settled.table_bytes = default_bytes
+        return settled
+
+    def _partition_recipe(self, parent: str, partition: str, bound: Any, create: bool) -> list[str]:
+        """The statements that add the partition without ACCESS EXCLUSIVE on the parent or a scan under it.
+
+        Written out in full where the bound is a range over one column whose
+        name the catalog gave; otherwise the same steps, with the bound's
+        condition left for the reader to write.
+        """
+        key = self._range_keys.get(parent)
+        default = self._defaults.get(parent, (None, 0))[0]
+        literals = _range_literals(bound)
+        if key and literals:
+            steps = attach_partition_recipe(parent, partition, key, literals[0], literals[1], default=default)
+            if not create:
+                steps = [step for step in steps if not step.startswith(("CREATE TABLE", "-- Attach rather", "-- load"))]
+            return steps
+
+        name = _identifier(f"{partition.rpartition('.')[2].strip(chr(34))}_bound")
+        steps = [f"CREATE TABLE {partition} (LIKE {parent} INCLUDING ALL EXCLUDING IDENTITY);"] if create else []
+        steps += [
+            f"ALTER TABLE {partition} ADD CONSTRAINT {name} CHECK (<the partition bound, as a condition on the key>) NOT VALID;",
+            f"ALTER TABLE {partition} VALIDATE CONSTRAINT {name};  -- lets ATTACH skip scanning it",
+            f"-- if {parent} has a DEFAULT partition: a CHECK on it excluding the bound, NOT VALID and then VALIDATE",
+            f"ALTER TABLE {parent} ATTACH PARTITION {partition} {_deparse(bound) if bound is not None else '<bound>'};",
+            f"ALTER TABLE {partition} DROP CONSTRAINT {name};",
+        ]
+        return steps
+
 
 # -- Helpers ----------------------------------------------------------------
+
+
+def _range_literals(bound: Any) -> tuple[str, str] | None:
+    """The lower and upper bound of a one-column range bound, as SQL literals."""
+    if bound is None or bound.is_default or bound.strategy != "r":
+        return None
+    lower, upper = bound.lowerdatums or (), bound.upperdatums or ()
+    if len(lower) != 1 or len(upper) != 1 or not isinstance(lower[0], ast.A_Const) or not isinstance(upper[0], ast.A_Const):
+        return None
+    return _deparse(lower[0]), _deparse(upper[0])
+
+
+def _named(name: str, names: set[str]) -> bool:
+    """Whether ``name`` is among ``names``, which may be written with or without the schema."""
+    bare = name.rpartition(".")[2]
+    return name in names or any(other.rpartition(".")[2] == bare for other in names)
 
 
 def _review(
@@ -1063,17 +1332,25 @@ def _timeout_reading(name: str, set_in_migration: dict[str, str], server: dict[s
     # the migration's; lock_timeout differs from its default only when the
     # query context sets it.
     current = server.get("lock_timeout")
-    if name == "lock_timeout" and current is not None and current != default:
-        return {"value": _readable(current), "milliseconds": milliseconds(current), "source": "set by the query context"}
+    # The role's own ALTER ROLE ... SET value, which the query context also
+    # applies, as a login as the role would: a value in this transaction that
+    # matches it is the role's, not one the context set.
+    own = None
     if role != login_role:
         for setting in server.get("role_settings") or []:
             setting_name, _, value = str(setting).partition("=")
             if setting_name == name:
-                return {
-                    "value": value,
-                    "milliseconds": milliseconds(value),
-                    "source": f"ALTER ROLE {role} SET {name}, which applies when the migration logs in as {role}",
-                }
+                own = value
+                break
+    if name == "lock_timeout" and current is not None and current != default and (own is None or milliseconds(own) != milliseconds(current)):
+        return {"value": _readable(current), "milliseconds": milliseconds(current), "source": "set by the query context"}
+    if role != login_role:
+        if own is not None:
+            return {
+                "value": own,
+                "milliseconds": milliseconds(own),
+                "source": f"ALTER ROLE {role} SET {name}, which applies when the migration logs in as {role}",
+            }
         source = (
             f"{role} sets none of its own, so this is what {login_role} gets on this database by default, from the server's "
             "configuration or ALTER DATABASE"
