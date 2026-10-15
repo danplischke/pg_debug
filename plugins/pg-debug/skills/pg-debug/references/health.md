@@ -149,6 +149,42 @@ literals), which is what you feed to `tune-queries`. As a role without
 `pg_read_all_stats` only its own statements are ranked, since other roles'
 queryid is withheld; the command says on stderr how many ran.
 
+**Changed, not merely large.** A sample also marks each statement's `change`:
+`new` when it was not in pg_stat_statements before the sample, `slower` or
+`faster` when its mean time in the sample is at least 3 times, or a third of,
+its mean over the calls recorded before it. A statement at the top of the
+ranking may always have been there; a changed one is the place to look first.
+Both are candidates, inferred from two snapshots: confirm one with
+`diagnose`. They are judged only when pg_stat_statements has counted at least
+ten samples' length before the sample (and, from pg_stat_statements 1.11, the
+statement itself has); otherwise stderr says why nothing was judged, and a
+`new` statement says when evictions (`pg_stat_statements.max`) may explain it.
+
+## What the server is doing per second
+
+```bash
+pg-debug server-rates --interval 10
+pg-debug --json server-rates | jq '.groups[] | select(.measures == "database")'
+```
+
+Two snapshots of the server's own counters, each reported as a delta and a
+rate per second over the interval measured between that view's two reads:
+`pg_stat_database` for this database (commits, rollbacks, blocks read and
+hit, tuples, temp files and bytes, deadlocks, conflicts), how far WAL was
+written (or replayed, on a standby), `pg_stat_wal` (14+), the checkpointer
+and background writer (`pg_stat_checkpointer` from 17), `pg_stat_io` (16+) by
+process type and object, with the rows that did no I/O counted rather than
+listed, and every replication slot's retained WAL and how fast it grows
+(negative when its consumer catches up).
+
+A view whose recorded reset moved during the interval is refused, with both
+times, and so is any counter that went backwards, with both values: a delta
+across a reset is a negative or a too-small rate, not a measurement. Run it
+again. A view the version lacks says which version brought it. Backends
+report their counters about once a second, so a few seconds misses some of
+what ran at the edges; ten is the default. The database's counters include
+one transaction of pg-debug's own.
+
 ## Reviewing the server's configuration
 
 ```bash

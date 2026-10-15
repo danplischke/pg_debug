@@ -63,8 +63,15 @@ from .plans.tree import ExplainPlanArtifact
 from .platform import PlatformDetection
 from .platform import detect_from_url
 from .platform import detect_platform
+from .pooler import PoolerReport
+from .pooler import check_admin_url
+from .pooler import inspect_pgbouncer
+from .pooler import read_server_connections
 from .schema import ObjectType
 from .schema import SchemaInspector
+from .server_rates import DEFAULT_RATES_INTERVAL
+from .server_rates import ServerRates
+from .server_rates import ServerRatesSampler
 from .sharding import DEFAULT_INTERVAL_SECONDS
 from .sharding import ShardReadiness
 from .sharding import ShardReadinessAssessor
@@ -958,6 +965,79 @@ class PgDebug:
         sample_sort = {"resources": "resources", "mean_time": "mean", "total_time": "total"}[sort_by]
         top_queries_tool = TopQueriesCalc(sql_driver=await self.sql_driver())
         return await top_queries_tool.measure(interval_seconds, sort_by=sample_sort, limit=limit)  # type: ignore[arg-type]
+
+    async def sample_server_rates(self, interval_seconds: float = DEFAULT_RATES_INTERVAL) -> ServerRates:
+        """Measure the server's own counters over an interval, as rates per second.
+
+        Reads ``pg_stat_database`` for this database, how far WAL was written
+        (or replayed, on a standby), ``pg_stat_wal`` (PostgreSQL 14+), the
+        checkpointer and background writer, ``pg_stat_io`` (16+) by process
+        type and object, and the WAL each replication slot retains, twice,
+        ``interval_seconds`` apart.
+
+        Args:
+            interval_seconds: How long to wait between the two snapshots
+                (default 10). Backends report their counters about once a
+                second, so a few seconds misses some of what ran at the edges.
+
+        Returns:
+            A :class:`~pg_debug.server_rates.ServerRates`: one
+            :class:`~pg_debug.server_rates.RateGroup` per view row, each with
+            the interval measured between its own two reads and every
+            counter's delta and rate. A group whose counters were reset during
+            the interval, or a counter that went backwards, carries
+            ``refused`` with the reason instead of a rate; so does a view this
+            version does not have.
+
+        Raises:
+            InvalidArgumentError: If the interval is not positive.
+        """
+        return await ServerRatesSampler(await self.sql_driver()).sample(interval_seconds)
+
+    async def inspect_pooler(self, admin_url: str) -> PoolerReport:
+        """Read PgBouncer's admin console and report whether clients wait for a server connection.
+
+        A client waiting in the pool is not a backend yet, so the server
+        cannot show it. The console can: ``SHOW POOLS`` (clients active and
+        waiting, server connections active and idle, how long the oldest
+        waiter has waited), ``SHOW STATS`` (average wait, transaction and
+        query times), ``SHOW DATABASES`` and ``SHOW CONFIG`` (pool mode and
+        sizes). It is reached on a connection of its own, sending it only
+        those ``SHOW`` commands: see :mod:`pg_debug.pooler` for why not
+        through the driver.
+
+        When this client has a database URL, the server's
+        ``max_connections`` is read through it too, after the console, to
+        compare the pool sizes with; without one, the report says it was not.
+        Give the server's own address when you can: through a full pool the
+        read waits in line like every other client, up to PgBouncer's
+        ``query_wait_timeout``, and the report then says it could not be read.
+
+        Args:
+            admin_url: The admin console,
+                ``postgresql://user@host:6432/pgbouncer``, as a user in
+                ``admin_users`` or ``stats_users``.
+
+        Returns:
+            A :class:`~pg_debug.pooler.PoolerReport`: what the console
+            showed, and the ``findings`` of saturation, the most severe
+            first.
+
+        Raises:
+            InvalidArgumentError: If the URL is not the admin console's.
+            ConnectionFailedError: If the console could not be reached.
+        """
+        check_admin_url(admin_url)
+        try:
+            self.database_url  # noqa: B018 - raises when there is none
+        except InvalidArgumentError:
+            reason = "no database URL was given, so the pool sizes are not compared with the server's max_connections"
+            return await inspect_pgbouncer(admin_url, server_refused=reason)
+
+        async def read_server() -> dict[str, Any]:
+            return await read_server_connections(await self.sql_driver())
+
+        return await inspect_pgbouncer(admin_url, read_server=read_server)
 
     # -- What the statistics views withhold ----------------------------------
 

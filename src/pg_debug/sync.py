@@ -42,7 +42,10 @@ from .plans import DEFAULT_MIN_RATIO
 from .plans import PlanFinding
 from .plans import PlanInput
 from .plans.tree import ExplainPlanArtifact
+from .pooler import PoolerReport
 from .schema import ObjectType
+from .server_rates import DEFAULT_RATES_INTERVAL
+from .server_rates import ServerRates
 from .sharding import DEFAULT_INTERVAL_SECONDS
 from .sharding import ShardReadiness
 from .top_queries import QuerySample
@@ -341,6 +344,14 @@ class SyncPgDebug:
     ) -> QuerySample:
         """Measure the most expensive queries over an interval, and say what the ranking left out."""
         return self._call(self._client.sample_top_queries, interval_seconds, sort_by=sort_by, limit=limit)
+
+    def sample_server_rates(self, interval_seconds: float = DEFAULT_RATES_INTERVAL) -> ServerRates:
+        """Measure the server's own counters over an interval, as rates per second."""
+        return self._call(self._client.sample_server_rates, interval_seconds)
+
+    def inspect_pooler(self, admin_url: str) -> PoolerReport:
+        """Read PgBouncer's admin console and report whether clients wait for a server connection."""
+        return self._call(self._client.inspect_pooler, admin_url)
 
     # -- What the statistics views withhold ----------------------------------
 

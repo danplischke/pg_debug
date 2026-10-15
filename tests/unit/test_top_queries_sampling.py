@@ -1,5 +1,8 @@
 """Delta sampling of pg_stat_statements counters."""
 
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -9,7 +12,9 @@ import pytest
 from pg_debug.db import QUERY_MARKER
 from pg_debug.db import SqlDriver
 from pg_debug.db.privileges import HIDDEN_QUERY_TEXT
+from pg_debug.db.window import CountingWindow
 from pg_debug.errors import InvalidArgumentError
+from pg_debug.top_queries import ChangeRule
 from pg_debug.top_queries import QuerySample
 from pg_debug.top_queries import TopQueriesCalc
 
@@ -35,6 +40,17 @@ def rows(*entries):
 
 def entry(queryid, query, **counters):
     return {"queryid": queryid, "query": query, **counters}
+
+
+NOW = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
+
+
+def window(days=None, seconds=None, evicted=None):
+    """pg_stat_statements' counting window at the second snapshot; unknown with neither."""
+    if days is None and seconds is None:
+        return CountingWindow(since=None, now=NOW)
+    span = timedelta(days=days or 0, seconds=seconds or 0)
+    return CountingWindow(since=NOW - span, now=NOW, began_with="reset", evicted=evicted)
 
 
 # -- Diffing ----------------------------------------------------------------
@@ -191,6 +207,7 @@ async def test_sample_waits_between_snapshots():
     with (
         patch.object(TopQueriesCalc, "_require_pg_stat_statements", AsyncMock()),
         patch.object(TopQueriesCalc, "_counter_snapshot", AsyncMock(side_effect=snapshots)),
+        patch.object(TopQueriesCalc, "_statement_window", AsyncMock(return_value=window(days=30))),
         patch("pg_debug.top_queries.asyncio.sleep", AsyncMock()) as sleep,
     ):
         (result,) = await calc.sample(2.5)
@@ -208,11 +225,12 @@ def withheld(userid=10, **counters):
     return {**snapshot(entry(None, HIDDEN_QUERY_TEXT, **counters))[(None, 10, 20)], "userid": userid}
 
 
-async def measure(before, after, **kwargs) -> QuerySample:
+async def measure(before, after, counted=None, **kwargs) -> QuerySample:
     calc = TopQueriesCalc(MagicMock(spec=SqlDriver))
     with (
         patch.object(TopQueriesCalc, "_require_pg_stat_statements", AsyncMock()),
         patch.object(TopQueriesCalc, "_counter_snapshot", AsyncMock(side_effect=[before, after])),
+        patch.object(TopQueriesCalc, "_statement_window", AsyncMock(return_value=counted or window(days=30))),
         patch("pg_debug.top_queries.asyncio.sleep", AsyncMock()),
     ):
         return await calc.measure(1, **kwargs)
@@ -260,5 +278,108 @@ async def test_a_withheld_statement_evicted_during_the_interval_is_not_counted()
 async def test_a_role_shown_everything_has_nothing_left_out():
     sample = await measure(rows(entry(1, "SELECT 1", calls=1)), rows(entry(1, "SELECT 1", calls=4)))
 
-    assert sample == QuerySample(queries=sample.queries, withheld=0)
+    assert sample == QuerySample(queries=sample.queries, withheld=0, statement_window=window(days=30).to_dict())
     assert sample.queries[0]["calls"] == 3
+
+
+# -- New and changed statements -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_statement_new_in_the_sample_is_flagged_as_a_candidate():
+    before = rows(entry(1, "SELECT 1", calls=10, total_exec_time=10.0))
+    after = rows(entry(1, "SELECT 1", calls=11, total_exec_time=11.0), entry(2, "SELECT 2", calls=3, total_exec_time=3.0))
+
+    sample = await measure(before, after)
+
+    changes = {row["queryid"]: row["change"] for row in sample.queries}
+    assert changes[1] is None
+    assert changes[2]["kind"] == "new"
+    assert changes[2]["confidence"] == "candidate"
+    assert sample.changes_refused is None
+
+
+@pytest.mark.asyncio
+async def test_a_new_statement_says_evictions_may_explain_it():
+    sample = await measure([], rows(entry(2, "SELECT 2", calls=3, total_exec_time=3.0)), counted=window(days=30, evicted=12))
+
+    assert "evicted statements 12 times" in sample.queries[0]["change"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_a_statement_whose_mean_moved_sharply_is_flagged_slower():
+    """Mean 1ms over 1000 calls before the sample, 5ms a call in it."""
+    before = rows(entry(1, "SELECT 1", calls=1000, total_exec_time=1000.0))
+    after = rows(entry(1, "SELECT 1", calls=1010, total_exec_time=1050.0))
+
+    (row,) = (await measure(before, after)).queries
+
+    assert row["change"]["kind"] == "slower"
+    assert row["change"]["ratio"] == pytest.approx(5.0)
+    assert row["change"]["previous_mean_exec_time"] == pytest.approx(1.0)
+    assert row["change"]["sample_mean_exec_time"] == pytest.approx(5.0)
+
+
+@pytest.mark.asyncio
+async def test_a_statement_whose_mean_fell_sharply_is_flagged_faster():
+    before = rows(entry(1, "SELECT 1", calls=100, total_exec_time=1000.0))
+    after = rows(entry(1, "SELECT 1", calls=110, total_exec_time=1010.0))
+
+    (row,) = (await measure(before, after)).queries
+
+    assert row["change"]["kind"] == "faster"
+
+
+@pytest.mark.asyncio
+async def test_a_large_statement_that_runs_as_it_always_has_is_not_changed():
+    """Large is not changed: the most expensive statement may always have been."""
+    before = rows(entry(1, "SELECT 1", calls=1000, total_exec_time=100_000.0))
+    after = rows(entry(1, "SELECT 1", calls=1100, total_exec_time=115_000.0))
+
+    (row,) = (await measure(before, after)).queries
+
+    assert row["change"] is None
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_judged_when_the_record_is_not_much_longer_than_the_sample():
+    """Reset seconds ago: every statement is new, and no mean is a history."""
+    sample = await measure([], rows(entry(2, "SELECT 2", calls=3, total_exec_time=3.0)), counted=window(seconds=5))
+
+    assert sample.queries[0]["change"] is None
+    assert sample.changes_refused is not None
+    assert "counted for 4s before the sample" in sample.changes_refused
+    assert "(10s) is needed" in sample.changes_refused
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_judged_when_the_record_cannot_be_dated():
+    """pg_stat_statements before 1.9 records no reset."""
+    sample = await measure([], rows(entry(2, "SELECT 2", calls=3, total_exec_time=3.0)), counted=window())
+
+    assert sample.queries[0]["change"] is None
+    assert "before 1.9" in (sample.changes_refused or "")
+
+
+def test_a_statement_whose_counters_went_backwards_is_not_judged():
+    rule = ChangeRule(sample_seconds=1, window=window(days=30))
+    before = snapshot(entry(1, "SELECT 1", calls=100, total_exec_time=100.0))
+    after = snapshot(entry(1, "SELECT 1", calls=4, total_exec_time=40.0))
+
+    (delta,) = TopQueriesCalc._diff_snapshots(before, after, rule=rule)
+
+    assert delta["change"]["kind"] is None
+    assert "started again" in delta["change"]["refused"]
+
+
+def test_a_statement_recorded_again_recently_is_not_judged_by_its_short_record():
+    """pg_stat_statements 1.11 dates each entry: one evicted and recorded again seconds ago has seconds of history."""
+    rule = ChangeRule(sample_seconds=1, window=window(days=30))
+    since = NOW - timedelta(seconds=6)
+    before = snapshot(entry(1, "SELECT 1", calls=10, total_exec_time=10.0, stats_since=since))
+    after = snapshot(entry(1, "SELECT 1", calls=20, total_exec_time=100.0, stats_since=since))
+
+    (delta,) = TopQueriesCalc._diff_snapshots(before, after, rule=rule)
+
+    assert delta["change"]["kind"] is None
+    assert "5s long" in delta["change"]["refused"]

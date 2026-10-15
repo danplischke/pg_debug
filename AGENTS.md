@@ -31,7 +31,7 @@ above need nothing else.
 | `src/pg_debug/parsing/` | pglast visitors and bind-parameter substitution for SQL we are *given*. |
 | `src/pg_debug/queries/` | SQL that more than one module runs. A module's own SQL stays beside the code that reads its rows. |
 | `src/pg_debug/plans/`, `health/`, `index/`, `index_use/`, `model/`, `migration/`, `partition/`, `sharding/` | One package per feature that needed more than one file. |
-| `src/pg_debug/activity.py`, `configuration.py`, `history.py`, `schema.py`, `statistics.py`, `top_queries.py` | Features that fit in one file. |
+| `src/pg_debug/activity.py`, `configuration.py`, `history.py`, `pooler.py`, `schema.py`, `server_rates.py`, `statistics.py`, `top_queries.py` | Features that fit in one file. |
 | `src/pg_debug/baseline.py` | `--baseline`: the identity each finding is known by, and the file that records them. |
 | `plugins/pg-debug/`, `.claude-plugin/marketplace.json` | The Claude Code plugin and the marketplace that publishes it. `.claude/skills/pg-debug` links to the plugin's skill. |
 | `tests/unit/` | Mirrors `src/pg_debug/`. Test module names must be unique across the tree. |

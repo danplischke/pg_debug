@@ -24,6 +24,7 @@ from ..partition import DEFAULT_MIN_PRUNING_SHARE
 from ..partition import DEFAULT_MIN_TABLE_BYTES
 from ..plans import DEFAULT_MIN_RATIO
 from ..schema import ObjectType
+from ..server_rates import DEFAULT_RATES_INTERVAL
 from ..sharding import DEFAULT_INTERVAL_SECONDS
 from ..waits import DEFAULT_SAMPLE_INTERVAL
 from .commands import cmd_activity
@@ -41,8 +42,10 @@ from .commands import cmd_locks
 from .commands import cmd_model
 from .commands import cmd_objects
 from .commands import cmd_partitions
+from .commands import cmd_pooler
 from .commands import cmd_schemas
 from .commands import cmd_security
+from .commands import cmd_server_rates
 from .commands import cmd_shard_readiness
 from .commands import cmd_top_queries
 from .commands import cmd_tune_queries
@@ -69,7 +72,9 @@ from .render import render_object_details
 from .render import render_partition_candidates
 from .render import render_plan
 from .render import render_plan_findings
+from .render import render_pooler_report
 from .render import render_rows
+from .render import render_server_rates
 from .render import render_shard_readiness
 from .render import render_vacuum_progress
 from .render import with_wait_diagnosis
@@ -584,6 +589,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sample over this many seconds instead of reporting totals since the last statistics reset.",
     )
     top_queries.set_defaults(func=cmd_top_queries)
+
+    server_rates = subparsers.add_parser("server-rates", help="Measure the server's counters over an interval: commits, I/O, WAL, checkpoints, slots")
+    server_rates.add_argument(
+        "-i",
+        "--interval",
+        type=float,
+        default=DEFAULT_RATES_INTERVAL,
+        metavar="SECONDS",
+        help=f"Seconds between the two snapshots (default: {DEFAULT_RATES_INTERVAL:g}).",
+    )
+    server_rates.set_defaults(func=cmd_server_rates, render=render_server_rates)
+
+    pooler = subparsers.add_parser("pooler", help="Read PgBouncer's admin console: are clients waiting for a server connection?")
+    pooler.add_argument(
+        "admin_url",
+        metavar="ADMIN_URL",
+        help="PgBouncer's admin console, e.g. postgresql://postgres@host:6432/pgbouncer, as a user in admin_users or stats_users. "
+        "With -d or DATABASE_URL as well, the pool sizes are compared with the server's max_connections.",
+    )
+    pooler.set_defaults(func=cmd_pooler, render=render_pooler_report)
 
     tune_workload = subparsers.add_parser(
         "tune-workload",

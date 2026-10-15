@@ -14,6 +14,9 @@ one of the pooler's backends at once, which is the only way to be sure of
 reaching each of them.
 """
 
+import json
+import threading
+import time
 from typing import Any
 from typing import LiteralString
 from typing import NamedTuple
@@ -284,3 +287,79 @@ class TestBehindATransactionPooler:
             assert await pg.execute_sql("SELECT label, current_setting('client_encoding') AS encoding FROM legacy") == [
                 {"label": "café", "encoding": "LATIN1"}
             ]
+
+
+def admin_url(pooled: str) -> str:
+    return pooled.rsplit("/", 1)[0] + "/pgbouncer"
+
+
+class TestThePoolerAdminConsole:
+    """``pg-debug pooler`` reads PgBouncer's own counters, which the server cannot show."""
+
+    @pytest.mark.asyncio
+    async def test_clients_holding_every_server_connection_and_one_waiting_are_reported(self, test_pooled_postgres):
+        direct, pooled = test_pooled_postgres
+        held = [psycopg.connect(pooled) for _ in range(PGBOUNCER_POOL_SIZE)]
+        waiter_error: list[Exception] = []
+
+        def wait() -> None:
+            try:
+                with psycopg.connect(pooled) as conn:
+                    conn.execute("SELECT 1")
+                    conn.rollback()
+            except psycopg.Error as e:
+                waiter_error.append(e)
+
+        try:
+            # Each holds a server connection in its open transaction.
+            for conn in held:
+                conn.execute("SELECT 1")
+            waiter = threading.Thread(target=wait)
+            waiter.start()
+            time.sleep(1.5)
+            # The server compared with directly: through the full pool the read would wait in line.
+            async with PgDebug(direct) as pg:
+                report = await pg.inspect_pooler(admin_url(pooled))
+        finally:
+            for conn in held:
+                conn.rollback()
+                conn.close()
+        waiter.join()
+        assert waiter_error == []
+
+        database = pooled.rsplit("/", 1)[1]
+        (pool,) = [p for p in report.pools if p["database"] == database]
+        assert pool["cl_active"] >= PGBOUNCER_POOL_SIZE
+        assert pool["sv_active"] == PGBOUNCER_POOL_SIZE
+        assert pool["cl_waiting"] == 1
+        assert pool["maxwait"] >= 1.0
+        assert report.config["pool_mode"] == "transaction"
+        assert report.config["default_pool_size"] == PGBOUNCER_POOL_SIZE
+        assert report.server is not None and report.server["max_connections"] > 0
+        assert report.unavailable == {}
+        (waiting,) = [f for f in report.findings if f.kind == "clients_waiting"]
+        assert waiting.subject.startswith(f"{database}/")
+        assert waiting.severity.value == "high"
+
+    def test_without_a_database_the_command_says_it_compared_nothing(self, test_pooled_postgres, capsys, monkeypatch):
+        _, pooled = test_pooled_postgres
+        for variable in ("DATABASE_URI", "DATABASE_URL"):
+            monkeypatch.delenv(variable, raising=False)
+        capsys.readouterr()
+
+        code = cli.main(["--json", "pooler", admin_url(pooled)])
+
+        captured = capsys.readouterr()
+        assert code == 0
+        report = json.loads(captured.out)
+        assert report["version"].startswith("PgBouncer")
+        assert report["server"] is None
+        assert "not compared with the server's max_connections" in captured.err
+
+    def test_a_url_to_a_pooled_database_is_refused(self, test_pooled_postgres, run):
+        _, pooled = test_pooled_postgres
+
+        code, _, err = run(pooled, "pooler", pooled)
+
+        assert code == 1
+        assert "admin console is the database named pgbouncer" in err

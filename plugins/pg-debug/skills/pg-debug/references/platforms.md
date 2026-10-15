@@ -150,10 +150,29 @@ connections, never the clients queued behind them, so neither `activity` nor
 admin console can: `SHOW POOLS` gives `cl_waiting`, the clients that have
 sent a query and have no server connection yet, and `maxwait`, how long the
 oldest has waited, where a steadily rising `maxwait` means the pool is too
-small or the server overloaded; `SHOW STATS` gives `avg_wait_time`. Ask the
-user for that output (`psql` to the pooler's `pgbouncer` database) rather
-than inferring saturation from server-side counts. On Supabase the Supavisor
-client count is available only from the metrics endpoint.
+small or the server overloaded; `SHOW STATS` gives `avg_wait_time`.
+`pg-debug pooler` reads them, rather than inferring saturation from
+server-side counts:
+
+```bash
+pg-debug pooler postgresql://admin@pooler:6432/pgbouncer
+pg-debug -d postgresql://app@db:5432/app pooler postgresql://admin@pooler:6432/pgbouncer
+```
+
+It reports each pool's clients active and waiting, server connections active
+and idle, and `maxwait`, with a finding for clients waiting now (high once
+the oldest has waited a second), for an average wait over PgBouncer's last
+stats period of a millisecond or more, and, with `-d`, for pools that together
+can open more server connections than `max_connections` leaves for ordinary
+roles. The user must be in `admin_users` or `stats_users`. The admin console
+is not PostgreSQL: it is read on its own connection, over the simple query
+protocol, and sent only `SHOW` commands, so restricted mode does not apply to
+it and nothing in it can change. Give `-d` the server's own address where
+you can: through a full pool, reading `max_connections` waits in line, and
+the report then says it could not be read. Without `pg-debug pooler` access,
+ask the user for `SHOW POOLS` output (`psql` to the pooler's `pgbouncer`
+database). On Supabase the Supavisor client count is available only from the
+metrics endpoint.
 
 Two settings are worth recommending wherever there is a pool.
 `idle_in_transaction_session_timeout` ends sessions left open in a

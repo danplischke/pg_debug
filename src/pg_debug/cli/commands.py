@@ -21,6 +21,7 @@ from .render import note_withheld_queries
 from .render import note_withheld_sample
 from .render import note_withheld_vacuums
 from .render import note_withheld_waits
+from .render import sampled_queries_text
 from .streams import read_sql
 from .streams import read_sql_or_file
 from .streams import read_stdin
@@ -224,12 +225,23 @@ async def cmd_top_queries(pg: PgDebug, args: argparse.Namespace) -> Any:
         windows = await pg.counting_windows()
         return _also_noting(shown, note_statement_window(windows))
     sample = await pg.sample_top_queries(args.interval, sort_by=args.sort_by, limit=args.limit)
+    # The text says in a word what changed; --json prints the figures.
+    shown = Shown(sample.queries, text=sampled_queries_text(sample.queries), note=sample.changes_refused)
     if not sample.withheld:
-        return sample.queries
+        return shown
     access = await pg.statistics_access()
     if access.reads_all_stats:
-        return sample.queries
-    return Shown(sample.queries, note=note_withheld_sample(access, sample.withheld, args.sort_by))
+        return shown
+    return _also_noting(shown, note_withheld_sample(access, sample.withheld, args.sort_by))
+
+
+async def cmd_pooler(pg: PgDebug, args: argparse.Namespace) -> Any:
+    report = await pg.inspect_pooler(args.admin_url)
+    return Shown(report, note=report.server_refused)
+
+
+async def cmd_server_rates(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.sample_server_rates(args.interval)
 
 
 async def cmd_tune_workload(pg: PgDebug, args: argparse.Namespace) -> Any:

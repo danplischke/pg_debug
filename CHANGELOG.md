@@ -358,6 +358,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `pg_stats` puts at least half NULL, as a candidate for a partial index
   `WHERE column IS NOT NULL`, which serves every condition that cannot be
   true of a NULL.
+- `pg-debug server-rates [--interval SECONDS]`, `pg.sample_server_rates()` and
+  `SyncPgDebug.sample_server_rates()`. Only `top-queries --interval` measured
+  anything over an interval, and only statements; what the server as a whole
+  was doing now (commits, block reads, temp files, deadlocks, WAL, checkpoints,
+  I/O by process type, how fast a replication slot holds back WAL) could be
+  read only as totals since a reset that may be a month or a minute old. The
+  command takes two snapshots of `pg_stat_database` for this database, the
+  WAL position, `pg_stat_wal` (14+), the checkpointer and background writer
+  (`pg_stat_checkpointer` on 17+), `pg_stat_io` (16+) and
+  `pg_replication_slots`, and reports each counter's delta and rate per second
+  over the interval measured between that view's own reads. A view whose
+  recorded reset moved during the interval, or a counter that went
+  backwards, is refused with the two times or values, rather than reported as
+  a negative or too-small rate; a view the version lacks says which version
+  brought it. Restricted mode allows `pg_current_wal_lsn()` and
+  `pg_wal_lsn_diff()` for it.
+
+- `pg-debug pooler ADMIN_URL`, `pg.inspect_pooler()` and
+  `SyncPgDebug.inspect_pooler()`. Behind PgBouncer, a client waiting for a
+  server connection is not a backend, so nothing pg-debug read could show a
+  pool that is too small, and the skill could only ask the user for `SHOW
+  POOLS` output. The command reads PgBouncer's admin console (`SHOW POOLS`,
+  `SHOW STATS`, `SHOW DATABASES`, `SHOW CONFIG`) and reports clients waiting
+  and the oldest wait, the average wait over PgBouncer's stats period, and,
+  given `-d`, pools that can open more server connections than the server's
+  `max_connections` leaves for ordinary roles. The console speaks only the
+  simple query protocol and has no transactions, so it is read on its own
+  connection rather than through the driver, and is sent nothing but fixed
+  `SHOW` commands.
+
+- `top-queries --interval` marks each statement's `change`: `new` when it was
+  not in pg_stat_statements before the sample, `slower` or `faster` when its
+  mean time in the sample is three times, or a third of, its mean before it.
+  The ranking said what was large, which may always have been; it did not
+  say what had changed. Both are candidates, and are judged only when
+  pg_stat_statements has counted ten times the sample's length before it (and
+  from pg_stat_statements 1.11, the statement itself has); otherwise stderr
+  says why nothing was judged. `QuerySample` gains `statement_window` and
+  `changes_refused`.
 
 ### Changed
 
@@ -459,6 +498,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of time no plan node includes — a trigger's, JIT's — is stated as a share of
   the execution time, and planning as a share of planning plus execution,
   rather than as a share of "the query's work".
+- `activity` listed backends by how long they had been in their state, so the
+  session holding everyone up could sit below the sessions waiting on it.
+  Culprits now come first: root blockers (blocking others, waiting on
+  nothing), the one blocking the most first, then blockers that wait
+  themselves, then the waiters, then the rest. Each row carries
+  `blocking_total`, how many backends wait on it directly or behind others,
+  counted from one read of the lock graph across the whole server, and the
+  table shows it as `blocking`.
 
 ### Fixed
 
