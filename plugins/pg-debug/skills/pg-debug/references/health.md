@@ -26,11 +26,41 @@ Checks: `index` (invalid, duplicate, bloated, unused), `table` (heap bloat),
 `connection` (client backends against `max_connections` less its
 reservations, flagged at 80%, and each session idle in a transaction for a
 minute or more, named with its pid, role, database, application and last
-statement), `vacuum` (transaction ID wraparound, autovacuum backlog, and what
-is holding the vacuum horizon), `sequence` (approaching
-maximum), `replication`, `buffer` (cache hit rates), `constraint` (invalid
-constraints), `statistics` (never analyzed or drifted), `scan` (tables read
-sequentially far more than through an index, charged in bytes read), `all`.
+statement), `vacuum` (transaction ID wraparound, autovacuum backlog, what
+is holding the vacuum horizon, and multixact wraparound), `sequence` (approaching
+maximum), `replication` (lag, and what each slot retains), `buffer` (cache hit
+rates), `constraint` (invalid constraints), `statistics` (never analyzed or
+drifted), `scan` (tables read sequentially far more than through an index,
+charged in bytes read), `collation` (collation versions that no longer match
+their library, with the indexes on them), `checksum` (pages that failed their
+checksum), `all`.
+
+"Multixact wraparound" flags a database or table whose oldest multixact is
+past 200 million (`level: approaching`), past
+`autovacuum_multixact_freeze_max_age` or its per-table override
+(`past_freeze_max_age`: autovacuum is not keeping up), or within 10 million of
+the hard limit (`wraparound`); tables are those of the database connected to.
+It never gives a member-space percentage, because PostgreSQL publishes none.
+Unrestricted, as a role allowed `pg_ls_dir` and `pg_stat_file`, it measures
+`pg_multixact/members` on disk and reports past 10 GB a `member_space`
+finding with `confidence: candidate`; otherwise it says the size was not read.
+`metrics.member_slru` (13 and later) is how busy member storage has been, not
+how full.
+
+"Replication slot retention" reports each slot once, under its worst `kind`:
+`lost`, `unbounded` (inactive with `max_slot_wal_keep_size = -1`, or before
+13: it retains until the disk fills), `unreserved`, `inactive`, `extended`
+(connected but behind by more than `max_wal_size`) and `horizon` (an `xmin` or
+`catalog_xmin` older than `autovacuum_freeze_max_age`). `retained_bytes` is
+measured from `pg_current_wal_lsn()`, on a standby from
+`pg_last_wal_replay_lsn()`. Slots it did not flag are in `metrics.examined`.
+Never advise dropping a slot without confirming its consumer is gone (see
+[scale-out.md](scale-out.md)).
+
+"Collation versions" and "Data checksums" are covered in
+[incidents.md](incidents.md): a changed collation version proves the library
+changed, not that an index is corrupt, and checksums off means failures
+cannot be counted, which the check says rather than calling it clean.
 
 In JSON each check has `healthy`, `summary`, `findings` (the flagged objects)
 and `metrics` (the numbers and thresholds behind the verdict). A check that

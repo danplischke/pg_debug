@@ -27,7 +27,7 @@ without an MCP client in the loop.
 - **Migration review** — read a migration before running it and see, per statement, the lock it takes, how long it holds it, whether it rewrites the table, and a safer rewrite where one exists. Connected, it reports how big the tables actually are, which is what decides whether a rewrite is a pause or an outage.
 - **Data model review** — foreign keys with no index behind them, keys whose two sides are different types, tables with no primary key, columns ordered so alignment padding costs bytes on every row, and types that do not mean what they look like. Each finding says whether it is proven from the catalog or inferred from statistics, and carries the DDL that fixes it.
 - **Partition advice** — whether a table is worth partitioning, decided by the share of recorded query time that would still prune rather than by the table's size. It is built to say no: a 400 GB table where a third of the query time filters on a timestamp is a worse table after partitioning, and the verdict comes with the number behind it either way.
-- **Health checks** — invalid/duplicate/bloated/unused indexes, table bloat, connection utilization, transaction ID wraparound risk, autovacuum backlog and what is holding the vacuum horizon, sequences near their limit, replication lag and slots, buffer cache hit rates, invalid constraints, statistics freshness, tables read sequentially far more than through an index.
+- **Health checks** — invalid/duplicate/bloated/unused indexes, table bloat, connection utilization, transaction ID and multixact wraparound risk, autovacuum backlog and what is holding the vacuum horizon (standbys with `hot_standby_feedback` included), sequences near their limit, replication lag, slots and the WAL they retain, buffer cache hit rates, invalid constraints, statistics freshness, tables read sequentially far more than through an index, collations whose library version changed under their indexes, and checksum failures.
 - **Top queries** — the most expensive queries recorded by `pg_stat_statements`, ranked by resource blend or by execution time, cumulatively or sampled over an interval.
 - **Index tuning** — recommend indexes for your recorded workload or for a specific set of queries, with before/after planner costs, the size HypoPG measures for each candidate, and what each one will cost to keep up to date.
 - **Access modes** — run unrestricted, or in a `restricted` mode that parses each statement, rejects anything that is not read-only, and runs it in a read-only transaction with a statement timeout.
@@ -153,7 +153,8 @@ options: `--role ROLE`, `--set NAME=VALUE` (repeatable), `--config FILE` and
 `--no-config`.
 
 Health checks are `index`, `connection`, `vacuum`, `sequence`, `replication`,
-`buffer`, `constraint`, `statistics`, `table`, `scan` and `all`.
+`buffer`, `constraint`, `statistics`, `table`, `scan`, `collation`, `checksum`
+and `all`.
 
 `health`, `model` and `config` can gate a build with `--exit-code`. The
 trouble with adopting such a gate is the first run: an existing database has
@@ -333,7 +334,27 @@ back nothing vacuum needs and the horizon check does not report it. It does
 keep the locks it took, even a plain read's share lock, which queues DDL and
 everything behind it; `health --type connection` flags it once it has been idle
 in its transaction for a minute. What the horizon check reports is a backend
-holding a snapshot, or holding a transaction id because it has written.
+holding a snapshot, or holding a transaction id because it has written, and a
+standby whose queries hold it through `hot_standby_feedback`: from its WAL
+sender's `backend_xmin` without a slot, from its physical slot's `xmin` with
+one. PostgreSQL publishes no age at which such a hold becomes harmful, so a
+standby is judged as a slot is: any hold is reported, with its age.
+
+`vacuum` also reads multixact age, the second counter vacuum must freeze, per
+database and for this database's tables, against
+`autovacuum_multixact_freeze_max_age`, an alert age of 200 million and the hard
+limit. PostgreSQL publishes no member-space figure, so none is given; where the
+role may run `pg_ls_dir` (not in restricted mode) the size of
+`pg_multixact/members` is read, and past 10 GB it is a candidate finding.
+`replication` adds what each slot retains: the WAL behind its `restart_lsn`,
+`wal_status`, whether it is inactive with `max_slot_wal_keep_size = -1` (it
+retains until the disk fills), and an `xmin` or `catalog_xmin` older than
+`autovacuum_freeze_max_age`. `collation` compares each recorded collation
+version (the database defaults from PostgreSQL 15) with what the library
+reports now and names the indexes that depend on a changed one, with the
+`REINDEX` and `REFRESH VERSION` statements. `checksum` reads
+`pg_stat_database.checksum_failures` (PostgreSQL 12 and later) and says when
+`data_checksums` is off, so that failures cannot be detected.
 
 `model` reviews the data model rather than the running server, and needs no
 extension. Its rules are `unindexed_foreign_key`, `foreign_key_type_mismatch`,
