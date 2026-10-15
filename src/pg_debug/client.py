@@ -458,7 +458,7 @@ class PgDebug:
             ExplainPlanError: If the statement could not be run or its plan
                 could not be read.
         """
-        return await PlanDiagnoser(await self.sql_driver()).diagnose(sql, min_ratio=min_ratio)
+        return await PlanDiagnoser(await self.sql_driver(), platform=self._detect_platform).diagnose(sql, min_ratio=min_ratio)
 
     async def diagnose_plan(self, plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> list[PlanFinding]:
         """Diagnose a plan that already exists, checking this database's catalog.
@@ -485,7 +485,7 @@ class PgDebug:
             InvalidArgumentError: If the plan is not EXPLAIN JSON, or was
                 produced without ANALYZE.
         """
-        return await PlanDiagnoser(await self.sql_driver()).diagnose_plan(plan, min_ratio=min_ratio)
+        return await PlanDiagnoser(await self.sql_driver(), platform=self._detect_platform).diagnose_plan(plan, min_ratio=min_ratio)
 
     # -- Index use -----------------------------------------------------------
 

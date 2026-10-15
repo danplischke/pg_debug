@@ -1,0 +1,38 @@
+{
+ "Query Text": "PREPARE q(text) AS SELECT id FROM public.jobs WHERE state = $1",
+ "Query Parameters": "$1 = 'queued'",
+ "Plan": {
+  "Node Type": "Index Scan",
+  "Parallel Aware": false,
+  "Async Capable": false,
+  "Scan Direction": "Forward",
+  "Index Name": "jobs_state_idx",
+  "Relation Name": "jobs",
+  "Schema": "public",
+  "Alias": "jobs",
+  "Startup Cost": 0.29,
+  "Total Cost": 2645.46,
+  "Plan Rows": 100000,
+  "Plan Width": 8,
+  "Actual Startup Time": 0.038,
+  "Actual Total Time": 0.553,
+  "Actual Rows": 100,
+  "Actual Loops": 1,
+  "Output": [
+   "id"
+  ],
+  "Index Cond": "(jobs.state = $1)",
+  "Rows Removed by Index Recheck": 0,
+  "Shared Hit Blocks": 100,
+  "Shared Read Blocks": 2,
+  "Shared Dirtied Blocks": 0,
+  "Shared Written Blocks": 0,
+  "Local Hit Blocks": 0,
+  "Local Read Blocks": 0,
+  "Local Dirtied Blocks": 0,
+  "Local Written Blocks": 0,
+  "Temp Read Blocks": 0,
+  "Temp Written Blocks": 0
+ },
+ "Query Identifier": -4264263147722803977
+}

@@ -1,0 +1,89 @@
+[
+ {
+  "Plan": {
+   "Node Type": "CTE Scan",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "CTE Name": "u",
+   "Alias": "u",
+   "Startup Cost": 5804.0,
+   "Total Cost": 12554.0,
+   "Plan Rows": 1500,
+   "Plan Width": 80,
+   "Actual Startup Time": 0.027,
+   "Actual Total Time": 158.582,
+   "Actual Rows": 1,
+   "Actual Loops": 1,
+   "Output": [
+    "u.id",
+    "u.email",
+    "u.status",
+    "u.created_at"
+   ],
+   "Filter": "(u.email = 'User77@Example.com'::text)",
+   "Rows Removed by Filter": 299999,
+   "Shared Hit Blocks": 56,
+   "Shared Read Blocks": 2748,
+   "Shared Dirtied Blocks": 0,
+   "Shared Written Blocks": 306,
+   "Local Hit Blocks": 0,
+   "Local Read Blocks": 0,
+   "Local Dirtied Blocks": 0,
+   "Local Written Blocks": 0,
+   "Temp Read Blocks": 0,
+   "Temp Written Blocks": 2124,
+   "Plans": [
+    {
+     "Node Type": "Seq Scan",
+     "Parent Relationship": "InitPlan",
+     "Subplan Name": "CTE u",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Relation Name": "users",
+     "Schema": "public",
+     "Alias": "users",
+     "Startup Cost": 0.0,
+     "Total Cost": 5804.0,
+     "Plan Rows": 300000,
+     "Plan Width": 45,
+     "Actual Startup Time": 0.006,
+     "Actual Total Time": 37.271,
+     "Actual Rows": 300000,
+     "Actual Loops": 1,
+     "Output": [
+      "users.id",
+      "users.email",
+      "users.status",
+      "users.created_at"
+     ],
+     "Shared Hit Blocks": 56,
+     "Shared Read Blocks": 2748,
+     "Shared Dirtied Blocks": 0,
+     "Shared Written Blocks": 306,
+     "Local Hit Blocks": 0,
+     "Local Read Blocks": 0,
+     "Local Dirtied Blocks": 0,
+     "Local Written Blocks": 0,
+     "Temp Read Blocks": 0,
+     "Temp Written Blocks": 0
+    }
+   ]
+  },
+  "Query Identifier": -1531805347805286805,
+  "Planning": {
+   "Shared Hit Blocks": 6,
+   "Shared Read Blocks": 0,
+   "Shared Dirtied Blocks": 0,
+   "Shared Written Blocks": 0,
+   "Local Hit Blocks": 0,
+   "Local Read Blocks": 0,
+   "Local Dirtied Blocks": 0,
+   "Local Written Blocks": 0,
+   "Temp Read Blocks": 0,
+   "Temp Written Blocks": 0
+  },
+  "Planning Time": 0.141,
+  "Triggers": [],
+  "Execution Time": 160.022
+ }
+]

@@ -325,9 +325,30 @@ below the truth. The rest is read straight off the plan: a sort or a hash that
 outgrew `work_mem`, a bitmap that went lossy, a scan reading rows to discard
 them, workers planned for and not granted.
 
+Some readings combine the plan with the catalog. A row-level security policy
+that calls a STABLE function per row, `USING (user_id = auth.uid())`, is
+named with the `ALTER POLICY` that wraps it as `(SELECT auth.uid())`, which
+PostgreSQL evaluates once — in place of the advice to index the rows the
+filter discarded. A condition the policy keeps from an existing index because
+its operator is not `LEAKPROOF`, a function applied to a plainly indexed
+column, and a foreign-key trigger whose referencing columns have no index are
+named the same way. From the plan alone: an index walked in order for a
+`LIMIT` while a filter discarded most of it, an OR across a join's two sides,
+a deep `OFFSET`, a CTE computed in full and read once, an index-only scan
+going to the heap, a sequential scan reading near-empty pages, a generic
+plan's misestimate in `auto_explain` output, and triggers, JIT or planning
+taking a large share of the time. A finding inferred from a condition's text
+carries `confidence: candidate`. A finding about a planner choice also names
+what this server offers to pin a plan — `pg_hint_plan`, PostgreSQL 19's
+`pg_plan_advice` (in beta as of October 2026), Aurora Query Plan Management,
+AlloyDB's plan management — as advice that pg-debug never applies.
+
 Findings are ranked by the share of the query's work behind them, and a bad
 estimate is charged for the whole subtree it misled rather than for the scan
-itself, which is often trivial. The shares overlap and are not a breakdown.
+itself, which is often trivial. Time no node includes — triggers, JIT — is a
+share of the execution time, and planning a share of planning plus execution.
+The shares overlap and are not a breakdown. The text output shows the six
+costliest findings and says how many it left out; `--json` lists every one.
 
 This needs `EXPLAIN ANALYZE`, which runs the query, so `restricted` mode
 refuses outright rather than half-answering — its promise is that nothing
@@ -696,7 +717,7 @@ context = QueryContext.from_file("pg-debug.toml")
 | `get_object_details(schema, name, object_type="table")` | `dict` with `basic`, `columns`, `constraints`, `indexes` |
 | `execute_sql(sql)` | `list[dict]` — one per row, empty for statements with no result set |
 | `explain_query(sql, analyze=False, hypothetical_indexes=None)` | `ExplainPlanArtifact` |
-| `diagnose_query(sql, min_ratio=10)` | `list[PlanFinding]` — most severe first |
+| `diagnose_query(sql, min_ratio=10)` | `list[PlanFinding]` — most severe first; each with `evidence`, `remediation`, and where it applies `confidence` and `plan_control` |
 | `diagnose_plan(plan, min_ratio=10)` | `list[PlanFinding]` — the same, over `EXPLAIN (ANALYZE, FORMAT JSON)` output; works in restricted mode. `pg_debug.diagnose_plan(plan)` does it with no database at all |
 | `list_activity(include_idle=False, min_duration_seconds=None, blocked_only=False)` | `list[dict]` — one per backend, with `blocked_by` and `in_transaction`; to a role without `pg_read_all_stats`, another role's backend in a transaction is listed with `query` `<insufficient privilege>` |
 | `lock_tree()` | `list[dict]` — one per root blocker, waiters nested under `blocking`; each node says `in_transaction` |

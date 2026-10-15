@@ -1,0 +1,91 @@
+[
+ {
+  "Plan": {
+   "Node Type": "ModifyTable",
+   "Operation": "Delete",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Relation Name": "parents",
+   "Schema": "public",
+   "Alias": "parents",
+   "Startup Cost": 0.28,
+   "Total Cost": 8.63,
+   "Plan Rows": 0,
+   "Plan Width": 0,
+   "Actual Startup Time": 0.124,
+   "Actual Total Time": 0.125,
+   "Actual Rows": 0,
+   "Actual Loops": 1,
+   "Shared Hit Blocks": 46,
+   "Shared Read Blocks": 1,
+   "Shared Dirtied Blocks": 0,
+   "Shared Written Blocks": 0,
+   "Local Hit Blocks": 0,
+   "Local Read Blocks": 0,
+   "Local Dirtied Blocks": 0,
+   "Local Written Blocks": 0,
+   "Temp Read Blocks": 0,
+   "Temp Written Blocks": 0,
+   "Plans": [
+    {
+     "Node Type": "Index Scan",
+     "Parent Relationship": "Outer",
+     "Parallel Aware": false,
+     "Async Capable": false,
+     "Scan Direction": "Forward",
+     "Index Name": "parents_pkey",
+     "Relation Name": "parents",
+     "Schema": "public",
+     "Alias": "parents",
+     "Startup Cost": 0.28,
+     "Total Cost": 8.63,
+     "Plan Rows": 20,
+     "Plan Width": 6,
+     "Actual Startup Time": 0.014,
+     "Actual Total Time": 0.017,
+     "Actual Rows": 20,
+     "Actual Loops": 1,
+     "Output": [
+      "ctid"
+     ],
+     "Index Cond": "(parents.id <= 20)",
+     "Rows Removed by Index Recheck": 0,
+     "Shared Hit Blocks": 3,
+     "Shared Read Blocks": 0,
+     "Shared Dirtied Blocks": 0,
+     "Shared Written Blocks": 0,
+     "Local Hit Blocks": 0,
+     "Local Read Blocks": 0,
+     "Local Dirtied Blocks": 0,
+     "Local Written Blocks": 0,
+     "Temp Read Blocks": 0,
+     "Temp Written Blocks": 0
+    }
+   ]
+  },
+  "Query Identifier": 9151108969321130868,
+  "Planning": {
+   "Shared Hit Blocks": 25,
+   "Shared Read Blocks": 0,
+   "Shared Dirtied Blocks": 0,
+   "Shared Written Blocks": 0,
+   "Local Hit Blocks": 0,
+   "Local Read Blocks": 0,
+   "Local Dirtied Blocks": 0,
+   "Local Written Blocks": 0,
+   "Temp Read Blocks": 0,
+   "Temp Written Blocks": 0
+  },
+  "Planning Time": 0.183,
+  "Triggers": [
+   {
+    "Trigger Name": "RI_ConstraintTrigger_a_311534",
+    "Constraint Name": "children_parent_id_fkey",
+    "Relation": "parents",
+    "Time": 412.539,
+    "Calls": 20
+   }
+  ],
+  "Execution Time": 412.75
+ }
+]
