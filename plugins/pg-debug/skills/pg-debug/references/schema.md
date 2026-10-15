@@ -12,6 +12,7 @@ pg-debug model                           # every rule, every user schema
 pg-debug model --schema public
 pg-debug model --rule unindexed_foreign_key
 pg-debug model --proven-only             # drop what was inferred from statistics
+pg-debug model --min-rows 10000          # statistics rules skip smaller tables (default 1000)
 pg-debug --json model                    # structured, with the DDL to apply
 pg-debug model --exit-code               # exit 3 on a high-severity finding (CI)
 ```

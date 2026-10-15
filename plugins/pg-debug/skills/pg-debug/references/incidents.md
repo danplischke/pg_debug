@@ -77,7 +77,7 @@ Behind a connection pooler, `activity` shows the server connections the pooler
 holds, not the clients queued inside it. An application that times out while
 `activity` looks calm may be waiting for a full pool, which only the pooler's
 own counters show (PgBouncer's `SHOW POOLS`: `cl_waiting`, `maxwait`).
-pg-debug does not read them.
+`pg-debug pooler ADMIN_URL` reads them; [platforms.md](platforms.md) says how.
 
 `vacuum-progress` pairs with the vacuum health check: the check tells you
 wraparound is approaching, this tells you whether the vacuum fixing it is

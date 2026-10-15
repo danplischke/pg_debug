@@ -36,6 +36,8 @@ extended statistics covering them, sorts and hashes that outgrew `work_mem`,
 scans reading rows only to discard them, and parallel workers that were planned
 for and not granted. Findings are ranked by the share of the query's work
 behind them, and each carries the statement or setting that addresses it.
+A row estimate is reported once it is ten times off what the node found;
+`--min-ratio` changes that factor.
 
 It also names, each with the plan node it rests on: an index walked in order
 for a `LIMIT` while a filter discarded most of it (`limit_scan_filter`, with the

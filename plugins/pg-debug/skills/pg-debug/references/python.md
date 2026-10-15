@@ -67,8 +67,8 @@ with the server's reason when it refused one), `InvalidArgumentError`,
 `IndexTuningError` (tables never analyzed, or nothing in the workload could
 be analyzed), `MissingDependencyError`.
 
-Returns: `list[dict]` for schemas/objects/rows/top-queries/activity/vacuum
-progress/column statistics, `dict` for `get_object_details` and the tuning
+Returns: `list[dict]` for schemas (`list_schemas()`), objects (`list_objects(schema_name, object_type=)`), rows/top-queries/activity/vacuum
+progress/column statistics, `dict` for `get_object_details(schema_name, object_name, object_type=)` and the tuning
 results, `ExplainPlanArtifact` for plans, `dict[str, HealthCheckResult]` for
 health, and `list[ModelFinding]` for the data model review.
 
@@ -94,11 +94,34 @@ saturation `findings`.
 `counting_windows()` says since when the table, checkpoint and
 `pg_stat_statements` counters have counted; relay it with any cumulative
 figure, since a crash or a reset starts them again.
-`analyze_db_health(..., min_window_days=7)` is how long the index counters must
-have counted before an index is called unused. The model review is
-`review_data_model(rules=, schema=, min_rows=, proven_only=)`; each
+`analyze_db_health(..., min_window_days=7, static=False)`: `min_window_days`
+is how long the index counters must have counted before an index is called
+unused, and `static=True` runs only the checks that read the catalog alone. The model review is
+`review_data_model(rules=, schema=, min_rows=, proven_only=, static=)`; each
 `ModelFinding` has `rule`, `confidence`, `severity`, `summary`, `detail`,
 `evidence`, `remediation`, `verify` and `impact_bytes`, plus `to_dict()`.
+
+The other commands have their method too, each returning a dataclass with
+`to_dict()`:
+
+- `check_migration(sql)` → `list[StatementReview]`, worst first;
+  `review_configuration()` → `list[ConfigFinding]`, each with its `rule`.
+- `check_upgrade(to=None)` and `audit_security()` → `AuditReport`: `findings`,
+  most severe first, and `checks`, what each check examined or why it could
+  not tell. A check that could not tell is not a pass; relay it.
+- `suggest_partitions(sql=None, min_table_bytes=1GB, min_pruning_share=0.5,
+  limit=200)` → `list[PartitionCandidate]`;
+  `assess_shard_readiness(interval_seconds=10)` → `ShardReadiness`, with its
+  `verdict` and the `refusals` it rests on; `read_history(limit=10)` →
+  `HistoryReport`, one source per history the platform keeps.
+- `plan_shapes(queries)` → `list[PlanShape]`, each query's plan shape for a
+  baseline; `definition_fingerprints(command, keys)` fingerprints what
+  findings' keys name, so a baseline can tell a changed definition.
+- `analyze_query_indexes(queries, max_index_size_mb=10000, method="dta",
+  max_regression_factor=0.1)` and `analyze_workload_indexes(...)` → `dict`
+  with the recommendations and what was refused.
+- `pg_debug.analyze_logs(paths, prefix=None, log_format=None)` → `LogReport`,
+  a function that needs no client or connection.
 
 To run the user's queries as their application does, with its role and the
 session variables its row-level security policies read, give the client a
