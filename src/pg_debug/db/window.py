@@ -108,8 +108,11 @@ async def table_window(sql_driver: SqlDriver) -> CountingWindow:
     """How long this database's table and index counters have been counting."""
     rows = await SafeSqlDriver.execute_param_query(sql_driver, TABLE_WINDOW_SQL)
     cells = rows[0].cells if rows else {}
-    database_reset, server_reset = cells.get("database_reset"), cells.get("server_reset")
-    now = cells.get("now") or datetime.now().astimezone()
+    return database_window(cells.get("database_reset"), cells.get("server_reset"), cells.get("now") or datetime.now().astimezone())
+
+
+def database_window(database_reset: datetime | None, server_reset: datetime | None, now: datetime) -> CountingWindow:
+    """The window of one database's counters in ``pg_stat_database``, from its ``stats_reset`` and the shared counters' reset."""
     if database_reset is not None and (server_reset is None or database_reset >= server_reset):
         return CountingWindow(since=database_reset, now=now, began_with="reset")
     if server_reset is not None:

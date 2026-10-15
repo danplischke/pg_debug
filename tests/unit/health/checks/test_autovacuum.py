@@ -156,6 +156,58 @@ async def test_a_prepared_transaction_is_reported():
     assert "Prepared transaction 'txn-1' has been uncommitted" in check.summary
 
 
+@pytest.mark.asyncio
+async def test_a_standby_holding_the_horizon_through_feedback_is_named_with_its_age():
+    standby = holder(kind="standby", holder="replica-1", state="streaming", holds="its snapshot, through hot_standby_feedback", seconds_held=None)
+    standby.update(detail="10.0.0.5", application_name="replica-1", standby="replica-1", transactions_held=250_000)
+
+    check = await AutovacuumCalc(driver_returning([standby])).vacuum_horizon_check()
+
+    assert not check.healthy
+    assert (
+        "Standby 'replica-1' at 10.0.0.5 (streaming) holds the horizon for its own queries through hot_standby_feedback, "
+        "holding it back 250,000 transactions"
+    ) in check.summary
+
+
+@pytest.mark.asyncio
+async def test_a_physical_slot_names_the_standby_whose_feedback_it_keeps():
+    slot = holder(kind="replication slot", holder="replica_slot", state="active", holds="its standby's snapshot, through hot_standby_feedback")
+    slot.update(detail="physical", standby="replica-1", seconds_held=None)
+
+    check = await AutovacuumCalc(driver_returning([slot])).vacuum_horizon_check()
+
+    assert (
+        "Physical replication slot 'replica_slot' is active for standby 'replica-1', whose queries hold the horizon through hot_standby_feedback, "
+        "holding it back 1,500,000 transactions"
+    ) in check.summary
+
+
+@pytest.mark.asyncio
+async def test_a_physical_slot_whose_standby_left_keeps_the_xmin_it_last_reported():
+    slot = holder(kind="replication slot", holder="replica_slot", state="inactive", holds="its standby's snapshot, through hot_standby_feedback")
+    slot.update(detail="physical", standby=None, seconds_held=None)
+
+    check = await AutovacuumCalc(driver_returning([slot])).vacuum_horizon_check()
+
+    assert "Physical replication slot 'replica_slot' is inactive and keeps the xmin its standby last reported" in check.summary
+
+
+def test_a_standby_without_a_slot_is_read_from_its_wal_sender():
+    """With a slot, the feedback lands in the slot's xmin; without one, in
+    the WAL sender's backend_xmin, which pg_stat_replication shows."""
+    assert "FROM pg_stat_replication r\nWHERE r.backend_xmin IS NOT NULL" in HORIZON_SQL
+    assert "a.backend_type IS DISTINCT FROM 'walsender'" in HORIZON_SQL
+
+
+def test_a_standby_is_known_by_its_application_name_in_a_baseline():
+    from pg_debug.baseline import health_finding_key
+
+    key = health_finding_key("Vacuum horizon", {"kind": "standby", "holder": "replica-1", "application_name": "replica-1", "transactions_held": 5})
+
+    assert key == {"check": "Vacuum horizon", "kind": "standby", "application_name": "replica-1"}
+
+
 def test_only_backends_that_really_hold_the_horizon_are_considered():
     """Measured: a READ COMMITTED transaction that has only read holds neither
     a snapshot nor an xid between statements, so 'idle in transaction' on its
@@ -179,7 +231,7 @@ def test_our_own_connection_is_not_reported_as_the_culprit():
 
 @pytest.mark.asyncio
 async def test_the_vacuum_checks_run_together():
-    """Wraparound, backlog and horizon are three views of the same subject."""
+    """Wraparound of both counters, backlog and horizon are views of the same subject."""
     results = await DatabaseHealthTool(driver_returning([])).run_checks("vacuum")
 
-    assert list(results) == ["Vacuum health", "Autovacuum backlog", "Vacuum horizon"]
+    assert list(results) == ["Vacuum health", "Autovacuum backlog", "Vacuum horizon", "Multixact wraparound"]

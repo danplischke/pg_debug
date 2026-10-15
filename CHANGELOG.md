@@ -239,6 +239,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or SHARE on an existing table with no `lock_timeout` carries
   `lock_timeout_advice`, saying why: while it waits for its lock, every later
   statement that conflicts with that lock queues behind it.
+- `health` reads four things that fill a disk, stop writes or corrupt
+  indexes, which it was silent on. `replication` adds "Replication slot
+  retention": the WAL each slot retains, its `wal_status`, and a slot that is
+  inactive with `max_slot_wal_keep_size = -1`, which retains until the disk
+  fills, or holds an `xmin` or `catalog_xmin` past
+  `autovacuum_freeze_max_age`. `vacuum` adds "Multixact wraparound": each
+  database's and this database's tables' multixact age against 200 million,
+  `autovacuum_multixact_freeze_max_age` and the hard limit; the transaction ID
+  check never read multixacts, and member space, for which PostgreSQL
+  publishes no percentage, is measured on disk where the role may and
+  reported as a candidate. A new `collation` check compares recorded
+  collation versions with the library's and names the indexes on a changed
+  one, with the `REINDEX` and `REFRESH VERSION` that fix it. A new `checksum`
+  check reports `pg_stat_database.checksum_failures`, and says when data
+  checksums are off rather than calling the server clean. `mxid_age`,
+  `pg_current_wal_lsn`, `pg_wal_lsn_diff`, `pg_collation_actual_version` and
+  `pg_database_collation_actual_version` are allowed in restricted mode,
+  since each only reads, so all of these run there.
 
 ### Changed
 
@@ -705,6 +723,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `pg-debug diagnose ./slow.sql` ran the literal text `./slow.sql` as the
   query. The README had promised a file path since the command appeared;
   it now reads one, as `check-migration` does.
+
+- The Vacuum horizon check said nothing was holding the horizon while a
+  standby with `hot_standby_feedback` and no replication slot held it, so
+  the bloat it caused on the primary came back with no cause named. It now
+  reports such a standby by its `application_name`, from its WAL sender's
+  `backend_xmin`, with how many transactions it holds back; a physical slot
+  holding a standby's xmin names the standby while it is connected. Any hold
+  is reported, as it already was for a slot: PostgreSQL publishes no age at
+  which it becomes harmful.
 
 ## [0.2.0] - 2026-10-06
 

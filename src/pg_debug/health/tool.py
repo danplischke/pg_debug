@@ -17,6 +17,10 @@ from .checks.autovacuum import AutovacuumCalc
 from .checks.buffer import INDEX_HIT_RATE
 from .checks.buffer import TABLE_HIT_RATE
 from .checks.buffer import BufferHealthCalc
+from .checks.checksum import CHECKSUM_HEALTH
+from .checks.checksum import ChecksumHealthCalc
+from .checks.collation import COLLATION_HEALTH
+from .checks.collation import CollationHealthCalc
 from .checks.connection import CONNECTION_HEALTH
 from .checks.connection import ConnectionHealthCalc
 from .checks.constraint import CONSTRAINT_HEALTH
@@ -27,12 +31,16 @@ from .checks.index import INVALID_INDEXES
 from .checks.index import MIN_WINDOW_DAYS
 from .checks.index import UNUSED_INDEXES
 from .checks.index import IndexHealthCalc
+from .checks.multixact import MULTIXACT_HEALTH
+from .checks.multixact import MultixactCalc
 from .checks.replication import REPLICATION_HEALTH
 from .checks.replication import ReplicationCalc
 from .checks.seq_scan import SEQ_SCAN_HEALTH
 from .checks.seq_scan import SeqScanHealthCalc
 from .checks.sequence import SEQUENCE_HEALTH
 from .checks.sequence import SequenceHealthCalc
+from .checks.slots import SLOT_RETENTION
+from .checks.slots import SlotRetentionCalc
 from .checks.statistics import STATISTICS_HEALTH
 from .checks.statistics import StatisticsHealthCalc
 from .checks.table_bloat import TABLE_BLOAT
@@ -55,6 +63,8 @@ class HealthType(str, Enum):
     STATISTICS = "statistics"
     TABLE = "table"
     SCAN = "scan"
+    COLLATION = "collation"
+    CHECKSUM = "checksum"
     ALL = "all"
 
     @classmethod
@@ -111,7 +121,7 @@ class DatabaseHealthTool:
             health_type: A single health type, a comma-separated string, or an
                 iterable of health types. Valid values: index, connection,
                 vacuum, sequence, replication, buffer, constraint, statistics,
-                table, scan, all.
+                table, scan, collation, checksum, all.
 
         Returns:
             An ordered mapping of check name to its
@@ -169,6 +179,7 @@ class DatabaseHealthTool:
                 (VACUUM_HEALTH, VacuumHealthCalc(self.sql_driver).transaction_id_danger_check),
                 (AUTOVACUUM_BACKLOG, autovacuum.autovacuum_backlog_check),
                 (VACUUM_HORIZON, autovacuum.vacuum_horizon_check),
+                (MULTIXACT_HEALTH, MultixactCalc(self.sql_driver).multixact_check),
             ]
 
         if HealthType.SEQUENCE in health_types:
@@ -176,6 +187,7 @@ class DatabaseHealthTool:
 
         if HealthType.REPLICATION in health_types:
             checks.append((REPLICATION_HEALTH, ReplicationCalc(self.sql_driver).replication_health_check))
+            checks.append((SLOT_RETENTION, SlotRetentionCalc(self.sql_driver).slot_retention_check))
 
         if HealthType.BUFFER in health_types:
             buffer_health = BufferHealthCalc(self.sql_driver)
@@ -195,6 +207,12 @@ class DatabaseHealthTool:
 
         if HealthType.SCAN in health_types:
             checks.append((SEQ_SCAN_HEALTH, SeqScanHealthCalc(self.sql_driver).sequential_scan_check))
+
+        if HealthType.COLLATION in health_types:
+            checks.append((COLLATION_HEALTH, CollationHealthCalc(self.sql_driver).collation_version_check))
+
+        if HealthType.CHECKSUM in health_types:
+            checks.append((CHECKSUM_HEALTH, ChecksumHealthCalc(self.sql_driver).checksum_failure_check))
 
         return checks
 

@@ -519,6 +519,13 @@ ALLOWED_FUNCTIONS: set[str] = {
     # per tracked plan. Both only read what Aurora has recorded.
     "aurora_stat_statements",
     "aurora_stat_plans",
+    # WAL distance (pg_current_wal_lsn is above), multixact age and collation library versions:
+    # each reads a counter or asks the C library or ICU for a version string,
+    # and writes nothing
+    "pg_wal_lsn_diff",
+    "mxid_age",
+    "pg_collation_actual_version",
+    "pg_database_collation_actual_version",
     # Hypopg functions
     "hypopg",
     "hypopg_create_index",

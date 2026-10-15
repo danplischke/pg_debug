@@ -30,9 +30,9 @@ it is a primary or a replica. On a replica it reads its WAL receiver, to say
 whether it is streaming and from which host, and the replay lag in seconds; on
 a primary, whether any standby streams from it, leaving out Neon's
 `walproposer` connection, which is not one. It lists each replication slot's
-name and whether it is active. That is all it reads. It has nothing on
-retained WAL, `wal_status`, recovery conflicts or `hot_standby_feedback`; the
-sections below read those with `execute`.
+name and whether it is active, and the "Replication slot retention" check
+beside it reads what each slot retains (below). It has nothing on recovery
+conflicts; the section below reads those with `execute`.
 
 What it cannot read it says. A role without `pg_read_all_stats`, which
 `pg_monitor` includes, sees the receiver's columns blank, and the check says
@@ -92,10 +92,16 @@ reporting replica with a high one, hours or -1, that long analytics run on.
 
 Feedback shows up on the primary as bloat that keeps coming back. The Vacuum
 horizon check in `health --type vacuum` names the transactions open 15 minutes
-or more, the replication slots and the prepared transactions holding the
-horizon, but not a standby holding it through `hot_standby_feedback` without a
-slot. When bloat returns and that check names nothing, read each standby's
-horizon on the primary:
+or more, the replication slots, the prepared transactions, and each standby
+holding the horizon through `hot_standby_feedback`: a standby without a slot
+by its `application_name`, from its WAL sender's `backend_xmin`, and one with
+a physical slot through the slot's `xmin`, naming the standby while it is
+connected. A physical slot whose standby has gone keeps the xmin it last
+reported. PostgreSQL publishes no age at which such a hold is harmful, so any
+hold is reported with its age, the same judgment the check makes of a slot;
+weigh the age before calling it the cause. A build from before that reading
+leaves a slotless standby out; there, read each standby's horizon on the
+primary:
 
 ```bash
 pg-debug --access-mode restricted execute \
@@ -121,26 +127,22 @@ written before the slot is lost, and is NULL when
 `invalidation_reason`; PostgreSQL 18 adds `idle_replication_slot_timeout`,
 which invalidates slots left inactive.
 
-pg-debug lists each slot and whether it is active (`health --type
-replication`), and names a slot whose `xmin` or `catalog_xmin` holds the
-vacuum horizon, with its age (`health --type vacuum`). It reads neither
-retained WAL nor `wal_status`. Read them on the primary:
+`health --type replication` reads each slot's retained WAL (from
+`restart_lsn` to the current WAL position, or on a standby to what it has
+replayed), `wal_status`, `safe_wal_size`, and from PostgreSQL 17
+`inactive_since` and `invalidation_reason`, and reports a slot as `lost`,
+`unbounded`, `unreserved`, `inactive`, `extended` or `horizon` (see
+[health.md](health.md)). `health --type vacuum` names a slot whose `xmin` or
+`catalog_xmin` holds the vacuum horizon, with its age. Both run in restricted
+mode. An `unbounded` slot, inactive with `max_slot_wal_keep_size = -1`, is a
+risk of filling the disk that the catalog proves: report it with the retained
+figure, not as a possibility. A build from before these readings has neither;
+there, read them on the primary:
 
 ```bash
-# Allowed in restricted mode
-pg-debug --access-mode restricted execute \
-  "SELECT slot_name, slot_type, active, wal_status, safe_wal_size, current_setting('max_slot_wal_keep_size') AS max_slot_wal_keep_size FROM pg_replication_slots"
-
-# Retained bytes need pg_wal_lsn_diff(), which is not on restricted mode's
-# allowlist (pg_current_wal_lsn() is). It is only a read: say so, and run it
-# unrestricted with a timeout.
 pg-debug --timeout 10 execute \
   "SELECT slot_name, active, wal_status, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS retained_wal FROM pg_replication_slots ORDER BY pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) DESC NULLS LAST"
 ```
-
-Rank the inactive slots by retained WAL and `wal_status`. An inactive slot
-with `max_slot_wal_keep_size = -1` is a risk of filling the disk that the
-catalog proves: report it with the retained figure, not as a possibility.
 
 **Never advise dropping a slot without confirming its consumer is gone.** A
 replica or subscriber whose slot was dropped may have to be rebuilt. Name the

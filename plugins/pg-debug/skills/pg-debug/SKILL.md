@@ -108,6 +108,7 @@ and answering the question.
 | The database is stuck. Who is blocking whom? | `pg-debug activity --blocked`, `locks`, `vacuum-progress` | [incidents.md](references/incidents.md) |
 | What are sessions waiting on? (no pg_wait_sampling needed) | `pg-debug activity --sample 10` | [incidents.md](references/incidents.md) |
 | Is the database healthy? | `pg-debug health` | [health.md](references/health.md) |
+| Could an index or a page be corrupt? (an OS or ICU upgrade, checksum failures) | `pg-debug health --type collation,checksum` | [incidents.md](references/incidents.md) |
 | What is the database spending its time on? | `pg-debug top-queries --interval 10` | [health.md](references/health.md) |
 | Are the server's settings right? | `pg-debug config` | [health.md](references/health.md) |
 | Is the schema built well? | `pg-debug model` | [schema.md](references/schema.md) |

@@ -128,10 +128,12 @@ exhaustion while monitoring showed multixact age under 50%; emergency vacuums
 began near 200 million although the setting was 400 million, and recovery took
 hours on large tables.
 
-pg-debug does not read multixacts. The wraparound check in `health --type
-vacuum` covers transaction IDs only, so a clean result there says nothing
-about multixacts. Read the ages yourself. Restricted mode does not know
-`mxid_age` and refuses these, so they need the default mode, with a timeout:
+`health --type vacuum` reads them in its "Multixact wraparound" check: each
+database's age and this database's oldest tables, against an alert age of 200
+million, `autovacuum_multixact_freeze_max_age` and the hard limit, in
+restricted mode too (see [health.md](health.md)). A build from before that
+check covers transaction IDs only, so a clean result there says nothing about
+multixacts; read the ages yourself, in the default mode:
 
 ```bash
 pg-debug --timeout 10 execute "SELECT datname, mxid_age(datminmxid) AS mxid_age FROM pg_database ORDER BY 2 DESC"
@@ -139,7 +141,8 @@ pg-debug --timeout 10 execute "SELECT oid::regclass AS table_name, mxid_age(relm
 ```
 
 PostgreSQL exposes no member-space percentage, so do not report one. The
-nearest evidence is the size of `pg_multixact/members` on disk. Reading it
+nearest evidence is the size of `pg_multixact/members` on disk, which the
+check reads when it may and reports past 10 GB as a candidate. Reading it
 needs a superuser, or a role granted EXECUTE on `pg_ls_dir` and
 `pg_stat_file`; `pg_read_server_files` alone is refused. Where the role has
 neither, say member space could not be read. The `pg_stat_slru` rows for
@@ -175,11 +178,18 @@ a database moved with `pg_dump` or logical replication. A physical standby
 running a newer OS than its primary is affected, and there the inconsistency
 can generally only be detected on the standby.
 
-pg-debug checks neither collation versions nor index structure yet. PostgreSQL
-15 and later record each database's collation version, and other collations
-have carried recorded versions since PostgreSQL 13 for glibc and 10 for ICU;
-compare them with what the OS provides now. Restricted mode refuses these
-functions, so they need the default mode:
+`pg-debug health --type collation` compares the versions. PostgreSQL 15 and
+later record each database's collation version, and other collations have
+carried recorded versions since PostgreSQL 13 for glibc and 10 for ICU. The
+check compares every database's default (15 and later) and each collation an
+index in the connected database uses with what the library reports now, and
+for a mismatch names the dependent indexes (for another database's default:
+connect to it) and the fix, `REINDEX INDEX CONCURRENTLY` on each and then
+`ALTER COLLATION ... REFRESH VERSION` or `ALTER DATABASE ... REFRESH
+COLLATION VERSION`, in that order: refreshing first silences the warning and
+leaves the indexes as they were. It runs in restricted mode. It does not check
+index structure. A build from before the check needs these, in the default
+mode:
 
 ```bash
 pg-debug --timeout 10 execute "SELECT datname, datcollversion, pg_database_collation_actual_version(oid) AS actual FROM pg_database WHERE datcollversion <> pg_database_collation_actual_version(oid)"
@@ -208,6 +218,16 @@ PostgreSQL 15 and later, `ALTER DATABASE ... REFRESH COLLATION VERSION` then
 records the new version; run before the rebuild, it only silences the check.
 PostgreSQL 17's builtin collation provider, with its `C` and `C.UTF-8`
 locales, does not depend on the operating system at all.
+
+Corruption below PostgreSQL is a different matter: a page that changed on
+disk fails its checksum when read, if data checksums are on.
+`pg-debug health --type checksum` reads `pg_stat_database.checksum_failures`
+and `checksum_last_failure` (PostgreSQL 12 and later) per database and for
+the shared catalogs, with since when they have counted, and says so when
+`data_checksums` is off and nothing can be counted; off is how most servers
+before PostgreSQL 18 were created, so it is not reported as a problem. A
+failure points at storage or memory: the server log names the page, and the
+backup to keep is one taken before the first failure.
 
 ## Reading waits from one snapshot
 
