@@ -167,6 +167,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   immediate shutdown, a failover or a restore moves; not the server's uptime,
   since a clean restart keeps the counters.
 
+- `diagnose` names the causes it used to leave to the reader. A row-level
+  security policy written `USING (user_id = auth.uid())` evaluates the
+  function for every row the scan tests; `diagnose` reported those rows as
+  discarded and advised an index, and now reports `rls_per_row_call` with the
+  `ALTER POLICY` that wraps the call as `(SELECT auth.uid())`, which
+  PostgreSQL evaluates once — on a 200,000-row table, 179 ms became 16 ms —
+  and holds the index advice back until it is applied. It reads the policy
+  from `pg_policy` and the function's volatility from `pg_proc`, so it needs a
+  connection, and it needs the query run as the role the policy applies to
+  (`--role`). Also new, each argued from the plan node it rests on and, where
+  the catalog is needed, from the catalog: a condition under a policy kept from
+  an existing index because it is not `LEAKPROOF`; an index walked in order for
+  a `LIMIT` while a filter discarded most of it, with the composite index; a
+  function over a plainly indexed column, with the expression index when the
+  function is IMMUTABLE; an OR across a join's two sides; a deep `OFFSET`; a
+  CTE computed in full and read once through a filter; an index-only scan
+  going to the heap; a sequential scan reading near-empty pages; a generic
+  plan's misestimate in `auto_explain` output; and triggers, JIT compilation
+  or planning taking a large share of the time, with the missing index for a
+  foreign-key trigger. Findings inferred from a condition's text carry
+  `confidence: candidate`. Read efficiency of index scans and a generic plan
+  read from `EXPLAIN (GENERIC_PLAN)` are not reported: neither can be argued
+  from the plan alone.
+
+- A `diagnose` finding about a choice the planner made — a misestimate, a
+  generic plan, an index walked for a `LIMIT`, a nested loop that blew up —
+  carries `plan_control`: the ways this server offers to hold a plan in place
+  while the cause is fixed. `pg_hint_plan` when it is installed, loaded or
+  available; PostgreSQL 19's `pg_plan_advice`, which was in beta as of October
+  2026; Aurora Query Plan Management on Aurora; AlloyDB's own plan management
+  on AlloyDB, which pg-debug does not detect; and, when there is none, that
+  there is none. It is advice: pg-debug applies none of it.
+
 ### Changed
 
 - A statement that failed was logged at ERROR with its full text, so a
@@ -260,6 +293,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   caller had stopped waiting. A caller that stops waiting itself, under a
   timeout of its own, no longer leaves the pool trying to connect, which kept
   its event loop from finishing.
+
+- `diagnose` printed every finding; with more rules a plan can draw a dozen,
+  and the one that matters scrolled away. The text output now shows the six
+  costliest and says how many it left out; `--json` still lists all. A share
+  of time no plan node includes — a trigger's, JIT's — is stated as a share of
+  the execution time, and planning as a share of planning plus execution,
+  rather than as a share of "the query's work".
 
 ### Fixed
 

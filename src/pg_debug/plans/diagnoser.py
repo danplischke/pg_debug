@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Awaitable
+from collections.abc import Callable
 from collections.abc import Sequence
 from typing import Any
 from typing import LiteralString
@@ -41,8 +43,18 @@ from ..db import SafeSqlDriver
 from ..db import SqlDriver
 from ..errors import ExplainPlanError
 from ..errors import InvalidArgumentError
+from ..errors import QueryError
 from ..parsing import SqlBindParams
+from ..platform import PlatformDetection
 from ..statistics import StatisticsInspector
+from .catalog import CatalogFacts
+from .catalog import read_catalog
+from .control import OFFLINE_ADVICE
+from .control import attach_plan_control
+from .control import needs_plan_control
+from .control import plan_control_advice
+from .control import read_plan_control
+from .metrics import conditions
 from .metrics import qualified_relation
 from .metrics import total_self_ms
 from .metrics import walk
@@ -84,6 +96,17 @@ WHERE (n.nspname || '.' || c.relname) = ANY({}::text[])
 """
 
 
+#: The settings a finding quotes back, as the query ran with them.
+SETTINGS_SQL = """
+SELECT
+    current_setting('work_mem') AS work_mem,
+    current_setting('jit') AS jit,
+    current_setting('jit_above_cost') AS jit_above_cost,
+    current_setting('jit_inline_above_cost') AS jit_inline_above_cost,
+    current_setting('jit_optimize_above_cost') AS jit_optimize_above_cost
+"""
+
+
 #: What :func:`parse_plan` accepts: the JSON text EXPLAIN printed, or that
 #: text already decoded — the list EXPLAIN wraps its one plan in, or the plan
 #: object itself, which is also the shape ``auto_explain`` logs.
@@ -92,6 +115,10 @@ PlanInput = str | bytes | dict[str, Any] | list[Any]
 
 def parse_plan(plan: PlanInput) -> PlanNode:
     """Read ``EXPLAIN (ANALYZE, FORMAT JSON)`` output into a plan tree.
+
+    The tree only; the diagnosis reads the planning and execution times, the
+    JIT and Triggers sections and the parameter values around it from the
+    same input.
 
     Args:
         plan: The output as text, or already decoded. EXPLAIN wraps its plan
@@ -121,27 +148,64 @@ def parse_plan(plan: PlanInput) -> PlanNode:
     if not isinstance(data, dict) or "Plan" not in data:
         raise InvalidArgumentError("Expected EXPLAIN (FORMAT JSON) output: an object with a 'Plan' key, or the one-element list EXPLAIN wraps it in.")
 
+    return _read_artifact(data).plan_tree
+
+
+def _read_artifact(data: dict[str, Any]) -> ExplainPlanArtifact:
     try:
-        root = ExplainPlanArtifact.from_json_data(data).plan_tree
+        artifact = ExplainPlanArtifact.from_json_data(data)
     except Exception as e:
         raise ExplainPlanError(f"Could not read the plan: {e}") from e
 
-    if root.actual_rows is None:
+    if artifact.plan_tree.actual_rows is None:
         raise InvalidArgumentError(
             "The plan was never run: it has the planner's estimates but no actual rows, and a diagnosis is the comparison "
             "of the two. Produce it with EXPLAIN (ANALYZE, FORMAT JSON)."
         )
-    return root
+    return artifact
 
 
-def offline_context(root: PlanNode, min_ratio: float = DEFAULT_MIN_RATIO) -> RuleContext:
-    """A rule context over the plan alone, with the catalog marked unconsulted."""
+def _artifact(plan: PlanInput) -> ExplainPlanArtifact:
+    """The whole of a plan input: the tree, and the timings and sections around it."""
+    root = parse_plan(plan)
+    data: Any = json.loads(plan) if isinstance(plan, (str, bytes)) else plan
+    if isinstance(data, list):
+        data = data[0]
+    artifact = _read_artifact(data)
+    artifact.plan_tree = root
+    return artifact
+
+
+def offline_context(root: PlanNode, min_ratio: float = DEFAULT_MIN_RATIO, plan: ExplainPlanArtifact | None = None) -> RuleContext:
+    """A rule context over the plan alone, with the catalog marked unconsulted.
+
+    Args:
+        root: The plan tree.
+        min_ratio: How far an estimate has to be out to count.
+        plan: The plan the tree came from, for its planning and execution
+            times and its JIT and Triggers sections. Without it the rules that
+            read those stay silent.
+    """
     return RuleContext(
         parents={id(node): parent for node, parent in walk_with_parent(root)},
         total_ms=total_self_ms(root),
         min_ratio=min_ratio,
         catalog=False,
+        **_plan_facts(plan),
     )
+
+
+def _plan_facts(plan: ExplainPlanArtifact | None) -> dict[str, Any]:
+    """The RuleContext fields read from around the tree."""
+    if plan is None:
+        return {}
+    return {
+        "planning_ms": plan.planning_time,
+        "execution_ms": plan.execution_time,
+        "jit": plan.jit,
+        "triggers": list(plan.triggers),
+        "query_parameters": plan.query_parameters,
+    }
 
 
 def run_rules(root: PlanNode, context: RuleContext) -> list[PlanFinding]:
@@ -177,8 +241,11 @@ def diagnose_plan(plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> list
         reasonable one, as far as the plan alone can tell.
     """
     _check_min_ratio(min_ratio)
-    root = parse_plan(plan)
-    return run_rules(root, offline_context(root, min_ratio))
+    artifact = _artifact(plan)
+    findings = run_rules(artifact.plan_tree, offline_context(artifact.plan_tree, min_ratio, artifact))
+    if needs_plan_control(findings):
+        attach_plan_control(findings, [OFFLINE_ADVICE])
+    return findings
 
 
 class PlanDiagnoser:
@@ -186,10 +253,22 @@ class PlanDiagnoser:
 
     Given no driver, it can still read plans handed to it; it just cannot run
     anything or ask the catalog anything.
+
+    Args:
+        sql_driver: The connection, or None to read plans with no database.
+        platform: How to learn the managed platform, for naming the
+            plan-control mechanisms it offers: the client passes its own
+            detection, which knows the connection URL. Without it the server
+            alone is asked, and only when a finding needs it.
     """
 
-    def __init__(self, sql_driver: SqlDriver | SafeSqlDriver | None = None):
+    def __init__(
+        self,
+        sql_driver: SqlDriver | SafeSqlDriver | None = None,
+        platform: Callable[[], Awaitable[PlatformDetection]] | None = None,
+    ):
         self.sql_driver = sql_driver
+        self.platform = platform
 
     async def diagnose(self, sql: str, min_ratio: float = DEFAULT_MIN_RATIO) -> list[PlanFinding]:
         """Diagnose one statement's execution plan.
@@ -219,7 +298,7 @@ class PlanDiagnoser:
         prepared = await self._substitute_bind_variables(sql)
 
         plan = await self._explain(prepared, read_only=read_only)
-        return await self._diagnose_tree(plan.plan_tree, min_ratio)
+        return await self._diagnose(plan, min_ratio)
 
     async def diagnose_plan(self, plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> list[PlanFinding]:
         """Diagnose a plan that already exists, consulting the catalog where there is one.
@@ -239,11 +318,23 @@ class PlanDiagnoser:
             Findings, most severe first.
         """
         _check_min_ratio(min_ratio)
-        return await self._diagnose_tree(parse_plan(plan), min_ratio)
+        return await self._diagnose(_artifact(plan), min_ratio)
 
-    async def _diagnose_tree(self, root: PlanNode, min_ratio: float) -> list[PlanFinding]:
-        context = offline_context(root, min_ratio) if self.sql_driver is None else await self._context(root, min_ratio=min_ratio)
-        return run_rules(root, context)
+    async def _diagnose(self, plan: ExplainPlanArtifact, min_ratio: float) -> list[PlanFinding]:
+        root = plan.plan_tree
+        if self.sql_driver is None:
+            findings = run_rules(root, offline_context(root, min_ratio, plan))
+            if needs_plan_control(findings):
+                attach_plan_control(findings, [OFFLINE_ADVICE])
+            return findings
+
+        findings = run_rules(root, await self._context(plan, min_ratio=min_ratio))
+        if needs_plan_control(findings):
+            # Read only when a finding concerns a planner choice: the platform
+            # probe and the extension lookup are wasted otherwise.
+            control = await read_plan_control(self._driver, self.platform)
+            attach_plan_control(findings, plan_control_advice(control))
+        return findings
 
     def _is_read_only(self, sql: str) -> bool:
         """Whether the statement can simply be run, or has to be undone after.
@@ -311,9 +402,14 @@ class PlanDiagnoser:
         except Exception as e:
             raise ExplainPlanError(f"Could not read the plan EXPLAIN returned: {e}") from e
 
-    async def _context(self, root: PlanNode, min_ratio: float) -> RuleContext:
-        """Gather the catalog facts the estimate rules need, in three queries."""
+    async def _context(self, plan: ExplainPlanArtifact, min_ratio: float) -> RuleContext:
+        """Gather the catalog facts the rules need, once for the whole plan."""
+        root = plan.plan_tree
         relations = sorted({name for name in (qualified_relation(node) for node in walk(root)) if name and "." in name})
+        texts = [text for node in walk(root) for text in conditions(node)]
+        constraints = sorted({str(t["Constraint Name"]) for t in plan.triggers if t.get("Constraint Name")})
+        settings = await self._settings()
+        facts = await self._catalog(relations, texts, constraints)
 
         return RuleContext(
             parents={id(node): parent for node, parent in walk_with_parent(root)},
@@ -322,8 +418,27 @@ class PlanDiagnoser:
             stale=await self._stale_relations(relations),
             covered=await self._covered_column_sets(relations),
             columns=await self._relation_columns(relations),
-            work_mem=await self._work_mem(),
+            work_mem=settings.get("work_mem"),
+            security=facts.security,
+            functions=facts.functions,
+            operators=facts.operators,
+            indexes=facts.indexes,
+            foreign_keys=facts.foreign_keys,
+            settings=settings,
+            **_plan_facts(plan),
         )
+
+    async def _catalog(self, relations: Sequence[str], texts: Sequence[str], constraints: Sequence[str]) -> CatalogFacts:
+        """Policies, functions, operators, indexes and foreign keys behind the plan.
+
+        A role that may not read one of these leaves its rules silent rather
+        than failing the diagnosis the plan alone can still give.
+        """
+        try:
+            return await read_catalog(self._driver, relations, texts, constraints)
+        except QueryError as e:
+            logger.warning("Could not read the policies, indexes and functions the plan uses, so the rules that need them are skipped: %s", e)
+            return CatalogFacts()
 
     async def _stale_relations(self, relations: Sequence[str]) -> dict[str, dict[str, Any]]:
         """Which of these relations the analyze bookkeeping calls out of date."""
@@ -358,17 +473,27 @@ class PlanDiagnoser:
         rows = await SafeSqlDriver.execute_param_query(self._driver, query, [list(relations)])
         return [row.cells for row in rows] if rows else []
 
-    async def _work_mem(self) -> str | None:
-        """The ``work_mem`` the query ran with, quoted back in any spill finding.
+    async def _settings(self) -> dict[str, str]:
+        """The settings the query ran with that findings quote back: ``work_mem`` and the JIT thresholds.
 
-        Read in the query context, which may be what set it.
+        Read in the query context, which may be what set them.
         """
         try:
-            rows = await self._driver.execute_query("SELECT current_setting('work_mem') AS work_mem", in_context=True)
+            rows = await self._driver.execute_query(SETTINGS_SQL, in_context=True)
         except Exception as e:
-            logger.debug("Could not read work_mem: %s", e)
-            return None
-        return str(rows[0].cells["work_mem"]) if rows else None
+            logger.debug("Could not read the settings: %s", e)
+            return {}
+        return {name: str(value) for name, value in rows[0].cells.items() if value is not None} if rows else {}
 
 
-__all__ = ["COLUMNS_SQL", "EXTENDED_STATISTICS_SQL", "PlanDiagnoser", "PlanInput", "diagnose_plan", "offline_context", "parse_plan", "run_rules"]
+__all__ = [
+    "COLUMNS_SQL",
+    "EXTENDED_STATISTICS_SQL",
+    "SETTINGS_SQL",
+    "PlanDiagnoser",
+    "PlanInput",
+    "diagnose_plan",
+    "offline_context",
+    "parse_plan",
+    "run_rules",
+]

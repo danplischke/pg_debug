@@ -16,11 +16,16 @@ from pg_debug.plans.rules import _statistics_name
 from pg_debug.plans.rules import correlated_columns
 from pg_debug.plans.rules import discarded_rows
 from pg_debug.plans.rules import hash_spilled
+from pg_debug.plans.rules import heap_fetches
+from pg_debug.plans.rules import jit_time
+from pg_debug.plans.rules import large_offset
 from pg_debug.plans.rules import lossy_bitmap
 from pg_debug.plans.rules import nested_loop_blowup
+from pg_debug.plans.rules import planning_time
 from pg_debug.plans.rules import row_estimate
 from pg_debug.plans.rules import sort_spilled
 from pg_debug.plans.rules import stale_statistics
+from pg_debug.plans.rules import trigger_time
 from pg_debug.plans.rules import workers_not_launched
 from pg_debug.plans.tree import PlanNode
 from pg_debug.severity import Severity
@@ -365,3 +370,36 @@ def test_a_healthy_plan_produces_no_findings_from_any_rule():
     ctx = context(root, columns={"s.visits": {"country", "city"}})
 
     assert [finding for rule in RULES for finding in rule(root, ctx)] == []
+
+
+# -- The rules that stay quiet without their evidence --------------------------
+
+
+def test_a_limit_with_no_offset_is_not_an_offset():
+    """A LIMIT stops its input once it has enough, so the input produced
+    exactly what was returned."""
+    scan = node("Index Scan", plan_rows=300000, actual_rows=20, parent_relationship="Outer")
+    root = node("Limit", plan_rows=20, actual_rows=20, ms=11.0, children=[scan])
+    assert large_offset(root, context(root)) == []
+
+
+def test_planning_one_relation_is_a_cold_cache_not_the_query():
+    root = node(relation_name="todos")
+    assert planning_time(root, context(root, planning_ms=240.0, execution_ms=180.0)) == []
+
+
+def test_a_trigger_that_is_a_small_share_of_the_execution_is_not_reported():
+    root = node()
+    triggers = [{"Trigger Name": "audit", "Relation": "t", "Time": 3.0, "Calls": 10}]
+    assert trigger_time(root, context(root, execution_ms=200.0, triggers=triggers)) == []
+
+
+def test_an_index_only_scan_that_rarely_visits_the_table_is_fine():
+    root = node("Index Only Scan", actual_rows=100000, heap_fetches=500)
+    assert heap_fetches(root, context(root)) == []
+
+
+def test_jit_on_a_long_query_is_not_reported():
+    root = node()
+    jit = {"Functions": 7, "Timing": {"Total": 40.0}}
+    assert jit_time(root, context(root, execution_ms=60000.0, jit=jit)) == []

@@ -1,0 +1,55 @@
+[
+ {
+  "Plan": {
+   "Node Type": "Seq Scan",
+   "Parallel Aware": false,
+   "Async Capable": false,
+   "Relation Name": "todos",
+   "Schema": "public",
+   "Alias": "todos",
+   "Startup Cost": 0.0,
+   "Total Cost": 56440.0,
+   "Plan Rows": 398,
+   "Plan Width": 60,
+   "Actual Startup Time": 10.328,
+   "Actual Total Time": 202.038,
+   "Actual Rows": 400,
+   "Actual Loops": 1,
+   "Output": [
+    "id",
+    "user_id",
+    "title",
+    "done",
+    "tags"
+   ],
+   "Filter": "((NOT todos.done) AND (todos.user_id = auth.uid()))",
+   "Rows Removed by Filter": 199600,
+   "Shared Hit Blocks": 332,
+   "Shared Read Blocks": 3608,
+   "Shared Dirtied Blocks": 0,
+   "Shared Written Blocks": 1747,
+   "Local Hit Blocks": 0,
+   "Local Read Blocks": 0,
+   "Local Dirtied Blocks": 0,
+   "Local Written Blocks": 0,
+   "Temp Read Blocks": 0,
+   "Temp Written Blocks": 0
+  },
+  "Query Identifier": -5112430037265840515,
+  "Planning": {
+   "Shared Hit Blocks": 142,
+   "Shared Read Blocks": 8,
+   "Shared Dirtied Blocks": 0,
+   "Shared Written Blocks": 0,
+   "Local Hit Blocks": 0,
+   "Local Read Blocks": 0,
+   "Local Dirtied Blocks": 0,
+   "Local Written Blocks": 0,
+   "Temp Read Blocks": 0,
+   "Temp Written Blocks": 0
+  },
+  "Planning Time": 1.386,
+  "Triggers": [],
+  "Execution Time": 202.205
+ }
+]

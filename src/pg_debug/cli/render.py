@@ -542,22 +542,39 @@ def render_plan_findings(findings: Sequence[Any]) -> str:
         return "Nothing wrong with this plan: the estimates match what the query found, and nothing spilled to disk."
 
     lines: list[str] = []
-    for finding in findings:
+    shown = findings[:PLAN_FINDINGS_SHOWN]
+    for finding in shown:
         where = f" on {finding.relation}" if finding.relation else ""
+        confidence = getattr(finding, "confidence", None)
+        marker = "  (candidate)" if confidence is not None and confidence.value == "candidate" else ""
+        basis = str((finding.evidence or {}).get("share_of") or "")
+        of_what = {"execution_time": "the execution time", "planning_and_execution_time": "planning plus execution"}.get(basis, "the query's work")
         lines.append("")
-        lines.append(f"[{finding.severity.value}] {finding.issue.value} — {finding.node_type}{where}")
-        lines.append(f"    accounts for {finding.share_of_time:.0%} of the query's work ({format_duration(finding.cost_ms / 1000)})")
+        lines.append(f"[{finding.severity.value}] {finding.issue.value} — {finding.node_type}{where}{marker}")
+        lines.append(f"    accounts for {finding.share_of_time:.0%} of {of_what} ({format_duration(finding.cost_ms / 1000)})")
         lines.append(f"    {finding.summary}")
         lines.append(f"    {finding.detail}")
         if finding.remediation:
             lines.append("")
             for statement in finding.remediation:
                 lines.append(f"      {statement}")
+        plan_control = getattr(finding, "plan_control", None) or []
+        if plan_control:
+            lines.append("    to hold a plan while the cause is fixed (advice; pg-debug applies none of it):")
+            for line in plan_control:
+                lines.append(f"      - {line}")
 
     lines.append("")
     noun = "finding" if len(findings) == 1 else "findings"
-    lines.append(f"{len(findings)} {noun}. Shares are per finding and overlap — they are not a breakdown of the total.")
+    hidden = len(findings) - len(shown)
+    more = f" The {hidden} smaller ones are not shown; --json lists every one." if hidden > 0 else ""
+    lines.append(f"{len(findings)} {noun}. Shares are per finding and overlap — they are not a breakdown of the total.{more}")
     return "\n".join(lines).strip("\n")
+
+
+#: How many plan findings the text output shows, costliest first. The rest
+#: are in the JSON output.
+PLAN_FINDINGS_SHOWN = 6
 
 
 def render_partition_candidates(candidates: Sequence[Any]) -> str:

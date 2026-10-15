@@ -37,6 +37,28 @@ scans reading rows only to discard them, and parallel workers that were planned
 for and not granted. Findings are ranked by the share of the query's work
 behind them, and each carries the statement or setting that addresses it.
 
+It also names, each with the plan node it rests on: an index walked in order
+for a `LIMIT` while a filter discarded most of it (`limit_scan_filter`, with the
+composite index); a function over a column only plainly indexed
+(`function_on_indexed_column`, with the expression index when the function is
+IMMUTABLE); an OR across a join's two sides (`or_across_join`, a UNION rewrite
+to try); a deep `OFFSET`; a CTE computed in full and read once through a filter
+(`cte_materialized`, try `NOT MATERIALIZED`); an Index Only Scan with many heap
+fetches (`VACUUM`); a sequential scan reading fewer than four live rows a page
+(`sparse_heap`, confirm with `pgstattuple`); triggers, JIT and planning that
+took a large share of the time no node includes — for a foreign-key trigger,
+the missing index on the referencing columns. A finding marked `candidate`
+rests on reading a condition's text or on what the plan cannot show; say so
+when you pass it on. The text output shows the six costliest; `--json` has all.
+
+A finding about a choice the planner made (a misestimate, a generic plan, a
+`LIMIT` index walk, a nested loop that blew up) also lists what this server
+offers to hold a plan in place while the cause is fixed: `pg_hint_plan` when
+installed or available, PostgreSQL 19's `pg_plan_advice` (in beta as of
+October 2026), Aurora Query Plan Management on Aurora, and a pointer to
+AlloyDB's own plan management on AlloyDB. It is advice; pg-debug applies none
+of it, and fixing the estimate is the answer that lasts.
+
 Because it runs the query it needs `--access-mode unrestricted`, and it says so
 rather than half-answering. A statement that writes is run in a transaction
 that is rolled back — which undoes the rows but not a sequence it consumed.
@@ -185,9 +207,9 @@ Two common findings, and what they mean:
 
 ## Planner pitfalls
 
-Five causes of slow queries that none of `diagnose`'s rules names yet. An
-empty result, or a "discarded rows" finding with the generic advice to add an
-index, does not rule them out; when the symptom fits, check by hand.
+Five causes of slow queries that a plan only half shows. `diagnose` names the
+first four when the plan carries the evidence, and says what it could not
+check; N+1 is never in one plan, and an empty result does not rule it out.
 
 ### A prepared statement that slows down after a few runs
 
@@ -209,6 +231,11 @@ for that value. Compare the two:
 pg-debug explain 'SELECT * FROM orders WHERE status = $1'
 pg-debug explain "SELECT * FROM orders WHERE status = 'refunded'"
 ```
+
+`diagnose --plan` over `auto_explain` output of a generic plan reports
+`generic_plan` when a node comparing with `$1` misestimated its rows, quoting
+the values auto_explain logged; it ignores the `$n` an InitPlan returns. It is
+a candidate: the setting below either moves the estimate or does not.
 
 On older servers, and always in `diagnose`, pg-debug fills `$1` from the
 column statistics instead, which gives a custom plan for a value it chose. On
@@ -236,9 +263,11 @@ JIT compiles a query when its estimated cost passes `jit_above_cost` (100,000
 by default; inlining and optimization start at 500,000). Compiling takes time
 up front: it pays off for long, CPU-bound queries and can cost a short one
 more than it saves, and because it goes by the estimate, a query whose cost is
-overestimated is compiled anyway. `diagnose` does not look at JIT, and the
-text output of `explain --analyze` leaves it out. The JSON plan has it, and
-has no `JIT` key when nothing was compiled:
+overestimated is compiled anyway. `diagnose` reports `jit_time` when
+compilation is at least a tenth of the execution and 5 ms, with the plan's
+cost and a `jit_above_cost` above it. The text output of `explain --analyze`
+leaves JIT out; the JSON plan has it, and has no `JIT` key when nothing was
+compiled:
 
 ```bash
 pg-debug --json explain --analyze "<query>" | jq '{jit_ms: .JIT.Timing.Total, execution_ms: ."Execution Time"}'
@@ -260,9 +289,13 @@ does not report; read them with `pg-debug execute`.
 
 ### Row-level security that looks like a missing index
 
-Two policy problems look like a missing index: `diagnose` reports rows the
-scan discarded with the advice to add one, and `tune-queries` has nothing
-useful to propose. Plan the query both as the connecting user (no `--role`),
+Two policy problems look like a missing index, and `tune-queries` has
+nothing useful to propose for either. `diagnose` run as the application's role
+names both, from the plan and the catalog: `rls_per_row_call` with the
+`ALTER POLICY` that wraps the call, in place of the discarded-rows advice, and
+`rls_leaky_predicate` when an index exists that the condition cannot use. Run
+as the owner it names neither, because the policy is not applied. To see the
+difference yourself, plan the query both as the connecting user (no `--role`),
 which bypasses the policy when it owns the table or is a superuser, and as the
 application's role (`--role`, `--set`, as above); when the scans differ, the
 policy is the cause.
@@ -309,9 +342,10 @@ rewrite is open.
 `OFFSET` does not skip rows. The scan produces every row before the page and
 the `Limit` throws them away, so the node under the `Limit` reports `OFFSET`
 plus `LIMIT` actual rows, and each page costs more than the one before.
-`diagnose` does not name the `OFFSET`. On a deep page it usually finds
-nothing; when the page ends early in the table, it reports the scan under the
-`Limit` as a row overestimate instead. That finding is the `Limit` stopping
+`diagnose` names it `large_offset` when at least 1,000 rows were skipped, ten
+times those returned, charging the input's time to the skipped rows. When the
+page ends early in the table it may also report the scan under the `Limit` as
+a row overestimate. That finding is the `Limit` stopping
 the scan early, as any `LIMIT` does, not a bad estimate, and `ANALYZE` will
 not change it. Measure a deep page with its numbers written in: wherever
 pg-debug fills in parameters, `OFFSET $1` becomes `OFFSET 0` and `LIMIT $1`

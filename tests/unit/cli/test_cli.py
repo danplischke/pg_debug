@@ -1120,6 +1120,43 @@ def test_diagnose_json_carries_the_evidence(pg_client):
     assert payload[0]["share_of_time"] == 0.87
 
 
+def test_diagnose_marks_a_candidate_and_shows_the_plan_control_advice(pg_client):
+    from pg_debug.severity import Confidence
+
+    finding = plan_finding(confidence=Confidence.CANDIDATE, plan_control=["pg_hint_plan is installed: …"])
+    pg_client.diagnose_query = AsyncMock(return_value=[finding])
+
+    _, out, _ = run(["diagnose", "SELECT 1"])
+
+    assert "Seq Scan on public.visits  (candidate)" in out
+    assert "pg-debug applies none of it" in out
+    assert "- pg_hint_plan is installed: …" in out
+
+
+def test_diagnose_says_what_a_time_no_node_includes_is_a_share_of(pg_client):
+    finding = plan_finding(evidence={"share_of": "execution_time"})
+    pg_client.diagnose_query = AsyncMock(return_value=[finding])
+
+    _, out, _ = run(["diagnose", "SELECT 1"])
+
+    assert "87% of the execution time" in out
+
+
+def test_diagnose_shows_the_costliest_findings_and_says_how_many_it_left_out(pg_client):
+    from pg_debug.cli.render import PLAN_FINDINGS_SHOWN
+
+    findings = [plan_finding(summary=f"finding {i}") for i in range(PLAN_FINDINGS_SHOWN + 2)]
+    pg_client.diagnose_query = AsyncMock(return_value=findings)
+
+    _, out, _ = run(["diagnose", "SELECT 1"])
+    assert f"finding {PLAN_FINDINGS_SHOWN - 1}" in out
+    assert f"finding {PLAN_FINDINGS_SHOWN}" not in out
+    assert "The 2 smaller ones are not shown; --json lists every one." in out
+
+    _, out, _ = run(["--json", "diagnose", "SELECT 1"])
+    assert len(json.loads(out)) == PLAN_FINDINGS_SHOWN + 2
+
+
 def test_diagnose_passes_the_threshold_through(pg_client):
     pg_client.diagnose_query = AsyncMock(return_value=[])
 
