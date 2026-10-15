@@ -1,0 +1,66 @@
+2026-10-13 20:25:32.468 UTC [2876] LOG:  starting PostgreSQL 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+2026-10-13 20:25:32.468 UTC [2876] LOG:  listening on IPv4 address "127.0.0.1", port 54329
+2026-10-13 20:25:32.469 UTC [2876] LOG:  listening on Unix socket "/var/lib/postgresql/.s.PGSQL.54329"
+2026-10-13 20:25:32.471 UTC [2879] LOG:  database system was shut down at 2026-10-13 20:25:32 UTC
+2026-10-13 20:25:32.476 UTC [2876] LOG:  database system is ready to accept connections
+2026-10-13 20:42:09.035 UTC [7485] WARNING:  there is already a transaction in progress
+2026-10-13 20:42:09.040 UTC [7486] WARNING:  there is already a transaction in progress
+2026-10-13 20:42:09.042 UTC [7485] WARNING:  there is already a transaction in progress
+2026-10-13 20:42:09.199 UTC [2877] LOG:  checkpoints are occurring too frequently (21 seconds apart)
+2026-10-13 20:42:09.199 UTC [2877] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-13 20:42:09.200 UTC [2877] LOG:  checkpoint starting: wal
+2026-10-13 20:42:17.435 UTC [7552] WARNING:  there is already a transaction in progress
+2026-10-13 20:43:01.819 UTC [7684] WARNING:  there is already a transaction in progress
+2026-10-14 13:02:45.717 UTC [26782] WARNING:  there is already a transaction in progress
+2026-10-14 13:02:45.720 UTC [26783] WARNING:  there is already a transaction in progress
+2026-10-14 13:02:45.725 UTC [26782] WARNING:  there is already a transaction in progress
+2026-10-14 13:02:45.932 UTC [5040] LOG:  checkpoints are occurring too frequently (16 seconds apart)
+2026-10-14 13:02:45.932 UTC [5040] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-10-14 13:02:45.932 UTC [5040] LOG:  checkpoint starting: wal
+2026-10-14 13:02:54.454 UTC [26857] WARNING:  there is already a transaction in progress
+2026-10-14 13:16:13.220 UTC [28767] FATAL:  database "no_such_database" does not exist
+2026-10-14 13:16:14.356 UTC [28769] FATAL:  database "no_such_database" does not exist
+2026-10-14 13:17:36.975 UTC [28846] LOG:  skipping vacuum of "pp_big" --- lock not available
+2026-10-14 13:18:36.989 UTC [28884] LOG:  skipping vacuum of "pp_big" --- lock not available
+2026-10-14 13:19:37.005 UTC [28976] LOG:  skipping vacuum of "pp_big" --- lock not available
+2026-10-14 13:20:37.010 UTC [29080] LOG:  skipping vacuum of "pp_big" --- lock not available
+2026-10-14 13:20:44.005 UTC [29102] WARNING:  there is already a transaction in progress
+2026-10-14 21:34:53.732 UTC [7413] FATAL:  role "root" does not exist
+2026-10-14 21:35:28.002 UTC [9179] LOG:  automatic vacuum of table "pgdebug_scratch_logs.public.events": index scans: 1
+	pages: 0 removed, 187 remain, 187 scanned (100.00% of total)
+	tuples: 10000 removed, 10000 remain, 0 are dead but not yet removable
+	removable cutoff: 84615, which was 0 XIDs old when operation ended
+	frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+	index scan needed: 187 pages from table (100.00% of total) had 10000 dead item identifiers removed
+	index "events_pkey": pages: 57 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+	avg read rate: 0.000 MB/s, avg write rate: 1.929 MB/s
+	buffer usage: 671 hits, 0 misses, 3 dirtied
+	WAL usage: 618 records, 1 full page images, 101825 bytes
+	system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.01 s
+2026-10-14 21:35:28.021 UTC [9179] LOG:  automatic analyze of table "pgdebug_scratch_logs.public.events"
+	avg read rate: 0.000 MB/s, avg write rate: 0.000 MB/s
+	buffer usage: 410 hits, 0 misses, 0 dirtied
+	system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.01 s
+2026-10-14 21:35:35.702 UTC [9263] LOG:  process 9263 detected deadlock while waiting for ShareLock on transaction 84616 after 1000.116 ms
+2026-10-14 21:35:35.702 UTC [9263] DETAIL:  Process holding the lock: 9229. Wait queue: .
+2026-10-14 21:35:35.702 UTC [9263] CONTEXT:  while updating tuple (0,1) in relation "accounts"
+2026-10-14 21:35:35.702 UTC [9263] STATEMENT:  UPDATE accounts SET balance = balance + 10 WHERE id = 1;
+2026-10-14 21:35:35.702 UTC [9263] ERROR:  deadlock detected
+2026-10-14 21:35:35.702 UTC [9263] DETAIL:  Process 9263 waits for ShareLock on transaction 84616; blocked by process 9229.
+	Process 9229 waits for ShareLock on transaction 84617; blocked by process 9263.
+	Process 9263: UPDATE accounts SET balance = balance + 10 WHERE id = 1;
+	Process 9229: UPDATE accounts SET balance = balance + 10 WHERE id = 2;
+2026-10-14 21:35:35.702 UTC [9263] HINT:  See server log for query details.
+2026-10-14 21:35:35.702 UTC [9263] CONTEXT:  while updating tuple (0,1) in relation "accounts"
+2026-10-14 21:35:35.702 UTC [9263] STATEMENT:  UPDATE accounts SET balance = balance + 10 WHERE id = 1;
+2026-10-14 21:35:37.253 UTC [9489] LOG:  process 9489 still waiting for AccessShareLock on relation 311439 of database 311438 after 1000.120 ms at character 22
+2026-10-14 21:35:37.253 UTC [9489] DETAIL:  Process holding the lock: 9383. Wait queue: 9489.
+2026-10-14 21:35:37.253 UTC [9489] STATEMENT:  SELECT count(*) FROM accounts;
+2026-10-14 21:35:38.227 UTC [9878] FATAL:  role "root" does not exist
+2026-10-14 21:35:38.271 UTC [9489] LOG:  process 9489 acquired AccessShareLock on relation 311439 of database 311438 after 2018.358 ms at character 22
+2026-10-14 21:35:38.271 UTC [9489] STATEMENT:  SELECT count(*) FROM accounts;
+2026-10-14 21:35:38.808 UTC [9909] LOG:  temporary file: path "base/pgsql_tmp/pgsql_tmp9909.1", size 8069120
+2026-10-14 21:35:38.808 UTC [9909] STATEMENT:  SELECT count(*) FROM (SELECT md5(g::text) m FROM generate_series(1,200000) g ORDER BY 1) s;
+2026-10-14 21:35:38.808 UTC [9909] LOG:  temporary file: path "base/pgsql_tmp/pgsql_tmp9909.0", size 2800000
+2026-10-14 21:35:38.808 UTC [9909] STATEMENT:  SELECT count(*) FROM (SELECT md5(g::text) m FROM generate_series(1,200000) g ORDER BY 1) s;
+2026-10-14 21:35:39.348 UTC [10361] WARNING:  skipping vacuum of "accounts" --- lock not available

@@ -7,6 +7,7 @@ command names its own two in ``build_parser``.
 
 from __future__ import annotations
 
+import difflib
 import json
 from collections.abc import Callable
 from collections.abc import Iterable
@@ -21,13 +22,14 @@ from typing import Any
 
 import humanize
 
-from ..baseline import Baseline
 from ..baseline import Key
 from ..baseline import Partition
 from ..baseline import audit_finding_key
 from ..baseline import describe_key
 from ..baseline import health_finding_key
+from ..baseline import previous_entry
 from ..db.privileges import is_withheld
+from ..rules import health_rule
 from ..waits import WaitProfile
 
 if TYPE_CHECKING:
@@ -50,15 +52,16 @@ def _jsonable(value: Any) -> Any:
 
 # -- What --json prints -------------------------------------------------------
 #
-# Each takes the command's result and the baseline it is compared against, if
-# any. Most commands print their result as it is.
+# Each takes the command's result and, for a command that gates a build, what
+# the gate made of it: the baseline it was compared against and the rules it
+# suppresses. Most commands print their result as it is.
 
 
-def as_is(result: Any, baseline: Baseline | None) -> Any:
+def as_is(result: Any, split: Partition | None) -> Any:
     return result
 
 
-def plan_document(plan: ExplainPlanArtifact, baseline: Baseline | None) -> Any:
+def plan_document(plan: ExplainPlanArtifact, split: Partition | None) -> Any:
     """The plan EXPLAIN returned, as JSON rather than a JSON-encoded string."""
     try:
         return json.loads(plan.value)
@@ -66,54 +69,94 @@ def plan_document(plan: ExplainPlanArtifact, baseline: Baseline | None) -> Any:
         return plan.value
 
 
-def marked_against(key: Callable[[Any], Key]) -> Callable[[Sequence[Any], Baseline | None], list[dict[str, Any]]]:
-    """Findings as dicts, each marked ``known`` or ``new`` when there is a baseline."""
+def marked_against(key: Callable[[Any], Key]) -> Callable[[Sequence[Any], Partition | None], list[dict[str, Any]]]:
+    """Findings as dicts, each marked ``known``, ``new`` or ``changed`` against a
+    baseline, and with why its rule is suppressed, when it is."""
 
-    def payload(findings: Sequence[Any], baseline: Baseline | None) -> list[dict[str, Any]]:
-        return [_with_baseline(finding.to_dict(), key(finding), baseline) for finding in findings]
+    def payload(findings: Sequence[Any], split: Partition | None) -> list[dict[str, Any]]:
+        if split is None:
+            return [finding.to_dict() for finding in findings]
+        return [split.mark(finding.to_dict(), key(finding), _rule_of(finding)) for finding in findings]
 
     return payload
 
 
-def health_checks_json(results: Mapping[str, Any], baseline: Baseline | None) -> dict[str, Any]:
-    return {name: _health_check_json(name, check, baseline) for name, check in results.items()}
+def _rule_of(finding: Any) -> str | None:
+    rule = getattr(finding, "rule", None)
+    return getattr(rule, "value", rule)
 
 
-def _with_baseline(payload: dict[str, Any], key: Key, baseline: Baseline | None) -> dict[str, Any]:
-    if baseline is not None:
-        payload["baseline"] = "known" if key in baseline else "new"
-    return payload
+def health_checks_json(results: Mapping[str, Any], split: Partition | None) -> dict[str, Any]:
+    return {name: _health_check_json(name, check, split) for name, check in results.items()}
 
 
-def _health_check_json(name: str, check: Any, baseline: Baseline | None) -> dict[str, Any]:
+def _health_check_json(name: str, check: Any, split: Partition | None) -> dict[str, Any]:
     payload = check.to_dict()
-    if baseline is None or check.healthy or check.error is not None:
+    if split is None or check.healthy or check.error is not None:
         # A check that could not run found nothing, so there is nothing to
         # mark known or new; its "error" says why.
         return payload
     if not check.findings:
-        payload["baseline"] = "known" if {"check": name} in baseline else "new"
-        return payload
-    payload["findings"] = [_with_baseline(dict(finding), health_finding_key(name, finding), baseline) for finding in check.findings]
+        rule = health_rule(name)
+        return split.mark(payload, {"check": name}, rule.id if rule else None)
+    payload["findings"] = [
+        split.mark(dict(shown), health_finding_key(name, finding), _health_rule_id(name, finding))
+        for shown, finding in zip(payload["findings"], check.findings, strict=True)
+    ]
     return payload
 
 
-def render_baseline_trailer(path: str, split: Partition, could_not_run: int = 0) -> str:
-    """The line after the report that says what the baseline changed.
+def _health_rule_id(check: str, finding: Mapping[str, Any]) -> str | None:
+    rule = health_rule(check, finding)
+    return rule.id if rule else None
+
+
+def render_baseline_trailer(path: str | None, split: Partition, could_not_run: int = 0) -> str:
+    """The lines after the report that say what the baseline and the suppressions changed.
 
     ``could_not_run`` counts the checks that never looked. Nothing new among
     the others is not a pass, so the line says how many were not compared.
+    ``path`` is None when there is no baseline, only rules suppressed.
     """
+    lines: list[str] = []
+    if path is not None:
+        lines.extend(_baseline_lines(path, split, could_not_run))
+    lines.extend(_suppressed_lines(split))
+    return "\n".join(lines)
+
+
+def _baseline_lines(path: str, split: Partition, could_not_run: int) -> list[str]:
     among = " among the checks that ran" if could_not_run else ""
     unrun = f"{could_not_run} check could not run and was" if could_not_run == 1 else f"{could_not_run} checks could not run and were"
-    if not split.new:
+    if not split.new and not split.changed:
         line = f"Baseline {path}: {len(split.known)} known finding(s), nothing new{among}."
-        return f"{line} {unrun} not compared, so this is not a pass." if could_not_run else line
-    lines = [f"Baseline {path}: {len(split.known)} known finding(s) ignored, {len(split.new)} new{among}:"]
+        return [f"{line} {unrun} not compared, so this is not a pass." if could_not_run else line]
+    changed = f", {len(split.changed)} changed" if split.changed else ""
+    lines = [f"Baseline {path}: {len(split.known)} known finding(s) ignored, {len(split.new)} new{changed}{among}:"]
     lines.extend(f"  {describe_key(key)}" for key in split.new)
+    for key in split.changed:
+        lines.append(f"  {describe_key(key)} (changed: {_what_changed(key, split)})")
+        previous = previous_entry(split, key)
+        if "shape" in key and previous is not None and previous.get("shape"):
+            diff = difflib.unified_diff(previous["shape"], key["shape"], "accepted", "now", lineterm="", n=1)
+            lines.extend(f"    {line}" for line in list(diff)[2:])
     if could_not_run:
         lines.append(f"{unrun} not compared.")
-    return "\n".join(lines)
+    return lines
+
+
+def _what_changed(key: Key, split: Partition) -> str:
+    if "query" in key:
+        return "its plan has another shape"
+    return "defined otherwise than when it was accepted"
+
+
+def _suppressed_lines(split: Partition) -> list[str]:
+    if not split.suppressed:
+        return []
+    lines = [f"Suppressed, so not failing the gate: {len(split.suppressed)} finding(s)."]
+    lines.extend(f"  {rule}: {count} finding(s). {split.suppressions[rule]}" for rule, count in sorted(split.suppressed_by_rule.items()))
+    return lines
 
 
 def render_plan(plan: ExplainPlanArtifact) -> str:
@@ -759,10 +802,10 @@ def render_audit_report(report: Any) -> str:
     return "\n".join(lines)
 
 
-def audit_report_json(report: Any, baseline: Baseline | None) -> dict[str, Any]:
-    """The report as JSON, each finding marked ``known`` or ``new`` when there is a baseline."""
+def audit_report_json(report: Any, split: Partition | None) -> dict[str, Any]:
+    """The report as JSON, each finding marked ``known``, ``new`` or ``changed`` when there is a baseline."""
     payload = report.to_dict()
-    payload["findings"] = [_with_baseline(finding.to_dict(), audit_finding_key(finding), baseline) for finding in report.findings]
+    payload["findings"] = marked_against(audit_finding_key)(report.findings, split)
     return payload
 
 
@@ -1021,6 +1064,124 @@ class Shown:
     rows: Any
     text: Any = None
     note: str | None = None
+
+    @classmethod
+    def of(cls, result: Any) -> Shown:
+        """A handler's result as a Shown, whichever it returned."""
+        return result if isinstance(result, Shown) else cls(result)
+
+
+def plan_shapes_json(shapes: Sequence[Any], split: Partition | None) -> list[dict[str, Any]]:
+    """Each query's shape, marked against the baseline, with the accepted shape beside a changed one."""
+    payload: list[dict[str, Any]] = []
+    for shape in shapes:
+        entry = shape.to_dict()
+        if split is not None and shape.fingerprint is not None:
+            split.mark(entry, shape.key(), None)
+            previous = previous_entry(split, shape.key())
+            if previous is not None:
+                entry["accepted_shape"] = previous.get("shape")
+        payload.append(entry)
+    return payload
+
+
+def render_plan_shapes(shapes: Sequence[Any]) -> str:
+    """Each query, known by its name, with its plan's shape beneath it."""
+    if not shapes:
+        return "No queries."
+    lines: list[str] = []
+    for shape in shapes:
+        lines.append(f"{shape.name}: {shape.about}")
+        if shape.error is not None:
+            lines.append(f"  could not be planned: {shape.error}")
+        else:
+            lines.append(f"  fingerprint {shape.fingerprint}")
+            lines.extend(f"    {line}" for line in shape.shape)
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def render_log_report(report: Any) -> str:
+    """What the logs say happened, a section for each kind of event, then what they cannot show."""
+    lines: list[str] = []
+    span = f", {report.first_time} to {report.last_time}" if report.first_time else ""
+    formats = ", ".join(sorted(set(report.sources.values())))
+    lines.append(f"Read {report.lines:,} lines ({formats}){span}: {report.entries:,} messages, {report.unparsed:,} lines not understood.")
+
+    if report.deadlocks:
+        lines += ["", f"Deadlocks ({len(report.deadlocks)}):"]
+        for deadlock in report.deadlocks:
+            where = f" in {deadlock.database}" if deadlock.database else ""
+            relations = f" on {_series(deadlock.relations)}" if deadlock.relations else ""
+            lines.append(f"  {deadlock.time or '?'}{where}{relations}, process {deadlock.cancelled_pid} cancelled ({deadlock.source})")
+            for process in deadlock.processes:
+                query = f": {process.query}" if process.query else ""
+                lines.append(f"    process {process.pid} waited for {process.waits_for} on {process.on}, held by {process.blocked_by}{query}")
+
+    if report.lock_waits:
+        lines += ["", f"Lock waits past deadlock_timeout ({len(report.lock_waits)}):"]
+        for wait in sorted(report.lock_waits, key=lambda w: -w.waited_ms):
+            holders = f", held by {_series(wait.holders)}" if wait.holders else ""
+            statement = f": {_one_line(wait.statement)}" if wait.statement else ""
+            lines.append(
+                f"  {wait.waited_ms / 1000:.1f}s {wait.outcome}, process {wait.pid} for {wait.mode} on {wait.target}{holders}"
+                f"{statement} ({wait.sources[0]})"
+            )
+
+    if report.temp_files:
+        lines += ["", "Temporary files, by statement:"]
+        for use in report.temp_files:
+            statement = _one_line(use.statement) if use.statement else "(no statement logged)"
+            lines.append(
+                f"  {humanize.naturalsize(use.total_bytes, binary=True)} in {use.files} file(s), largest "
+                f"{humanize.naturalsize(use.largest_bytes, binary=True)}: {statement} ({use.sources[0]})"
+            )
+
+    if report.skipped_vacuums:
+        lines += ["", "Skipped vacuums and analyzes:"]
+        for skip in report.skipped_vacuums:
+            lines.append(
+                f"  {skip.operation} of {skip.relation} by {skip.by}, {skip.times}x, {skip.reason}; last {skip.last_time} ({skip.sources[0]})"
+            )
+
+    if report.autovacuum:
+        lines += ["", "Autovacuum and autoanalyze, longest first:"]
+        for run in report.autovacuum:
+            extra = []
+            if run.aggressive:
+                extra.append(f"{run.aggressive} aggressive")
+            if run.wraparound:
+                extra.append(f"{run.wraparound} to prevent wraparound")
+            if run.dead_not_removable:
+                extra.append(f"up to {run.dead_not_removable:,} dead tuples not yet removable")
+            more = f"; {', '.join(extra)}" if extra else ""
+            lines.append(
+                f"  {run.operation} {run.table}: {run.runs} run(s), longest {run.longest_seconds:.2f}s, total {run.total_seconds:.2f}s{more}"
+            )
+
+    if report.checkpoint_warnings:
+        closest = min(w.seconds_apart for w in report.checkpoint_warnings)
+        lines += [
+            "",
+            f"Checkpoints occurring too frequently: {len(report.checkpoint_warnings)} warning(s), the closest {closest}s apart "
+            f"({report.checkpoint_warnings[0].source}). WAL filled max_wal_size before checkpoint_timeout.",
+        ]
+    if report.checkpoints:
+        counts = ", ".join(f"{count} {reason}" for reason, count in sorted(report.checkpoints.items(), key=lambda item: -item[1]))
+        lines.append(f"Checkpoints logged, by what started them: {counts}.")
+
+    if report.unparsed_examples:
+        lines += ["", "Lines not understood, for example:"]
+        lines.extend(f"  {example}" for example in report.unparsed_examples)
+    if report.notes:
+        lines += ["", "What these logs cannot show:"]
+        lines.extend(f"  {note}" for note in report.notes)
+    return "\n".join(lines)
+
+
+def _one_line(text: str, width: int = 100) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= width else flat[: width - 1] + "…"
 
 
 def _series(items: Iterable[Any]) -> str:

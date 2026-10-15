@@ -174,9 +174,12 @@ class QueryContext:
 
     @classmethod
     def _from_document(cls, document: dict[str, Any]) -> QueryContext:
-        unknown = sorted(set(document) - {"context"})
+        # [suppress] is the gate's, read by the commands that gate a build.
+        unknown = sorted(set(document) - {"context", "suppress"})
         if unknown:
-            raise InvalidArgumentError(f"Unknown key {', '.join(unknown)}. The file holds a [context] table, with a role and settings.")
+            raise InvalidArgumentError(
+                f"Unknown key {', '.join(unknown)}. The file holds a [context] table, with a role and settings, and a [suppress] table of rules."
+            )
 
         context = document.get("context", {})
         if not isinstance(context, dict):

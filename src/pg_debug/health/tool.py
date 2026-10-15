@@ -11,6 +11,7 @@ from ..errors import ConnectionFailedError
 from ..errors import InvalidArgumentError
 from ..errors import NotConnectedError
 from ..errors import PgDebugError
+from ..rules import is_static_check
 from .checks.autovacuum import AUTOVACUUM_BACKLOG
 from .checks.autovacuum import VACUUM_HORIZON
 from .checks.autovacuum import AutovacuumCalc
@@ -106,6 +107,7 @@ class DatabaseHealthTool:
     async def run_checks(
         self,
         health_type: str | HealthType | Iterable[str | HealthType] = HealthType.ALL,
+        static: bool = False,
     ) -> dict[str, HealthCheckResult]:
         """Run database health checks and return one result per check.
 
@@ -125,6 +127,12 @@ class DatabaseHealthTool:
                 iterable of health types. Valid values: index, connection,
                 vacuum, sequence, replication, buffer, constraint, statistics,
                 table, scan, collation, checksum, partition, all.
+            static: Run only the checks that read nothing but the catalog
+                (invalid and duplicate indexes, invalid constraints), which
+                find on a freshly migrated, empty database what they would
+                find on production. The others read what the tables hold or
+                the counters a workload leaves, and an empty database has
+                neither: they would pass there for want of anything to see.
 
         Returns:
             An ordered mapping of check name to its
@@ -134,12 +142,23 @@ class DatabaseHealthTool:
             ``error`` when the check could not run.
 
         Raises:
-            InvalidArgumentError: If an unknown health type is requested.
+            InvalidArgumentError: If an unknown health type is requested, or
+                ``static`` leaves none of the selected checks to run.
         """
         results: dict[str, HealthCheckResult] = {}
         unreachable: str | None = None
 
-        for name, check in self._selected_checks(HealthType.parse(health_type)):
+        selected = self._selected_checks(HealthType.parse(health_type))
+        if static:
+            runtime = [name for name, _ in selected if not is_static_check(name)]
+            selected = [(name, check) for name, check in selected if is_static_check(name)]
+            if not selected:
+                raise InvalidArgumentError(
+                    f"None of the selected health checks reads only the catalog ({', '.join(runtime)} read the tables' contents or the "
+                    "workload's counters), so --static leaves nothing to run. The static checks are in index and constraint."
+                )
+
+        for name, check in selected:
             if unreachable is not None:
                 results[name] = HealthCheckResult.could_not_run(name, unreachable)
                 continue

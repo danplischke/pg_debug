@@ -17,6 +17,7 @@ from pg_debug.model import RuleId
 from pg_debug.model import Severity
 from pg_debug.plans.tree import ExplainPlanArtifact
 from pg_debug.plans.tree import PlanNode
+from pg_debug.rules import DOCS_URL
 from pg_debug.top_queries import QuerySample
 from pg_debug.waits import SampleTiming
 from pg_debug.waits import WaitClassification
@@ -43,6 +44,8 @@ def pg_client():
         client.withheld_backends = AsyncMock(return_value=[])
         client.counting_windows = AsyncMock(return_value={"tables": None, "checkpoints": None, "statements": None})
         client.classify_waits = AsyncMock(return_value=WaitDiagnosis())
+        # No finding names an object with a definition, unless a test says so.
+        client.definition_fingerprints = AsyncMock(side_effect=lambda command, keys: [None] * len(keys))
         yield client
 
 
@@ -243,7 +246,7 @@ def test_health_renders_one_line_per_check(pg_client):
 
     assert code == 0
     assert out.splitlines()[:2] == ["Connection health: ok", "Vacuum health: ok"]
-    pg_client.analyze_db_health.assert_awaited_once_with("connection,vacuum", min_window_days=7.0)
+    pg_client.analyze_db_health.assert_awaited_once_with("connection,vacuum", min_window_days=7.0, static=False)
 
 
 def test_health_json_includes_findings_and_metrics(pg_client):
@@ -266,8 +269,9 @@ def test_health_json_includes_findings_and_metrics(pg_client):
             "name": "Unused index check",
             "healthy": False,
             "summary": "Rarely used indexes found:",
-            "findings": [{"index": "orders_status_idx", "index_scans": 0}],
+            "findings": [{"rule": "unused_index", "docs": f"{DOCS_URL}#unused_index", "index": "orders_status_idx", "index_scans": 0}],
             "metrics": {"max_scans": 50},
+            "rules": [{"id": "unused_index", "docs": f"{DOCS_URL}#unused_index"}],
         }
     }
 
@@ -373,6 +377,7 @@ def test_model_passes_its_options(pg_client):
         schema="reporting",
         min_rows=50,
         proven_only=True,
+        static=False,
     )
 
 
@@ -1749,7 +1754,7 @@ def test_the_window_an_unused_index_needs_is_passed_through(pg_client):
 
     run(["health", "--type", "index", "--min-window-days", "30"])
 
-    pg_client.analyze_db_health.assert_awaited_once_with("index", min_window_days=30.0)
+    pg_client.analyze_db_health.assert_awaited_once_with("index", min_window_days=30.0, static=False)
 
 
 def test_cumulative_top_queries_say_since_when_they_counted(pg_client):

@@ -1,0 +1,71 @@
+2026-10-14 21:48:00.152 UTC,,,2680,,6acff890.a78,1,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"starting PostgreSQL 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit",,,,,,,,,"","postmaster",,0
+2026-10-14 21:48:00.152 UTC,,,2680,,6acff890.a78,2,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"listening on IPv4 address ""127.0.0.1"", port 54391",,,,,,,,,"","postmaster",,0
+2026-10-14 21:48:00.159 UTC,,,2680,,6acff890.a78,3,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"listening on Unix socket ""/var/lib/postgresql/pgdebug-logs-scratch/.s.PGSQL.54391""",,,,,,,,,"","postmaster",,0
+2026-10-14 21:48:15.969 UTC,"postgres","shop",4344,"127.0.0.1:47740",6acff89f.10f8,1,"UPDATE waiting",2026-10-14 21:48:15 UTC,4/2,748,LOG,00000,"process 4344 detected deadlock while waiting for ShareLock on transaction 747 after 500.180 ms","Process holding the lock: 4335. Wait queue: .",,,,"while updating tuple (0,1) in relation ""accounts""","UPDATE accounts SET balance = balance + 10 WHERE id = 1;",,,"transfer_b","client backend",,0
+2026-10-14 21:48:15.969 UTC,"postgres","shop",4344,"127.0.0.1:47740",6acff89f.10f8,2,"UPDATE",2026-10-14 21:48:15 UTC,4/2,748,ERROR,40P01,"deadlock detected","Process 4344 waits for ShareLock on transaction 747; blocked by process 4335.
+Process 4335 waits for ShareLock on transaction 748; blocked by process 4344.
+Process 4344: UPDATE accounts SET balance = balance + 10 WHERE id = 1;
+Process 4335: UPDATE accounts SET balance = balance + 10 WHERE id = 2;","See server log for query details.",,,"while updating tuple (0,1) in relation ""accounts""","UPDATE accounts SET balance = balance + 10 WHERE id = 1;",,,"transfer_b","client backend",,0
+2026-10-14 21:48:16.807 UTC,"postgres","shop",4359,"127.0.0.1:47754",6acff8a0.1107,1,"SELECT waiting",2026-10-14 21:48:16 UTC,4/4,0,LOG,00000,"process 4359 still waiting for AccessShareLock on relation 16389 of database 16388 after 500.147 ms","Process holding the lock: 4347. Wait queue: 4359.",,,,,"SELECT count(*) FROM accounts",22,,"report","client backend",,0
+2026-10-14 21:48:17.181 UTC,,,4368,,6acff8a1.1110,1,,2026-10-14 21:48:17 UTC,5/5,0,LOG,00000,"automatic vacuum of table ""shop.public.events"": index scans: 1
+pages: 0 removed, 187 remain, 187 scanned (100.00% of total)
+tuples: 10000 removed, 10000 remain, 0 are dead but not yet removable
+removable cutoff: 749, which was 1 XIDs old when operation ended
+new relfrozenxid: 745, which is 1 XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+index scan needed: 187 pages from table (100.00% of total) had 10000 dead item identifiers removed
+index ""events_pkey"": pages: 57 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+avg read rate: 0.000 MB/s, avg write rate: 2.139 MB/s
+buffer usage: 671 hits, 0 misses, 3 dirtied
+WAL usage: 618 records, 1 full page images, 101617 bytes
+system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.01 s",,,,,,,,,"","autovacuum worker",,0
+2026-10-14 21:48:17.198 UTC,,,4368,,6acff8a1.1110,2,,2026-10-14 21:48:17 UTC,5/6,750,LOG,00000,"automatic analyze of table ""shop.public.events""
+avg read rate: 0.000 MB/s, avg write rate: 0.000 MB/s
+buffer usage: 410 hits, 0 misses, 0 dirtied
+system usage: CPU: user: 0.01 s, system: 0.00 s, elapsed: 0.01 s",,,,,,,,,"","autovacuum worker",,0
+2026-10-14 21:48:18.013 UTC,"postgres","shop",4359,"127.0.0.1:47754",6acff8a0.1107,2,"SELECT waiting",2026-10-14 21:48:16 UTC,4/4,0,LOG,00000,"process 4359 acquired AccessShareLock on relation 16389 of database 16388 after 1706.342 ms",,,,,,"SELECT count(*) FROM accounts",22,,"report","client backend",,0
+2026-10-14 21:48:18.850 UTC,"postgres","shop",4375,"127.0.0.1:47774",6acff8a2.1117,1,"SELECT waiting",2026-10-14 21:48:18 UTC,4/7,0,LOG,00000,"process 4375 still waiting for AccessShareLock on relation 16395 of database 16388 after 500.234 ms","Process holding the lock: 4373. Wait queue: 4375.",,,,,"SELECT count(*) FROM events",22,,"impatient","client backend",,0
+2026-10-14 21:48:19.850 UTC,"postgres","shop",4375,"127.0.0.1:47774",6acff8a2.1117,2,"SELECT",2026-10-14 21:48:18 UTC,4/7,0,ERROR,57014,"canceling statement due to statement timeout",,,,,,"SELECT count(*) FROM events",,,"impatient","client backend",,0
+2026-10-14 21:48:21.534 UTC,"postgres","shop",4420,"127.0.0.1:32810",6acff8a5.1144,1,"SELECT",2026-10-14 21:48:21 UTC,3/58,0,LOG,00000,"temporary file: path ""base/pgsql_tmp/pgsql_tmp4420.1"", size 8069120",,,,,,"SELECT count(*) FROM (SELECT md5(g::text) m FROM generate_series(1,200000) g ORDER BY 1) s;",,,"sorter","client backend",,0
+2026-10-14 21:48:21.534 UTC,"postgres","shop",4420,"127.0.0.1:32810",6acff8a5.1144,2,"SELECT",2026-10-14 21:48:21 UTC,3/58,0,LOG,00000,"temporary file: path ""base/pgsql_tmp/pgsql_tmp4420.0"", size 2800000",,,,,,"SELECT count(*) FROM (SELECT md5(g::text) m FROM generate_series(1,200000) g ORDER BY 1) s;",,,"sorter","client backend",,0
+2026-10-14 21:48:21.870 UTC,"postgres","shop",4436,"127.0.0.1:32826",6acff8a5.1154,1,"VACUUM",2026-10-14 21:48:21 UTC,4/15,0,WARNING,55P03,"skipping vacuum of ""accounts"" --- lock not available",,,,,,,,,"psql","client backend",,0
+2026-10-14 21:48:23.152 UTC,,,2682,,6acff890.a7a,1,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoints are occurring too frequently (23 seconds apart)",,"Consider increasing the configuration parameter ""max_wal_size"".",,,,,,,"","checkpointer",,0
+2026-10-14 21:48:23.175 UTC,,,2682,,6acff890.a7a,2,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoint starting: wal",,,,,,,,,"","checkpointer",,0
+2026-10-14 21:48:23.410 UTC,,,2682,,6acff890.a7a,3,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoint complete: wrote 2152 buffers (13.1%); 1 WAL file(s) added, 1 removed, 0 recycled; write=0.112 s, sync=0.074 s, total=0.259 s; sync files=323, longest=0.028 s, average=0.001 s; distance=15427 kB, estimate=15427 kB; lsn=0/3C5B008, redo lsn=0/24002C8",,,,,,,,,"","checkpointer",,0
+2026-10-14 21:48:23.411 UTC,,,2682,,6acff890.a7a,4,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoints are occurring too frequently (0 seconds apart)",,"Consider increasing the configuration parameter ""max_wal_size"".",,,,,,,"","checkpointer",,0
+2026-10-14 21:48:23.411 UTC,,,2682,,6acff890.a7a,5,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoint starting: wal",,,,,,,,,"","checkpointer",,0
+2026-10-14 21:48:23.612 UTC,,,2682,,6acff890.a7a,6,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoint complete: wrote 3958 buffers (24.2%); 0 WAL file(s) added, 2 removed, 0 recycled; write=0.101 s, sync=0.071 s, total=0.202 s; sync files=3, longest=0.044 s, average=0.024 s; distance=32982 kB, estimate=32982 kB; lsn=0/5713F60, redo lsn=0/4435D88",,,,,,,,,"","checkpointer",,0
+2026-10-14 21:48:23.612 UTC,,,2682,,6acff890.a7a,7,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoints are occurring too frequently (0 seconds apart)",,"Consider increasing the configuration parameter ""max_wal_size"".",,,,,,,"","checkpointer",,0
+2026-10-14 21:48:23.612 UTC,,,2682,,6acff890.a7a,8,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoint starting: wal",,,,,,,,,"","checkpointer",,0
+2026-10-14 21:48:23.845 UTC,,,2682,,6acff890.a7a,9,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoint complete: wrote 3050 buffers (18.6%); 0 WAL file(s) added, 1 removed, 0 recycled; write=0.153 s, sync=0.063 s, total=0.234 s; sync files=3, longest=0.050 s, average=0.021 s; distance=25121 kB, estimate=32196 kB; lsn=0/74022B0, redo lsn=0/5CBE3A8",,,,,,,,,"","checkpointer",,0
+2026-10-14 21:48:23.846 UTC,,,2682,,6acff890.a7a,10,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoints are occurring too frequently (0 seconds apart)",,"Consider increasing the configuration parameter ""max_wal_size"".",,,,,,,"","checkpointer",,0
+2026-10-14 21:48:23.846 UTC,,,2682,,6acff890.a7a,11,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoint starting: wal",,,,,,,,,"","checkpointer",,0
+2026-10-14 21:48:24.132 UTC,,,2682,,6acff890.a7a,12,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoint complete: wrote 3197 buffers (19.5%); 0 WAL file(s) added, 2 removed, 0 recycled; write=0.178 s, sync=0.075 s, total=0.287 s; sync files=3, longest=0.055 s, average=0.025 s; distance=26544 kB, estimate=31631 kB; lsn=0/9401600, redo lsn=0/76AA688",,,,,,,,,"","checkpointer",,0
+2026-10-14 21:48:24.132 UTC,,,2682,,6acff890.a7a,13,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoints are occurring too frequently (1 second apart)",,"Consider increasing the configuration parameter ""max_wal_size"".",,,,,,,"","checkpointer",,0
+2026-10-14 21:48:24.132 UTC,,,2682,,6acff890.a7a,14,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoint starting: wal",,,,,,,,,"","checkpointer",,0
+2026-10-14 21:48:24.412 UTC,,,2682,,6acff890.a7a,15,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoint complete: wrote 4039 buffers (24.7%); 0 WAL file(s) added, 2 removed, 0 recycled; write=0.186 s, sync=0.069 s, total=0.281 s; sync files=3, longest=0.056 s, average=0.023 s; distance=33612 kB, estimate=33612 kB; lsn=0/B4019C0, redo lsn=0/977DA70",,,,,,,,,"","checkpointer",,0
+2026-10-14 21:48:24.413 UTC,,,2682,,6acff890.a7a,16,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoints are occurring too frequently (0 seconds apart)",,"Consider increasing the configuration parameter ""max_wal_size"".",,,,,,,"","checkpointer",,0
+2026-10-14 21:48:24.413 UTC,,,2682,,6acff890.a7a,17,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoint starting: wal",,,,,,,,,"","checkpointer",,0
+2026-10-14 21:48:29.786 UTC,,,4466,,6acff8a9.1172,1,,2026-10-14 21:48:25 UTC,3/71,0,LOG,00000,"automatic vacuum of table ""shop.public.filler"": index scans: 0
+pages: 0 removed, 20000 remain, 20000 scanned (100.00% of total)
+tuples: 0 removed, 240000 remain, 0 are dead but not yet removable
+removable cutoff: 758, which was 0 XIDs old when operation ended
+new relfrozenxid: 754, which is 1 XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+avg read rate: 6.844 MB/s, avg write rate: 31.600 MB/s
+buffer usage: 36251 hits, 3779 misses, 17448 dirtied
+WAL usage: 20001 records, 2 full page images, 1193970 bytes
+system usage: CPU: user: 0.09 s, system: 0.07 s, elapsed: 4.31 s",,,,,,,,,"","autovacuum worker",,0
+2026-10-14 21:48:30.188 UTC,,,4466,,6acff8a9.1172,2,,2026-10-14 21:48:25 UTC,3/72,758,LOG,00000,"automatic analyze of table ""shop.public.filler""
+avg read rate: 74.461 MB/s, avg write rate: 0.097 MB/s
+buffer usage: 16312 hits, 3841 misses, 5 dirtied
+system usage: CPU: user: 0.13 s, system: 0.00 s, elapsed: 0.40 s",,,,,,,,,"","autovacuum worker",,0
+2026-10-14 21:48:39.580 UTC,,,2680,,6acff890.a78,5,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"received fast shutdown request",,,,,,,,,"","postmaster",,0
+2026-10-14 21:48:39.587 UTC,,,2680,,6acff890.a78,6,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"aborting any active transactions",,,,,,,,,"","postmaster",,0
+2026-10-14 21:48:39.596 UTC,,,2680,,6acff890.a78,7,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"background worker ""logical replication launcher"" (PID 2687) exited with exit code 1",,,,,,,,,"","postmaster",,0
+2026-10-14 21:48:39.680 UTC,,,2682,,6acff890.a7a,18,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoint complete: wrote 4009 buffers (24.5%); 0 WAL file(s) added, 2 removed, 0 recycled; write=15.187 s, sync=0.059 s, total=15.268 s; sync files=4, longest=0.049 s, average=0.015 s; distance=32933 kB, estimate=33544 kB; lsn=0/C013A30, redo lsn=0/B7A6E80",,,,,,,,,"","checkpointer",,0
+2026-10-14 21:48:39.680 UTC,,,2682,,6acff890.a7a,19,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"shutting down",,,,,,,,,"","checkpointer",,0
+2026-10-14 21:48:39.680 UTC,,,2682,,6acff890.a7a,20,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoint starting: shutdown immediate",,,,,,,,,"","checkpointer",,0
+2026-10-14 21:48:39.763 UTC,,,2682,,6acff890.a7a,21,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"checkpoint complete: wrote 10025 buffers (61.2%); 0 WAL file(s) added, 0 removed, 1 recycled; write=0.033 s, sync=0.048 s, total=0.083 s; sync files=10, longest=0.046 s, average=0.005 s; distance=8627 kB, estimate=31053 kB; lsn=0/C013AA8, redo lsn=0/C013AA8",,,,,,,,,"","checkpointer",,0
+2026-10-14 21:48:39.783 UTC,,,2680,,6acff890.a78,8,,2026-10-14 21:48:00 UTC,,0,LOG,00000,"database system is shut down",,,,,,,,,"","postmaster",,0

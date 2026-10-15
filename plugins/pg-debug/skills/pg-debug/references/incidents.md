@@ -4,6 +4,15 @@ Reading `activity`, `locks` and `vacuum-progress` when something is wrong right
 now, three incidents that are easy to misread, and what the waits in one
 snapshot do and do not say.
 
+When it already happened and is over, the server log holds what the views
+no longer show: `pg-debug logs postgresql.log` (no connection) lists the
+deadlocks with both processes and their queries, the lock waits past
+`deadlock_timeout` with their holders and how each ended, temporary files per
+statement, vacuums skipped for a lock and slow autovacuum runs. Relay its
+notes too: a lock wait is only logged with `log_lock_waits = on`, so a log
+without any says nothing unless that was on. The `logs` section of
+[rules.md](rules.md) has the detail.
+
 ## Something is wrong right now
 
 When the complaint is "the database is stuck" rather than "this query is slow",

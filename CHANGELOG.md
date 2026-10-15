@@ -397,6 +397,56 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from pg_stat_statements 1.11, the statement itself has); otherwise stderr
   says why nothing was judged. `QuerySample` gains `statement_window` and
   `changes_refused`.
+- Rule ids for every kind of finding. A build that wanted to act on one kind
+  of finding had to match a health check's display name ("Invalid index
+  check") or a configuration finding's setting, neither of which is a name
+  for a kind of finding. Now each kind that `health`, `model`, `config` and
+  `logs` report has a stable, lower-case id unique across the commands
+  (`duplicate_index`, `unindexed_foreign_key`, `work_mem_spills`,
+  `deadlock`), and in JSON each finding carries its `rule` and a `docs` link
+  to its entry in a new rules reference, `references/rules.md`, which also
+  says what the rule reads: the catalog, the tables' data, the workload's
+  counters, the settings or a log. A health check's JSON lists its `rules`;
+  `ConfigFinding` gained `rule`.
+
+- Suppressing a rule for the gate: `--suppress RULE` on `health`, `model` and
+  `config`, or a `[suppress]` table in `pg-debug.toml` mapping each rule to
+  the reason. A baseline accepts findings one object at a time, so a team
+  that had decided against a whole rule (every `timestamp` column is UTC by
+  convention) had to accept each finding and every new one again. A
+  suppressed rule's findings are still reported, marked `"suppressed"` with
+  the reason in JSON and counted after the text, and never fail
+  `--exit-code`; the run says on stderr what it suppresses and from where. An
+  id that is not a rule, or a suppression without a reason, is an error.
+
+- `--static` on `health` and `model`: only the rules that read the catalog
+  alone (invalid and duplicate indexes, invalid constraints; the key, type
+  and column rules of the data model review). Run in CI against a freshly
+  migrated, empty database, the other rules found nothing for want of data
+  or counters and passed, which is not a pass. A selection with no static
+  rule in it is refused, naming why.
+
+- `pg-debug plans --queries FILE` and `PgDebug.plan_shapes()`: each query's
+  plan shape, read with `EXPLAIN` and nothing run, under the query context:
+  node types, join, aggregate and scan strategies, and the relations and
+  indexes each node reads, without costs or row counts. With `--baseline` and
+  `--exit-code` a build fails (status 3) when a query's plan changes shape,
+  and the text shows the accepted and the current shape as a diff, so a
+  migration that drops the index a critical query uses fails in CI rather
+  than in production. A `-- name:` line names a query; otherwise it is known
+  by its fingerprint.
+
+- `pg-debug logs FILE...` and `pg_debug.analyze_logs()`: read PostgreSQL
+  server logs with no connection, as stderr (with `--prefix` the server's
+  `log_line_prefix`, or detected), csvlog or jsonlog, plain or gzipped, and
+  report deadlocks with the processes, queries and relations in them, lock
+  waits and how each ended, temporary files per statement, vacuums skipped
+  for a lock, autovacuum and autoanalyze runs per table, and too-frequent
+  checkpoints. These leave only counters in the statistics views, or
+  nothing; the log has who, when and which statement. Each finding names the
+  `file:line` it came from, and a kind of event that is absent is reported
+  with the setting it depends on (`log_lock_waits`, `log_temp_files`,
+  `log_autovacuum_min_duration`), since a quiet log is not a healthy server.
 
 ### Changed
 
@@ -506,6 +556,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `blocking_total`, how many backends wait on it directly or behind others,
   counted from one read of the lock graph across the whole server, and the
   table shows it as `blocking`.
+- Baseline files are version 2: each entry can carry a `fingerprint` of the
+  definition of the index, constraint or columns the finding names. A
+  baseline accepted a finding by the object's name alone, so a duplicate
+  index whose covering index was rebuilt over other columns, or a column
+  whose type changed, stayed "known" though what was accepted no longer
+  existed. Such a finding is now `changed`, marked so in JSON and listed after
+  the text, and fails the gate as a new one would. Version 1 files still load,
+  and their findings are known or new as before.
 
 ### Fixed
 

@@ -142,7 +142,7 @@ def test_a_baseline_round_trips_through_a_file_in_a_stable_order(tmp_path):
     assert len(loaded) == 2
     assert {"check": "Index bloat", "schema": "s", "table": "t", "index": "alpha"} in loaded
     payload = json.loads(path.read_text())
-    assert payload["version"] == 1 and payload["command"] == "health"
+    assert payload["version"] == 2 and payload["command"] == "health"
     assert [f["index"] for f in payload["findings"]] == ["alpha", "zeta"], "sorted, so the file diffs cleanly"
     assert path.read_text().count("\n") == len(payload["findings"]) + 7, "one finding per line, plus the seven lines of framing"
 

@@ -174,7 +174,7 @@ def _also_noting(result: Any, note: str | None) -> Any:
 
 
 async def cmd_health(pg: PgDebug, args: argparse.Namespace) -> Any:
-    return await pg.analyze_db_health(args.health_type, min_window_days=args.min_window_days)
+    return await pg.analyze_db_health(args.health_type, min_window_days=args.min_window_days, static=args.static)
 
 
 async def cmd_config(pg: PgDebug, args: argparse.Namespace) -> Any:
@@ -215,6 +215,7 @@ async def cmd_model(pg: PgDebug, args: argparse.Namespace) -> Any:
         schema=args.schema,
         min_rows=args.min_rows,
         proven_only=args.proven_only,
+        static=args.static,
     )
 
 
@@ -256,3 +257,7 @@ async def cmd_tune_queries(pg: PgDebug, args: argparse.Namespace) -> Any:
         else:
             queries.append(query)
     return await pg.analyze_query_indexes(queries, max_index_size_mb=args.max_index_size_mb, method=args.method)
+
+
+async def cmd_plans(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.plan_shapes([read_sql_or_file(source) for source in args.queries])

@@ -22,6 +22,14 @@ database that already has findings. A run in which a check could not run saves
 no baseline and exits 1: run it again once the lock or permission that stopped
 the check is gone.
 
+For CI, `--static` runs only the checks that read the catalog alone, which a
+freshly migrated, empty database answers as production would; `--suppress
+RULE` or a `[suppress]` table in `pg-debug.toml` switches a whole kind of
+finding off for the gate, still reported; a baseline entry's `fingerprint`
+makes a finding whose index or constraint was redefined `changed`, not known;
+and `pg-debug plans` fails a build when a query's plan changes shape. Rule
+ids, what each reads, and the details are in [rules.md](rules.md).
+
 Checks: `index` (invalid, duplicate, bloated, unused), `table` (heap bloat),
 `connection` (client backends against `max_connections` less its
 reservations, flagged at 80%, and each session idle in a transaction for a

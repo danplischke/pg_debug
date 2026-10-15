@@ -18,6 +18,7 @@ from enum import Enum
 from typing import Any
 
 from ..errors import InvalidArgumentError
+from ..rules import DOCS_URL
 from ..severity import SEVERITY_ORDER
 from ..severity import Confidence
 from ..severity import Severity
@@ -124,6 +125,7 @@ class ModelFinding:
         """Return the finding as a JSON-friendly dict."""
         result: dict[str, Any] = {
             "rule": self.rule.value,
+            "docs": f"{DOCS_URL}#{self.rule.value}",
             "confidence": self.confidence.value,
             "severity": self.severity.value,
             "schema": self.schema,
