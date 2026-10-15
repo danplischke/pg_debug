@@ -111,6 +111,8 @@ and answering the question.
 | Are the server's settings right? | `pg-debug config` | [health.md](references/health.md) |
 | Is the schema built well? | `pg-debug model` | [schema.md](references/schema.md) |
 | Is this migration safe to run? | `pg-debug check-migration <file>` | [schema.md](references/schema.md) |
+| Put a check in CI: gate a build, suppress a rule, `--static` on an empty database, fail when a plan changes | `pg-debug model --static --exit-code`, `health --exit-code --baseline b.json`, `plans --queries q.sql --baseline p.json --exit-code` | [rules.md](references/rules.md) |
+| What happened, from the server log? (deadlocks, lock waits, temp files, skipped or slow autovacuum, checkpoints) | `pg-debug logs postgresql.log` — no connection | [rules.md](references/rules.md) |
 | Should this table be partitioned? | `pg-debug partitions` | [schema.md](references/schema.md) |
 | Partition maintenance: pruning, attach and detach, pg_partman | `pg-debug explain "<query>"` against the partitioned table | [schema.md](references/schema.md) |
 | What tables, columns and indexes exist? | `pg-debug schemas`, `objects`, `describe` | below |
@@ -147,8 +149,9 @@ pg-debug --json explain - < slow.sql | jq '.Plan."Total Cost"'
 ```
 
 Exit status: `0` success, `1` error, `2` usage error, `3` when an
-`--exit-code` gate (`health`, `config`, `model`, `check-migration`) found what
-it gates on. `health` also exits `1` when a check could not run, unless its
+`--exit-code` gate (`health`, `config`, `model`, `check-migration`, `plans`) found what
+it gates on. In JSON every finding of `health`, `model`, `config` and `logs`
+carries a `rule` id and a `docs` link; [rules.md](references/rules.md) lists them. `health` also exits `1` when a check could not run, unless its
 gate found a problem among the checks that did.
 
 ## Answering well

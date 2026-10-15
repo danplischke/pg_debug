@@ -339,6 +339,7 @@ async def test_review_data_model_passes_its_options_through(pg):
             schema="reporting",
             min_rows=50,
             proven_only=True,
+            static=False,
         )
 
 
@@ -363,7 +364,7 @@ async def test_analyze_db_health_returns_one_entry_per_check(pg):
     ):
         tool_cls.return_value.run_checks = AsyncMock(return_value={"Connection health": "ok"})
         assert await pg.analyze_db_health("connection") == {"Connection health": "ok"}
-        tool_cls.return_value.run_checks.assert_awaited_once_with("connection")
+        tool_cls.return_value.run_checks.assert_awaited_once_with("connection", static=False)
 
 
 @pytest.mark.asyncio

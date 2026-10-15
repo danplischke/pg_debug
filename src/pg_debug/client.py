@@ -25,6 +25,7 @@ from .db.statements import locate_pg_stat_statements
 from .db.window import checkpoint_window
 from .db.window import statement_window
 from .db.window import table_window
+from .definitions import definition_fingerprints
 from .errors import ConnectionFailedError
 from .errors import ExtensionRequiredError
 from .errors import InvalidArgumentError
@@ -54,6 +55,8 @@ from .plans import ExplainPlanTool
 from .plans import PlanDiagnoser
 from .plans import PlanFinding
 from .plans import PlanInput
+from .plans.shape import PlanShape
+from .plans.shape import read_plan_shapes
 from .plans.tree import ExplainPlanArtifact
 from .platform import PlatformDetection
 from .platform import detect_from_url
@@ -541,6 +544,7 @@ class PgDebug:
         schema: str | None = None,
         min_rows: int = DEFAULT_MIN_ROWS,
         proven_only: bool = False,
+        static: bool = False,
     ) -> list[ModelFinding]:
         """Review the data model for defects, and say how to fix each one.
 
@@ -561,6 +565,9 @@ class PgDebug:
                 smaller than this.
             proven_only: Keep only what the catalog proves, dropping the
                 findings inferred from statistics.
+            static: Run only the rules that read nothing but the catalog, so
+                that a freshly migrated, empty database in CI answers them as
+                production would. See :mod:`pg_debug.rules`.
 
         Returns:
             :class:`~pg_debug.model.ModelFinding` objects, most severe first,
@@ -569,10 +576,11 @@ class PgDebug:
             from a sample and carries a ``verify`` query to settle it first.
 
         Raises:
-            InvalidArgumentError: If an unknown rule is requested.
+            InvalidArgumentError: If an unknown rule is requested, or
+                ``static`` leaves none of them to run.
         """
         reviewer = ModelReviewer(await self.sql_driver())
-        return await reviewer.review(rules=rules, schema=schema, min_rows=min_rows, proven_only=proven_only)
+        return await reviewer.review(rules=rules, schema=schema, min_rows=min_rows, proven_only=proven_only, static=static)
 
     async def check_migration(self, sql: str) -> list[StatementReview]:
         """Review a migration before running it.
@@ -612,6 +620,50 @@ class PgDebug:
         """
         reviewer = ConfigurationReviewer(await self.sql_driver(), platform=await self._detect_platform())
         return await reviewer.review()
+
+    # -- Gating a build ------------------------------------------------------
+
+    async def definition_fingerprints(self, command: str, keys: list[dict[str, Any]]) -> list[str | None]:
+        """Fingerprint the definitions of the objects findings are about.
+
+        A baseline records them, so that a finding whose index, constraint or
+        columns are defined differently than when it was accepted is reported
+        as changed rather than known. One statement reads them all.
+
+        Args:
+            command: ``health``, ``model`` or ``config``.
+            keys: The findings' keys, as :func:`pg_debug.baseline.keys_of`
+                makes them.
+
+        Returns:
+            One fingerprint per key, None for a finding that is not about a
+            definition (a measurement, a setting) or whose object is gone.
+        """
+        return await definition_fingerprints(await self.sql_driver(), command, keys)
+
+    async def plan_shapes(self, queries: list[str]) -> list[PlanShape]:
+        """Plan each query without running it, and say what shape its plan has.
+
+        The shape is the plan's node types, join and aggregate strategies,
+        and the relations and indexes it reads, without costs or row counts,
+        so that it changes only when the plan does. ``pg-debug plans
+        --baseline`` fails a build when it changes. Runs with the query
+        context, as :meth:`explain_query` does.
+
+        Args:
+            queries: SQL text, each holding one or more statements. A
+                statement under a ``-- name: ...`` line is known by that name;
+                otherwise by its fingerprint, which ignores constants.
+
+        Returns:
+            One :class:`~pg_debug.plans.shape.PlanShape` per statement, in
+            order. One that could not be planned has ``error`` set.
+
+        Raises:
+            InvalidArgumentError: If the text does not parse, or two
+                statements would be known by the same name.
+        """
+        return await read_plan_shapes(ExplainPlanTool(sql_driver=await self.sql_driver()), queries)
 
     # -- Partitioning --------------------------------------------------------
 
@@ -709,6 +761,7 @@ class PgDebug:
         self,
         health_type: str | HealthType | Iterable[str | HealthType] = HealthType.ALL,
         min_window_days: float = MIN_WINDOW_DAYS,
+        static: bool = False,
     ) -> dict[str, HealthCheckResult]:
         """Run database health checks.
 
@@ -727,6 +780,10 @@ class PgDebug:
                 unused (default 7). A crash, a failover, a restore or
                 ``pg_stat_reset()`` starts them again; with less than this,
                 the unused-index check says why it did not judge.
+            static: Run only the checks that read nothing but the catalog
+                (invalid and duplicate indexes, invalid constraints), so that
+                a freshly migrated, empty database in CI answers them as
+                production would. See :mod:`pg_debug.rules`.
 
         Returns:
             A mapping of check name to its :class:`HealthCheckResult`, each
@@ -735,10 +792,11 @@ class PgDebug:
             that could not run, the ``error`` that stopped it.
 
         Raises:
-            InvalidArgumentError: If an unknown health type is requested.
+            InvalidArgumentError: If an unknown health type is requested, or
+                ``static`` leaves none of them to run.
         """
         health_tool = DatabaseHealthTool(await self.sql_driver(), min_window_days=min_window_days)
-        return await health_tool.run_checks(health_type)
+        return await health_tool.run_checks(health_type, static=static)
 
     async def get_top_queries(
         self,

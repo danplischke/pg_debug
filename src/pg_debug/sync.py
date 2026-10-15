@@ -39,6 +39,7 @@ from .partition import PartitionCandidate
 from .plans import DEFAULT_MIN_RATIO
 from .plans import PlanFinding
 from .plans import PlanInput
+from .plans.shape import PlanShape
 from .plans.tree import ExplainPlanArtifact
 from .schema import ObjectType
 from .top_queries import QuerySample
@@ -221,6 +222,7 @@ class SyncPgDebug:
         schema: str | None = None,
         min_rows: int = DEFAULT_MIN_ROWS,
         proven_only: bool = False,
+        static: bool = False,
     ) -> list[ModelFinding]:
         """Review the data model for defects, and say how to fix each one."""
         return self._call(
@@ -229,6 +231,7 @@ class SyncPgDebug:
             schema=schema,
             min_rows=min_rows,
             proven_only=proven_only,
+            static=static,
         )
 
     def check_migration(self, sql: str) -> list[StatementReview]:
@@ -238,6 +241,16 @@ class SyncPgDebug:
     def review_configuration(self) -> list[ConfigFinding]:
         """Review the server's settings against what it is actually doing."""
         return self._call(self._client.review_configuration)
+
+    # -- Gating a build ------------------------------------------------------
+
+    def definition_fingerprints(self, command: str, keys: list[dict[str, Any]]) -> list[str | None]:
+        """Fingerprint the definitions of the objects findings are about."""
+        return self._call(self._client.definition_fingerprints, command, keys)
+
+    def plan_shapes(self, queries: list[str]) -> list[PlanShape]:
+        """Plan each query without running it, and say what shape its plan has."""
+        return self._call(self._client.plan_shapes, queries)
 
     # -- Partitioning --------------------------------------------------------
 
@@ -287,9 +300,10 @@ class SyncPgDebug:
         self,
         health_type: str | HealthType | Iterable[str | HealthType] = HealthType.ALL,
         min_window_days: float = MIN_WINDOW_DAYS,
+        static: bool = False,
     ) -> dict[str, HealthCheckResult]:
         """Run database health checks."""
-        return self._call(self._client.analyze_db_health, health_type, min_window_days)
+        return self._call(self._client.analyze_db_health, health_type, min_window_days, static=static)
 
     def get_top_queries(
         self,

@@ -30,6 +30,7 @@ from .db.window import checkpoint_window
 from .db.window import table_window
 from .platform import Platform
 from .platform import PlatformDetection
+from .rules import DOCS_URL
 from .severity import SEVERITY_ORDER
 from .severity import Severity
 
@@ -84,6 +85,10 @@ class ConfigFinding:
         summary: One sentence.
         detail: The argument, in terms of this server's own numbers.
         evidence: The measurements behind it.
+        rule: The id of the rule that found it, as :mod:`pg_debug.rules`
+            lists it: ``work_mem_spills``, ``fsync_off``. More than one rule
+            can be about the same setting, so this, not ``setting``, says
+            which kind of finding it is.
     """
 
     setting: str
@@ -93,10 +98,14 @@ class ConfigFinding:
     detail: str
     recommended: str | None = None
     evidence: dict[str, Any] = field(default_factory=dict)
+    rule: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the finding as a JSON-friendly dict."""
-        result: dict[str, Any] = {
+        result: dict[str, Any] = {}
+        if self.rule is not None:
+            result |= {"rule": self.rule, "docs": f"{DOCS_URL}#{self.rule}"}
+        result |= {
             "setting": self.setting,
             "current": self.current,
             "severity": self.severity.value,
@@ -292,6 +301,7 @@ def _durability(
             label = recognised.platform.label
             findings.append(
                 ConfigFinding(
+                    rule=f"{name}_off",
                     setting=name,
                     current="off",
                     severity=Severity.LOW,
@@ -319,6 +329,7 @@ def _durability(
             )
         findings.append(
             ConfigFinding(
+                rule=f"{name}_off",
                 setting=name,
                 current="off",
                 recommended="on",
@@ -336,6 +347,7 @@ def _autovacuum_off(settings: dict[str, dict[str, Any]], _measurements: dict[str
     if not _off(setting):
         return None
     return ConfigFinding(
+        rule="autovacuum_off",
         setting="autovacuum",
         current="off",
         recommended="on",
@@ -361,6 +373,7 @@ def _work_mem(settings: dict[str, dict[str, Any]], measurements: dict[str, Any])
     current = _as_bytes(setting)
     average = temp_bytes // temp_files
     return ConfigFinding(
+        rule="work_mem_spills",
         setting="work_mem",
         current=_humanize(current),
         recommended=_humanize(max((current or 0) * 2, average)),
@@ -392,6 +405,7 @@ def _checkpoints(settings: dict[str, dict[str, Any]], measurements: dict[str, An
     current = _as_bytes(setting)
     share = requested / (timed + requested)
     return ConfigFinding(
+        rule="requested_checkpoints",
         setting="max_wal_size",
         current=_humanize(current),
         recommended=_humanize((current or 0) * 2),
@@ -424,6 +438,7 @@ def _shared_buffers(settings: dict[str, dict[str, Any]], measurements: dict[str,
     current = _as_bytes(setting)
     database_bytes = int(measurements.get("database_bytes") or 0)
     return ConfigFinding(
+        rule="shared_buffers_cache_misses",
         setting="shared_buffers",
         current=_humanize(current),
         recommended=None,
@@ -454,6 +469,7 @@ def _effective_cache_size(settings: dict[str, dict[str, Any]], measurements: dic
         return None
 
     return ConfigFinding(
+        rule="effective_cache_size_default",
         setting="effective_cache_size",
         current=_humanize(current),
         recommended=None,
@@ -483,6 +499,7 @@ def _random_page_cost(settings: dict[str, dict[str, Any]], measurements: dict[st
         return None
 
     return ConfigFinding(
+        rule="random_page_cost_default",
         setting="random_page_cost",
         current="4.0",
         recommended=None,
@@ -505,6 +522,7 @@ def _slow_query_log(settings: dict[str, dict[str, Any]], _measurements: dict[str
     if not setting or str(setting.get("setting")) != "-1":
         return None
     return ConfigFinding(
+        rule="slow_query_log_off",
         setting="log_min_duration_statement",
         current="-1 (nothing logged)",
         recommended="1000",
@@ -525,6 +543,7 @@ def _idle_transaction_timeout(settings: dict[str, dict[str, Any]], _measurements
     if not setting or str(setting.get("setting")) != "0":
         return None
     return ConfigFinding(
+        rule="idle_transaction_timeout_off",
         setting="idle_in_transaction_session_timeout",
         current="0 (no limit)",
         recommended="60000",

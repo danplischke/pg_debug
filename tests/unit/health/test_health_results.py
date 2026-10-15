@@ -17,6 +17,7 @@ from pg_debug.health.checks.buffer import BufferHealthCalc
 from pg_debug.health.checks.constraint import ConstraintHealthCalc
 from pg_debug.health.checks.index import IndexHealthCalc
 from pg_debug.health.checks.vacuum import VacuumHealthCalc
+from pg_debug.rules import DOCS_URL
 
 
 def make_driver(*result_sets):
@@ -38,8 +39,9 @@ def test_result_to_dict_round_trips():
         "name": "Index bloat",
         "healthy": False,
         "summary": "Bloated indexes found:",
-        "findings": [{"index": "orders_pkey"}],
+        "findings": [{"rule": "index_bloat", "docs": f"{DOCS_URL}#index_bloat", "index": "orders_pkey"}],
         "metrics": {"min_bloat_bytes": 100},
+        "rules": [{"id": "index_bloat", "docs": f"{DOCS_URL}#index_bloat"}],
     }
 
 
@@ -62,6 +64,7 @@ def test_a_check_that_could_not_run_says_so_and_is_not_healthy():
         "findings": [],
         "metrics": {},
         "error": "canceling statement due to statement timeout",
+        "rules": [{"id": "index_bloat", "docs": f"{DOCS_URL}#index_bloat"}],
     }
 
 

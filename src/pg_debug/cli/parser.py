@@ -17,6 +17,7 @@ from ..health import HealthType
 from ..health.checks.index import MIN_WINDOW_DAYS
 from ..index.base import MAX_NUM_INDEX_TUNING_QUERIES
 from ..index.llm_settings import DEFAULT_LLM_MODEL
+from ..logs import FORMATS as LOG_FORMATS
 from ..model import DEFAULT_MIN_ROWS
 from ..model import RuleId
 from ..partition import DEFAULT_MIN_PRUNING_SHARE
@@ -37,6 +38,7 @@ from .commands import cmd_locks
 from .commands import cmd_model
 from .commands import cmd_objects
 from .commands import cmd_partitions
+from .commands import cmd_plans
 from .commands import cmd_schemas
 from .commands import cmd_top_queries
 from .commands import cmd_tune_queries
@@ -46,6 +48,7 @@ from .render import as_is
 from .render import health_checks_json
 from .render import marked_against
 from .render import plan_document
+from .render import plan_shapes_json
 from .render import render_activity
 from .render import render_column_stats
 from .render import render_configuration_review
@@ -53,12 +56,14 @@ from .render import render_health_checks
 from .render import render_index_recommendations
 from .render import render_index_use
 from .render import render_lock_tree
+from .render import render_log_report
 from .render import render_migration_review
 from .render import render_model_findings
 from .render import render_object_details
 from .render import render_partition_candidates
 from .render import render_plan
 from .render import render_plan_findings
+from .render import render_plan_shapes
 from .render import render_rows
 from .render import render_vacuum_progress
 
@@ -254,6 +259,30 @@ def add_baseline_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_suppress_arguments(parser: argparse.ArgumentParser) -> None:
+    """``--suppress``, ``--config`` and ``--no-config``, for the commands that gate a build on rules."""
+    parser.add_argument(
+        "--suppress",
+        metavar="RULE",
+        action="append",
+        help=f"Report this rule's findings as suppressed, so they never fail --exit-code. Repeatable. The [suppress] table of "
+        f"{CONFIG_FILE_NAME} does the same with a reason for each; the rules are listed in the rules reference.",
+    )
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--config", metavar="FILE", help=f"Read [suppress] from FILE instead of {CONFIG_FILE_NAME}.")
+    source.add_argument("--no-config", action="store_true", help=f"Do not read {CONFIG_FILE_NAME}.")
+
+
+def add_static_argument(parser: argparse.ArgumentParser, what: str) -> None:
+    """``--static``: only what reads the catalog alone, for a CI database."""
+    parser.add_argument(
+        "--static",
+        action="store_true",
+        help=f"Run only the {what} that read nothing but the catalog, which a freshly migrated, empty database in CI "
+        "answers as production would. The others need the tables' contents or the workload's counters.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser."""
     parser = argparse.ArgumentParser(
@@ -398,7 +427,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any high-severity finding is reported, for use in CI.",
     )
+    add_static_argument(model, "rules")
     add_baseline_arguments(model)
+    add_suppress_arguments(model)
     model.set_defaults(func=cmd_model, render=render_model_findings, json_payload=marked_against(model_finding_key))
 
     config = subparsers.add_parser("config", help="Review the server's settings against what it is actually doing")
@@ -408,6 +439,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any high-severity finding is reported, for use in CI.",
     )
     add_baseline_arguments(config)
+    add_suppress_arguments(config)
     config.set_defaults(func=cmd_config, render=render_configuration_review, json_payload=marked_against(config_finding_key))
 
     partitions = subparsers.add_parser("partitions", help="Say whether a table is worth partitioning, from what the workload does")
@@ -493,8 +525,45 @@ def build_parser() -> argparse.ArgumentParser:
             f"(default: {MIN_WINDOW_DAYS:g}). A crash, a failover, a restore or pg_stat_reset() starts them again."
         ),
     )
+    add_static_argument(health, "checks")
     add_baseline_arguments(health)
+    add_suppress_arguments(health)
     health.set_defaults(func=cmd_health, render=render_health_checks, json_payload=health_checks_json)
+
+    plans = subparsers.add_parser("plans", help="Record each query's plan shape, and fail a build when one changes")
+    plans.add_argument(
+        "-q",
+        "--queries",
+        metavar="FILE",
+        action="append",
+        required=True,
+        help="Queries to plan, separated by semicolons: a file, inline SQL, or - for stdin. Repeatable. A '-- name: ...' "
+        "line above a query names it; otherwise it is known by its fingerprint, which ignores constants.",
+    )
+    plans.add_argument(
+        "--exit-code",
+        action="store_true",
+        help=f"Exit with status {UNHEALTHY_EXIT_CODE} when a plan's shape differs from the one --baseline holds, for use in CI.",
+    )
+    add_baseline_arguments(plans)
+    add_context_arguments(plans)
+    plans.set_defaults(func=cmd_plans, render=render_plan_shapes, json_payload=plan_shapes_json)
+
+    logs = subparsers.add_parser("logs", help="Read server logs for deadlocks, lock waits, temp files, vacuums and checkpoints")
+    logs.add_argument("files", nargs="+", metavar="FILE", help="Log files: stderr, csvlog or jsonlog, plain or .gz; - for stdin.")
+    logs.add_argument(
+        "--prefix",
+        metavar="PREFIX",
+        help="The server's log_line_prefix, for a stderr log, e.g. '%%m [%%p] %%q%%u@%%d '. Without it the timestamp, "
+        "[pid] and user@db are found where the common prefixes put them.",
+    )
+    logs.add_argument(
+        "--format",
+        dest="log_format",
+        choices=list(LOG_FORMATS),
+        help="The log's format, as log_destination names it (default: detected from each file).",
+    )
+    logs.set_defaults(render=render_log_report)
 
     top_queries = subparsers.add_parser("top-queries", help="Report the most expensive queries (needs pg_stat_statements)")
     top_queries.add_argument(

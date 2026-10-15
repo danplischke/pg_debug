@@ -9,6 +9,8 @@ from collections.abc import Iterable
 
 from ..db import SafeSqlDriver
 from ..db import SqlDriver
+from ..errors import InvalidArgumentError
+from ..rules import rule as registered
 from ..severity import Confidence
 from . import columns
 from . import keys
@@ -48,6 +50,7 @@ class ModelReviewer:
         schema: str | None = None,
         min_rows: int = DEFAULT_MIN_ROWS,
         proven_only: bool = False,
+        static: bool = False,
     ) -> list[ModelFinding]:
         """Review the data model.
 
@@ -61,15 +64,30 @@ class ModelReviewer:
                 proves nothing.
             proven_only: Drop the findings inferred from statistics, keeping
                 only what the catalog proves.
+            static: Run only the rules that read nothing but the catalog,
+                which find on a freshly migrated, empty database what they
+                would find on production. The rules that read the tables'
+                sizes or sampled statistics find nothing there. A static
+                rule's severity can still weigh the table's size, which an
+                empty table makes low.
 
         Returns:
             The findings, most severe first and, within a severity, ordered by
             each rule's own measure of impact.
 
         Raises:
-            InvalidArgumentError: If an unknown rule is requested.
+            InvalidArgumentError: If an unknown rule is requested, or
+                ``static`` leaves none of the selected rules to run.
         """
         selected = RuleId.parse(rules)
+        if static:
+            runtime = sorted(r.value for r in selected if not registered(r.value).static)
+            selected = {r for r in selected if registered(r.value).static}
+            if not selected:
+                raise InvalidArgumentError(
+                    f"None of the selected rules reads only the catalog ({', '.join(runtime)} read the tables' sizes or sampled "
+                    "statistics), so --static leaves nothing to run."
+                )
         options = ReviewOptions(schema=schema, min_rows=min_rows)
         findings: list[ModelFinding] = []
 

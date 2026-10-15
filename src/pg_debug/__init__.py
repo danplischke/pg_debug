@@ -53,6 +53,8 @@ from .index_use import IndexUse
 from .index_use import IndexUseAnalyzer
 from .index_use import IndexUseFinding
 from .index_use import IndexUseReason
+from .logs import LogReport
+from .logs import analyze_logs
 from .migration import LockLevel
 from .migration import MigrationLinter
 from .migration import StatementReview
@@ -68,6 +70,7 @@ from .plans import PlanFinding
 from .plans import PlanIssue
 from .plans import diagnose_plan
 from .plans.hypothetical import IndexDefinition
+from .plans.shape import PlanShape
 from .plans.tree import ExplainPlanArtifact
 from .plans.tree import PlanNode
 from .schema import ObjectType
@@ -121,6 +124,7 @@ __all__ = [
     "InvalidArgumentError",
     "LLMOptimizerTool",
     "LockLevel",
+    "LogReport",
     "MigrationLinter",
     "MissingDependencyError",
     "ModelFinding",
@@ -135,6 +139,7 @@ __all__ = [
     "PlanFinding",
     "PlanIssue",
     "PlanNode",
+    "PlanShape",
     "QueryContext",
     "QueryError",
     "RuleId",
@@ -148,6 +153,7 @@ __all__ = [
     "SyncPgDebug",
     "TopQueriesCalc",
     "__version__",
+    "analyze_logs",
     "diagnose_plan",
     "resolve_database_url",
 ]

@@ -138,16 +138,18 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `vacuum-progress` | — |
 | `index-use SQL` | a file path, inline SQL, or `-` for stdin; `-i, --index NAME` to report one index |
 | `column-stats TABLE` | — |
-| `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--min-window-days DAYS` (default 7: how long the index counters must have counted before an index is called unused), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
-| `config` | `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
+| `health` | `-t, --type CHECKS` (comma-separated, default `all`), `--min-window-days DAYS` (default 7: how long the index counters must have counted before an index is called unused), `--static`, `--exit-code`, `--baseline FILE`, `--save-baseline FILE`, `--suppress RULE` (repeatable), `--config FILE`, `--no-config` |
+| `config` | `--exit-code`, `--baseline FILE`, `--save-baseline FILE`, `--suppress RULE`, `--config FILE`, `--no-config` |
 | `partitions` | `--min-size SIZE` (default 1GB, accepts `500MB`/`2GB`), `--min-pruning-share SHARE` (default 0.5), `--limit N` (default 200) |
 | `check-migration SQL` | a file path, inline SQL, or `-` for stdin; `--offline`, `--exit-code` |
-| `model` | `-s, --schema SCHEMA`, `-r, --rule RULES` (comma-separated, default `all`), `--proven-only`, `--min-rows N` (default 1000), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
+| `model` | `-s, --schema SCHEMA`, `-r, --rule RULES` (comma-separated, default `all`), `--proven-only`, `--min-rows N` (default 1000), `--static`, `--exit-code`, `--baseline FILE`, `--save-baseline FILE`, `--suppress RULE`, `--config FILE`, `--no-config` |
+| `plans` | `-q, --queries FILE` (repeatable; a file, inline SQL or `-`), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
+| `logs FILE...` | server logs, stderr, csvlog or jsonlog, plain or `.gz`, `-` for stdin; `--prefix PREFIX` (the server's `log_line_prefix`), `--format {stderr,csvlog,jsonlog}`. Needs no connection |
 | `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10, ignored for cumulative `resources`), `-i, --interval SECONDS` |
 | `tune-workload` | `--max-index-size-mb MB` (default 10000), `--method {dta,llm}` (default `dta`) |
 | `tune-queries QUERY...` | up to 10 queries, same options as `tune-workload` |
 
-`execute`, `explain`, `diagnose`, `index-use`, `tune-workload` and
+`execute`, `explain`, `diagnose`, `index-use`, `plans`, `tune-workload` and
 `tune-queries` also take the [query context](#running-a-query-as-your-application-does)
 options: `--role ROLE`, `--set NAME=VALUE` (repeatable), `--config FILE` and
 `--no-config`.
@@ -177,6 +179,51 @@ one could not run, and names it, since a baseline without it would fail as new
 on whatever it finds once it runs; against a baseline, the report says how many
 checks were not compared. A session left idle in a transaction is recorded by
 its role, database and application name, never its pid.
+
+Every kind of finding of `health`, `model`, `config` and `logs` has a stable
+rule id (`unindexed_foreign_key`, `duplicate_index`, `work_mem_spills`,
+`deadlock`...), and in JSON each finding carries its `rule` and a `docs` link
+to its entry in the [rules reference](plugins/pg-debug/skills/pg-debug/references/rules.md),
+which also says what each rule reads: the catalog, the tables' data, the
+workload's counters, the settings, or a log.
+
+- **Suppressing a rule.** `--suppress RULE`, or a `[suppress]` table in
+  `pg-debug.toml` with the reason (`naive_timestamp = "UTC by convention"`),
+  switches a whole kind of finding off for the gate. Its findings are still
+  reported, marked `"suppressed": "<reason>"` in JSON and counted after the
+  text report, and never fail `--exit-code`. An unknown id is an error.
+- **`--static`** on `health` and `model` runs only the rules that read the
+  catalog alone, which a freshly migrated, empty CI database answers as
+  production would. The others would pass an empty database for want of
+  anything to see, so they do not run. `config` has no static rules.
+- **Changed definitions.** Baseline files are now version 2: an entry also
+  records a `fingerprint` of the definition of the index, constraint or
+  columns the finding names (`pg_get_indexdef`, `pg_get_constraintdef`, each
+  column's type, nullability, collation and default). A finding whose object
+  is defined otherwise than when it was accepted is `"changed"`, not
+  `"known"`, and fails the gate like a new one. Findings about a table's state,
+  sessions and settings carry no fingerprint. Version 1 files still load.
+- **Plan shapes.** `pg-debug plans --queries critical.sql --save-baseline
+  plans.json` plans each query with `EXPLAIN` (nothing runs) and records the
+  node types, strategies, relations and indexes of its plan, without costs.
+  With `--baseline plans.json --exit-code` a query whose shape changed exits 3
+  and the text shows the two shapes as a diff. A `-- name: ...` line names a
+  query; otherwise it is known by its fingerprint, which ignores constants.
+
+```bash
+pg-debug model --static --exit-code                      # CI, on the migrated test database
+pg-debug plans -q critical.sql --baseline plans.json --exit-code
+pg-debug logs /var/log/postgresql/postgresql-16-main.log  # deadlocks, lock waits, spills, vacuums, checkpoints
+```
+
+`logs` reads server logs with no connection and reports deadlocks (with the
+processes, their queries and the relations from the DETAIL and CONTEXT),
+lock waits past `deadlock_timeout` (`log_lock_waits`) and how each ended,
+temporary files per statement (`log_temp_files`), vacuums and analyzes
+skipped for want of a lock, autovacuum and autoanalyze runs per table
+(`log_autovacuum_min_duration`), and "checkpoints are occurring too
+frequently". Every finding names the `file:line` it came from, and when a
+kind of event is absent the report says which setting it depends on.
 
 `scan` reports tables read sequentially far more than through an index, from
 `pg_stat_user_tables` — no extension needed. It argues in bytes rather than
@@ -578,11 +625,14 @@ context = QueryContext.from_file("pg-debug.toml")
 | `vacuum_progress()` | `list[dict]` — one per running vacuum |
 | `explain_index_use(sql, index=None)` | `list[IndexUse]` — one per index on the query's tables, unused first, each with `findings` |
 | `column_stats(table)` / `extended_statistics(table)` | `list[dict]` — planner statistics |
-| `analyze_db_health(health_type="all", min_window_days=7)` | `dict[str, HealthCheckResult]` — check name to result |
+| `analyze_db_health(health_type="all", min_window_days=7, static=False)` | `dict[str, HealthCheckResult]` — check name to result |
 | `counting_windows()` | `dict` — `tables`, `checkpoints` and `statements` (None without `pg_stat_statements`), each with `counting_since`, `counting_seconds` and `counting_began_with`; `statements` also has `statements_evicted` |
-| `review_data_model(rules="all", schema=None, min_rows=1000, proven_only=False)` | `list[ModelFinding]` — most severe first |
+| `review_data_model(rules="all", schema=None, min_rows=1000, proven_only=False, static=False)` | `list[ModelFinding]` — most severe first |
 | `check_migration(sql)` | `list[StatementReview]` — most severe first |
-| `review_configuration()` | `list[ConfigFinding]` — most severe first |
+| `review_configuration()` | `list[ConfigFinding]` — most severe first; each carries its `rule` |
+| `definition_fingerprints(command, keys)` | `list[str \| None]` — a fingerprint of the definition each finding's key names, for a baseline |
+| `pg_debug.analyze_logs(paths, prefix=None, log_format=None)` | `LogReport` — `deadlocks`, `lock_waits`, `temp_files`, `skipped_vacuums`, `autovacuum`, `checkpoint_warnings`, `checkpoints`, `notes`; a function, with no connection (`pg_debug.logs.analyze_log_lines` takes lines in hand) |
+| `plan_shapes(queries)` | `list[PlanShape]` — `name`, `shape` (one line per plan node), `fingerprint`, or `error` |
 | `suggest_partitions(sql=None, min_table_bytes=1GB, min_pruning_share=0.5, limit=200)` | `list[PartitionCandidate]` — recommended first, then by size |
 | `get_top_queries(sort_by="resources", limit=10, interval_seconds=None)` | `list[dict]` — one per query; a sample leaves out other roles' statements whose queryid is withheld |
 | `sample_top_queries(interval_seconds, sort_by="resources", limit=10)` | `QuerySample` — `queries`, and `withheld`, how many other roles' statements ran and could not be ranked |
@@ -828,7 +878,9 @@ is the same for coding agents.
 | `index_use/` | `index-use`: the query's predicates, the catalog it compares them with, and the verdict for each index. |
 | `model/`, `migration/`, `partition/` | `model`, `check-migration` and `partitions`. |
 | `activity.py`, `configuration.py`, `schema.py`, `statistics.py`, `top_queries.py` | Features that fit in one file. |
-| `baseline.py` | `--baseline` and `--save-baseline`: the identity each finding is known by, and the file that records them. |
+| `baseline.py` | `--baseline` and `--save-baseline`: the identity each finding is known by, and the file that records them; the gate's split into new, known, changed and suppressed. |
+| `rules.py`, `definitions.py` | The public rule ids and what each reads; fingerprints of the definitions findings name. |
+| `logs/` | `logs`: reading stderr, csvlog and jsonlog, and what they say happened. |
 
 A feature is one module until it needs a second file. `tests/unit/` mirrors
 `src/pg_debug/`, and since the test directories have no package files, every
