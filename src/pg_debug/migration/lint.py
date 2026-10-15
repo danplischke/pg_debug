@@ -26,6 +26,8 @@ from pglast import parse_sql
 from pglast.enums import AlterTableType
 from pglast.enums import ConstrType
 from pglast.enums import ObjectType
+from pglast.enums import TransactionStmtKind
+from pglast.enums import VariableSetKind
 from pglast.parser import ParseError
 from pglast.stream import RawStream
 
@@ -51,6 +53,46 @@ RECIPE_PARTITIONS = 5
 
 #: PostgreSQL truncates an identifier to this many bytes.
 MAX_IDENTIFIER_LENGTH = 63
+
+#: Locks that make a statement waiting for them a queue for everything after
+#: it: PostgreSQL grants locks in the order they were asked for, so while the
+#: statement waits, any later statement whose lock conflicts with the one it
+#: asked for waits behind it. Each of these conflicts with the ROW EXCLUSIVE
+#: lock every INSERT, UPDATE and DELETE takes, and ACCESS EXCLUSIVE with the
+#: ACCESS SHARE lock of every SELECT too.
+QUEUEING_LOCKS = frozenset({LockLevel.ACCESS_EXCLUSIVE, LockLevel.SHARE_ROW_EXCLUSIVE, LockLevel.SHARE})
+
+#: The timeouts a migration is reviewed with, which it can set itself.
+TIMEOUT_SETTINGS = ("lock_timeout", "statement_timeout")
+
+#: What the review suggests for lock_timeout. A judgment: long enough for a
+#: catalog update to get its lock on a busy table, short enough that the
+#: queue behind it is a hiccup rather than an outage.
+SUGGESTED_LOCK_TIMEOUT = "5s"
+
+#: The timeouts a migration would run with, read in the query context: the
+#: connecting role's session defaults (``reset_val``, which a setting made
+#: for one transaction does not change), the value in this transaction, which
+#: the query context's settings change, and what the role the context names
+#: has set for itself with ALTER ROLE ... SET, for this database before all
+#: databases. SET ROLE does not apply those; logging in as the role does.
+TIMEOUTS_SQL = """
+    SELECT
+        current_user AS role,
+        session_user AS login_role,
+        (SELECT s.setting FROM pg_settings s WHERE s.name = 'lock_timeout') AS lock_timeout,
+        (SELECT s.reset_val FROM pg_settings s WHERE s.name = 'lock_timeout') AS lock_timeout_default,
+        (SELECT s.reset_val FROM pg_settings s WHERE s.name = 'statement_timeout') AS statement_timeout_default,
+        ARRAY(
+            SELECT c.setting
+            FROM pg_db_role_setting d
+            JOIN pg_roles r ON r.oid = d.setrole
+            CROSS JOIN LATERAL unnest(d.setconfig) WITH ORDINALITY AS c(setting, position)
+            WHERE r.rolname = current_user
+              AND d.setdatabase IN (0, (SELECT b.oid FROM pg_database b WHERE b.datname = current_database()))
+            ORDER BY d.setdatabase DESC, c.position
+        ) AS role_settings
+"""
 
 #: Types that can be widened without touching the rows, because the on-disk
 #: representation does not change. varchar(n) -> varchar(m > n) and
@@ -111,6 +153,16 @@ class StatementReview:
     #: Functions the column default calls, when there is one and it is not a
     #: constant. Resolved against pg_proc to decide whether it really rewrites.
     default_functions: list[str] = field(default_factory=list)
+    #: The lock_timeout and statement_timeout the statement would run with,
+    #: each as ``{"value": ..., "milliseconds": ..., "source": ...}``, when
+    #: they could be read: from the migration's own SET, or from the server
+    #: with a connection.
+    timeouts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Why to set a lock_timeout before this statement, when it waits for a
+    #: lock that queues others on an existing table and none is set.
+    lock_timeout_advice: str | None = None
+    #: Timeouts the migration SET before this statement, as written.
+    set_in_migration: dict[str, str] = field(default_factory=dict)
 
     @property
     def blocks(self) -> str:
@@ -135,6 +187,10 @@ class StatementReview:
             result["table_bytes"] = self.table_bytes
         if self.safer:
             result["safer"] = self.safer
+        if self.timeouts:
+            result["timeouts"] = self.timeouts
+        if self.lock_timeout_advice:
+            result["lock_timeout_advice"] = self.lock_timeout_advice
         return result
 
 
@@ -183,13 +239,31 @@ class MigrationLinter:
         self._index_statements = {}
         self._partitions = {}
         self._known_tables = set()
-        reviews = [self._review_statement(raw, sql) for raw in parsed]
-        reviews = [review for review in reviews if review is not None]
+        reviews: list[StatementReview] = []
+        # The timeouts the migration has SET so far, as written.
+        set_so_far: dict[str, str] = {}
+        # The ones SET LOCAL, which end with the transaction.
+        local: set[str] = set()
+        for raw in parsed:
+            stmt = raw.stmt if isinstance(raw, ast.RawStmt) else raw
+            if isinstance(stmt, ast.VariableSetStmt):
+                _track_setting(stmt, set_so_far, local)
+                continue
+            if isinstance(stmt, ast.TransactionStmt) and stmt.kind in _TRANSACTION_ENDS:
+                for name in local:
+                    set_so_far.pop(name, None)
+                local.clear()
+                continue
+            review = self._review_statement(raw, sql)
+            if review is not None:
+                review.set_in_migration = dict(set_so_far)
+                reviews.append(review)
         await self._resolve_default_volatility(reviews)
         await self._add_table_sizes(reviews)
         reviews = [self._settle_index(review) for review in reviews]
         for review in reviews:
             self._weigh(review)
+        await self._review_timeouts(reviews)
 
         # Stable within a severity, so the migration's own order survives.
         return sorted(reviews, key=lambda review: SEVERITY_ORDER[review.severity])
@@ -299,6 +373,55 @@ class MigrationLinter:
         for review in reviews:
             if review.table in sizes:
                 review.table_bytes = sizes[review.table]
+
+    # -- Timeouts -----------------------------------------------------------
+
+    async def _review_timeouts(self, reviews: list[StatementReview]) -> None:
+        """Say what lock_timeout each statement that queues others would run with, and advise one where there is none.
+
+        A statement waiting for a lock that conflicts with ordinary reads or
+        writes is a queue for them: PostgreSQL grants locks in the order they
+        were asked for, so while it waits for a long transaction to end, every
+        later statement on the table that conflicts with the lock it asked for
+        waits behind it, however briefly it would then hold the lock. A
+        lock_timeout bounds that wait. The setting is read as the migration
+        would run with it, in the query context: the role the context names,
+        and the settings it declares.
+        """
+        queueing = [review for review in reviews if review.lock in QUEUEING_LOCKS and review.table in self._known_tables]
+        queueing_ids = {id(review) for review in queueing}
+        if not queueing and not any(review.set_in_migration for review in reviews):
+            return
+
+        server: dict[str, Any] | None = None
+        if self.sql_driver is not None and queueing:
+            try:
+                rows = await self.sql_driver.execute_query(TIMEOUTS_SQL, in_context=True)
+                server = rows[0].cells if rows else None
+            except Exception as e:
+                # The context's role may not be allowed to read the catalog;
+                # the review stands without it.
+                logger.debug("Could not read the migration's timeouts: %s", e)
+
+        for review in reviews:
+            for name in TIMEOUT_SETTINGS:
+                reading = _timeout_reading(name, review.set_in_migration, server)
+                if reading is not None:
+                    review.timeouts[name] = reading
+            if id(review) not in queueing_ids:
+                continue
+            lock_timeout = review.timeouts.get("lock_timeout")
+            if lock_timeout is None or lock_timeout["milliseconds"] != 0:
+                continue
+            blocked = "every read and write" if review.lock is LockLevel.ACCESS_EXCLUSIVE else "every write"
+            review.lock_timeout_advice = (
+                f"lock_timeout is 0 ({lock_timeout['source']}), so this statement waits for its {review.lock.value} lock on "
+                f"{review.table} for as long as a transaction holding a conflicting lock runs. While it waits, {blocked} on "
+                f"{review.table} that comes after it queues behind it, because PostgreSQL grants locks in the order they "
+                f"were asked for. Run SET lock_timeout = '{SUGGESTED_LOCK_TIMEOUT}' before it (SET LOCAL inside the "
+                "migration's transaction behind a transaction pooler) and retry with backoff when it times out, so that the "
+                "queue lasts seconds rather than as long as the longest transaction."
+            )
 
     def _settle_index(self, review: StatementReview) -> StatementReview:
         """Review an index build again, now that the catalog says whether its table is partitioned."""
@@ -873,6 +996,101 @@ def _review(
         table=table,
         safer=list(safer or []),
     )
+
+
+#: The statements that end a transaction, and with it what SET LOCAL set.
+_TRANSACTION_ENDS = frozenset(
+    {TransactionStmtKind.TRANS_STMT_COMMIT, TransactionStmtKind.TRANS_STMT_ROLLBACK, TransactionStmtKind.TRANS_STMT_PREPARE}
+)
+
+
+def _track_setting(stmt: ast.VariableSetStmt, set_so_far: dict[str, str], local: set[str]) -> None:
+    """Follow a migration's SET and RESET of the timeouts it is reviewed with.
+
+    A plain SET in a transaction that is rolled back is undone with it; that
+    is not followed, and the value is taken to stand.
+    """
+    if stmt.kind == VariableSetKind.VAR_RESET_ALL:
+        set_so_far.clear()
+        local.clear()
+        return
+    if stmt.name not in TIMEOUT_SETTINGS:
+        return
+    if stmt.kind == VariableSetKind.VAR_SET_VALUE and stmt.args:
+        constant = getattr(stmt.args[0], "val", None)
+        text = getattr(constant, "sval", None)
+        if text is None:
+            text = str(getattr(constant, "ival", getattr(constant, "fval", "")))
+        set_so_far[stmt.name] = text
+        if stmt.is_local:
+            local.add(stmt.name)
+        else:
+            local.discard(stmt.name)
+    elif stmt.kind in (VariableSetKind.VAR_SET_DEFAULT, VariableSetKind.VAR_RESET):
+        set_so_far.pop(stmt.name, None)
+        local.discard(stmt.name)
+
+
+#: Units a time setting can be written in, in milliseconds. A bare number is
+#: milliseconds for both timeouts.
+_TIME_UNITS = {"us": 0.001, "ms": 1, "s": 1000, "min": 60_000, "h": 3_600_000, "d": 86_400_000}
+
+
+def milliseconds(text: str | None) -> int | None:
+    """A timeout as PostgreSQL reads it, ``'5s'`` or ``5000``, in milliseconds; None if it cannot be read."""
+    if text is None:
+        return None
+    value = str(text).strip().strip("'\"").replace(" ", "")
+    number = value.rstrip("abcdefghijklmnopqrstuvwxyz")
+    unit = value[len(number) :] or "ms"
+    try:
+        return round(float(number) * _TIME_UNITS[unit])
+    except (ValueError, KeyError):
+        return None
+
+
+def _timeout_reading(name: str, set_in_migration: dict[str, str], server: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The value of a timeout a statement would run with, and where it comes from."""
+    if name in set_in_migration:
+        value = set_in_migration[name]
+        return {"value": value, "milliseconds": milliseconds(value), "source": "set by the migration before this statement"}
+    if server is None:
+        return None
+    role = server.get("role")
+    login_role = server.get("login_role")
+    default = server.get(f"{name}_default")
+    # statement_timeout in this transaction is pg-debug's own --timeout, not
+    # the migration's; lock_timeout differs from its default only when the
+    # query context sets it.
+    current = server.get("lock_timeout")
+    if name == "lock_timeout" and current is not None and current != default:
+        return {"value": _readable(current), "milliseconds": milliseconds(current), "source": "set by the query context"}
+    if role != login_role:
+        for setting in server.get("role_settings") or []:
+            setting_name, _, value = str(setting).partition("=")
+            if setting_name == name:
+                return {
+                    "value": value,
+                    "milliseconds": milliseconds(value),
+                    "source": f"ALTER ROLE {role} SET {name}, which applies when the migration logs in as {role}",
+                }
+        source = (
+            f"{role} sets none of its own, so this is what {login_role} gets on this database by default, from the server's "
+            "configuration or ALTER DATABASE"
+        )
+    else:
+        source = f"what {role} gets on this database by default, from the server's configuration, ALTER DATABASE or ALTER ROLE"
+    if default is None:
+        return None
+    return {"value": _readable(default), "milliseconds": milliseconds(default), "source": source}
+
+
+def _readable(setting: str) -> str:
+    """A timeout pg_settings gives in milliseconds, as it would be written: ``5s``, ``250ms``, ``0``."""
+    value = milliseconds(setting)
+    if value is None or value == 0:
+        return str(setting)
+    return f"{value // 1000}s" if value % 1000 == 0 else f"{value}ms"
 
 
 def _statement_text(raw: Any, sql: str) -> str:

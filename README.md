@@ -83,6 +83,7 @@ pg-debug diagnose --set work_mem=64MB ./slow.sql   # try the work_mem diagnose s
 pg-debug activity                       # what is running right now
 pg-debug activity --blocked              # only backends waiting on a lock
 pg-debug activity --min-duration 30      # queries running longer than 30s
+pg-debug activity --sample 10            # what active sessions waited on over 10s, no extension needed
 pg-debug locks                           # who is blocking whom, root blockers first
 pg-debug vacuum-progress
 
@@ -138,7 +139,7 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `execute SQL` | — |
 | `explain SQL` | `--analyze`, `-i, --hypothetical-index SPEC` (repeatable) |
 | `diagnose SQL` | a file path, inline SQL, or `-` for stdin; `--min-ratio N` (default 10); `--plan` to read `EXPLAIN (ANALYZE, FORMAT JSON)` output instead of running a query, `--offline` to not connect even with a URL set |
-| `activity` | `-a, --all` (include idle), `-m, --min-duration SECONDS`, `-b, --blocked` |
+| `activity` | `-a, --all` (include idle), `-m, --min-duration SECONDS`, `-b, --blocked`; `--sample SECONDS` to sample waits instead, `--sample-interval SECONDS` (default 0.5) |
 | `locks` | — |
 | `vacuum-progress` | — |
 | `index-use SQL` | a file path, inline SQL, or `-` for stdin; `-i, --index NAME` to report one index |
@@ -148,7 +149,7 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `partitions` | `--min-size SIZE` (default 1GB, accepts `500MB`/`2GB`), `--min-pruning-share SHARE` (default 0.5), `--limit N` (default 200) |
 | `shard-readiness` | `-i, --interval SECONDS` (default 10): how long to sample the WAL, buffer evictions and checkpoints |
 | `history` | `-n, --limit N` (default 10): rows to read from each source |
-| `check-migration SQL` | a file path, inline SQL, or `-` for stdin; `--offline`, `--exit-code` |
+| `check-migration SQL` | a file path, inline SQL, or `-` for stdin; `--offline`, `--exit-code`; `--role`, `--set`, `--config`, `--no-config` for the role and settings the migration runs with |
 | `model` | `-s, --schema SCHEMA`, `-r, --rule RULES` (comma-separated, default `all`), `--proven-only`, `--min-rows N` (default 1000), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
 | `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10), `-i, --interval SECONDS` |
 | `tune-workload` | `--max-index-size-mb MB` (default 10000), `--method {dta,llm}` (default `dta`) |
@@ -331,6 +332,31 @@ another. Nothing is executed; the query is planned, not run. Sequential scans
 are turned off for the forced plan's own transaction, which writes nothing, so
 `restricted` mode takes it too.
 
+`activity` and `locks` end their text with what the waits in that moment amount
+to, each read from one snapshot of `pg_stat_activity` and `pg_locks` with the
+pids, lock modes and relation it rests on: a **lock queue behind DDL** (a
+statement waiting for ACCESS EXCLUSIVE, or another lock that blocks writes,
+with statements queued behind it), an **idle-in-transaction blocker**, **row
+lock contention**, and **LWLock pressure** on `BufferMapping` or `LockManager`.
+The first two are proven from `pg_locks`; row contention is proven once
+`pg_locks` shows the row lock and a candidate before; LWLock pressure is a
+candidate, and the cause it usually has is said to be a judgment. `--json`
+keeps printing the rows; `classify_waits()` returns the diagnosis.
+
+`activity --sample SECONDS` samples `pg_stat_activity` instead, one statement
+every `--sample-interval` seconds, and reports average active sessions overall,
+per wait event and per query (by `query_id` from PostgreSQL 14, by text with
+its constants replaced before, or when the server computes none, and it says
+which). It says how many samples it took and the interval it achieved, measured
+on the server's clock. Each sample is exact; the profile is a sample, so every
+attribution is a candidate, and a wait shorter than the interval shows only in
+proportion to how often it happens. pg-debug's own backend and statements are
+left out. Where `pg_wait_sampling` is installed, its profile over the same
+window is read as well; where Azure's Query Store records waits
+(`query_store.pgms_wait_sampling_view`), its most recent interval, which is
+its own and not the sampled window. A role without `pg_read_all_stats` is told
+how many backends' state was withheld from it.
+
 `check-migration` answers a different question from the rest: not what the
 database is, but what a change will do to everyone using it while it runs. The
 lock level alone decides little — ACCESS EXCLUSIVE held for a catalog update
@@ -347,6 +373,16 @@ PostgreSQL 11, and `ADD FOREIGN KEY` takes SHARE ROW EXCLUSIVE, so readers are
 never blocked. An integration test re-measures three of these against the
 server it runs on, so a future PostgreSQL that changes one is caught rather
 than believed.
+
+Connected, it also reads the `lock_timeout` and `statement_timeout` each
+statement would run with: one the migration `SET`s before it, one the query
+context sets, the `ALTER ROLE ... SET` of the role the context names (which a
+migration logging in as that role gets), or the default. A statement that
+waits for ACCESS EXCLUSIVE, SHARE ROW EXCLUSIVE or SHARE on an existing table
+with no `lock_timeout` is advised to set a short one and retry: PostgreSQL
+grants locks in the order they were asked for, so while it waits for a long
+transaction, every later statement on the table that conflicts with its lock
+queues behind it.
 
 `--offline` skips the connection. Severity is otherwise softened when the table
 is small on the database you are pointed at, which is right for production and
@@ -612,6 +648,8 @@ context = QueryContext.from_file("pg-debug.toml")
 | `diagnose_plan(plan, min_ratio=10)` | `list[PlanFinding]` — the same, over `EXPLAIN (ANALYZE, FORMAT JSON)` output; works in restricted mode. `pg_debug.diagnose_plan(plan)` does it with no database at all |
 | `list_activity(include_idle=False, min_duration_seconds=None, blocked_only=False)` | `list[dict]` — one per backend, with `blocked_by` and `in_transaction`; to a role without `pg_read_all_stats`, another role's backend in a transaction is listed with `query` `<insufficient privilege>` |
 | `lock_tree()` | `list[dict]` — one per root blocker, waiters nested under `blocking`; each node says `in_transaction` |
+| `classify_waits()` | `WaitDiagnosis` — `classifications` (a lock queue behind DDL, an idle-in-transaction blocker, row lock contention, LWLock pressure; each with `confidence`, `evidence` and any `judgment`), what was `declined` and why, and the lock waits left `unclassified` |
+| `sample_waits(seconds, interval=0.5)` | `WaitProfile` — `timing` (samples taken, interval achieved), `active_sessions`, `waits` and `queries` by share, each a `candidate`; `extension` when pg_wait_sampling or Azure's Query Store is read too |
 | `vacuum_progress()` | `list[dict]` — one per running vacuum |
 | `explain_index_use(sql, index=None)` | `list[IndexUse]` — one per index on the query's tables, unused first, each with `findings` |
 | `column_stats(table)` / `extended_statistics(table)` | `list[dict]` — planner statistics |
@@ -866,6 +904,7 @@ is the same for coding agents.
 | `index/` | `tune-workload` and `tune-queries`: the search in `base.py`, the `dta` and `llm` methods, and the report. |
 | `index_use/` | `index-use`: the query's predicates, the catalog it compares them with, and the verdict for each index. |
 | `model/`, `migration/`, `partition/`, `sharding/` | `model`, `check-migration`, `partitions` and `shard-readiness`. |
+| `waits/` | `activity --sample`, and what the waits in `activity` and `locks` amount to. |
 | `activity.py`, `configuration.py`, `history.py`, `schema.py`, `statistics.py`, `top_queries.py` | Features that fit in one file. |
 | `baseline.py` | `--baseline` and `--save-baseline`: the identity each finding is known by, and the file that records them. |
 

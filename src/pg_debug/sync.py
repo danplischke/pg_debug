@@ -45,6 +45,9 @@ from .schema import ObjectType
 from .sharding import DEFAULT_INTERVAL_SECONDS
 from .sharding import ShardReadiness
 from .top_queries import QuerySample
+from .waits import DEFAULT_SAMPLE_INTERVAL
+from .waits import WaitDiagnosis
+from .waits import WaitProfile
 
 T = TypeVar("T")
 
@@ -291,6 +294,14 @@ class SyncPgDebug:
     def lock_tree(self) -> list[dict[str, Any]]:
         """Report who is blocking whom, root blockers first."""
         return self._call(self._client.lock_tree)
+
+    def sample_waits(self, seconds: float, interval: float = DEFAULT_SAMPLE_INTERVAL) -> WaitProfile:
+        """Sample what active sessions wait on, without an extension."""
+        return self._call(self._client.sample_waits, seconds, interval=interval)
+
+    def classify_waits(self) -> WaitDiagnosis:
+        """Name the patterns in one snapshot of the server's waits."""
+        return self._call(self._client.classify_waits)
 
     # -- Diagnostics ---------------------------------------------------------
 

@@ -99,10 +99,15 @@ transaction when it runs through a transaction pooler, so the setting does not
 stay behind for the application). PostgreSQL does not retry for you, and a
 `lock_timeout` at or above a nonzero `statement_timeout` does nothing useful.
 `check-migration` reports the lock each statement takes and how long it holds
-it, and advises a short `lock_timeout` for the brief ACCESS EXCLUSIVE changes,
-but it does not check whether the migration sets one: a `SET lock_timeout` in
-the file changes nothing in its report. Before running DDL on a busy table,
-look for transactions open longer than about a minute:
+it. Connected, it also reads the `lock_timeout` each statement would run with:
+a `SET lock_timeout` earlier in the file, the query context's (`--set
+lock_timeout=...`), the `ALTER ROLE ... SET` of the role the context names
+(`--role`, which is how the migration logs in), or the default, and says which.
+For a statement that waits for ACCESS EXCLUSIVE, SHARE ROW EXCLUSIVE or SHARE on
+an existing table with none set, it advises one (`lock_timeout_advice`); its
+`5s` is a ceiling, and a busy table wants the shorter value above. Before
+running DDL on a busy table, look for transactions open longer than about a
+minute:
 
 ```bash
 pg-debug --json activity | jq '.[] | select(.transaction_seconds > 60) | {pid, state, transaction_seconds, query}'
@@ -213,10 +218,41 @@ sleeping, and `LWLock` means internal contention. A long-running `active`
 query with no wait event is simply working.
 
 One snapshot is anecdote: a wait seen once may be gone a millisecond later.
-Run `activity` a few times before calling anything a pattern; pg-debug has no
-sampling mode yet. Where `pg_wait_sampling` is installed, it has been sampling
-every backend every 10 ms, and its `pg_wait_sampling_profile` view, which
-`pg-debug execute` can read, counts waits per process, event and query.
+`activity` and `locks` end their text with what the waits in that one snapshot
+amount to, each with its pids, lock modes and relation and a confidence: a
+**lock queue behind DDL** and an **idle-in-transaction blocker** are proven
+from `pg_locks`; **row lock contention** is proven once `pg_locks` shows the
+row lock and a candidate before (the same wait is how an insert waits on a
+conflicting unique key); **LWLock pressure** (3 or more backends at once on
+`BufferMapping` or `LockManager`) is a candidate whose cause is labelled a
+judgment, and fewer are listed as seen and not classified. Relay the
+confidence with it. `--json` prints the rows alone; the library's
+`classify_waits()` returns the diagnosis.
+
+To see a pattern rather than an instant, sample:
+
+```bash
+pg-debug activity --sample 10                        # 20 samples, one every 0.5s
+pg-debug activity --sample 30 --sample-interval 0.2
+pg-debug --json activity --sample 10
+```
+
+It reads `pg_stat_activity` once per sample, one statement each, and reports
+average active sessions (AAS) overall and for client backends, per wait event
+and per query (by `query_id` where the server reports one, by text with
+constants replaced where it does not, and it says why). Relay the number of
+samples and the interval it achieved, which it measures on the server's clock
+and which can be longer than asked for; a wait shorter than the interval shows
+only in proportion to how often it happens. Each sample is exact, the profile
+is a sample: every attribution is a candidate. `CPU` is an active session
+reporting no wait, on the CPU or in a wait PostgreSQL does not instrument.
+pg-debug's own backend and statements are left out; a role without
+`pg_read_all_stats` is told how many backends' state was withheld, and they
+are in no figure. Where `pg_wait_sampling` is installed (it samples every
+backend every 10 ms in the server), its profile over the same window is read
+too and reported under `extension`, with its own AAS; where Azure's Query
+Store records waits, its most recent interval, which is its own, not the
+sampled window.
 
 The waits worth recognising:
 

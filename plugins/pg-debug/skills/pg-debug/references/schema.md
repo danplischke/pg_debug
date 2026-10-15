@@ -67,6 +67,17 @@ small one — correct when pointed at production, misleading when pointed at a
 development copy. If the database in reach is not the one the migration will
 run against, use `--offline` and report the unsoftened verdict.
 
+Connected, it also reports under `timeouts` the `lock_timeout` and
+`statement_timeout` each statement would run with, and where each comes from:
+a `SET` earlier in the migration (`SET LOCAL` until its transaction ends), the
+query context (`--set lock_timeout=2s`), the `ALTER ROLE ... SET` of the role
+named with `--role` or in `pg-debug.toml` (the role the migration logs in as),
+or the default. A statement waiting for ACCESS EXCLUSIVE, SHARE ROW EXCLUSIVE
+or SHARE on an existing table queues every later statement that conflicts with
+that lock, since locks are granted in the order asked; with no `lock_timeout`
+it carries `lock_timeout_advice`. Relay it with the lock: it is the part of the
+risk that does not depend on the table's size.
+
 Facts worth knowing when reading its output, all measured rather than
 recalled: `ADD COLUMN ... NOT NULL DEFAULT 0` does *not* rewrite the table on
 PostgreSQL 11+; `ADD FOREIGN KEY` takes SHARE ROW EXCLUSIVE and never blocks

@@ -74,7 +74,10 @@ health, and `list[ModelFinding]` for the data model review.
 
 The live-activity and statistics methods mirror the commands:
 `list_activity(include_idle=, min_duration_seconds=, blocked_only=)`,
-`lock_tree()`, `vacuum_progress()`, `explain_index_use(sql, index=)`, `column_stats(table)`, `extended_statistics(table)`, and
+`lock_tree()`, `vacuum_progress()`, `classify_waits()` (a `WaitDiagnosis`: `classifications` with
+`kind`, `confidence`, `evidence` and any `judgment`, and what was `declined`), `sample_waits(seconds, interval=0.5)`
+(a `WaitProfile`: `timing.samples`, `timing.achieved_interval_seconds`, `active_sessions`, `waits`, `queries`,
+`extension`), `explain_index_use(sql, index=)`, `column_stats(table)`, `extended_statistics(table)`, and
 `get_top_queries(..., interval_seconds=)` for sampling. Their rows are what
 PostgreSQL showed the connecting role: `statistics_access()` says whether it is
 shown everything and how it could be; `withheld_backends()` gives

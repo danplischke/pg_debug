@@ -24,6 +24,7 @@ from ..partition import DEFAULT_MIN_TABLE_BYTES
 from ..plans import DEFAULT_MIN_RATIO
 from ..schema import ObjectType
 from ..sharding import DEFAULT_INTERVAL_SECONDS
+from ..waits import DEFAULT_SAMPLE_INTERVAL
 from .commands import cmd_activity
 from .commands import cmd_check_migration
 from .commands import cmd_column_stats
@@ -66,6 +67,7 @@ from .render import render_plan_findings
 from .render import render_rows
 from .render import render_shard_readiness
 from .render import render_vacuum_progress
+from .render import with_wait_diagnosis
 
 PROG = "pg-debug"
 
@@ -467,6 +469,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=f"Exit with status {UNHEALTHY_EXIT_CODE} when any statement is high severity, for use in CI.",
     )
+    add_context_arguments(check_migration)
     check_migration.set_defaults(func=cmd_check_migration, render=render_migration_review)
 
     activity = subparsers.add_parser("activity", help="Show what the server is doing right now")
@@ -480,10 +483,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only show backends that have held their current state this long, e.g. 30 for queries running over 30s.",
     )
     activity.add_argument("-b", "--blocked", action="store_true", help="Only show backends waiting on a lock another backend holds.")
-    activity.set_defaults(func=cmd_activity, render=render_activity)
+    activity.add_argument(
+        "--sample",
+        type=float,
+        metavar="SECONDS",
+        help="Sample pg_stat_activity for this long instead, and report what active sessions waited on: average active "
+        "sessions by wait event and by query. Needs no extension.",
+    )
+    activity.add_argument(
+        "--sample-interval",
+        type=float,
+        default=DEFAULT_SAMPLE_INTERVAL,
+        metavar="SECONDS",
+        help=f"Seconds between two samples with --sample (default: {DEFAULT_SAMPLE_INTERVAL}).",
+    )
+    activity.set_defaults(func=cmd_activity, render=with_wait_diagnosis(render_activity))
 
     locks = subparsers.add_parser("locks", help="Show who is blocking whom, the root blockers first")
-    locks.set_defaults(func=cmd_locks, render=render_lock_tree)
+    locks.set_defaults(func=cmd_locks, render=with_wait_diagnosis(render_lock_tree))
 
     vacuum_progress = subparsers.add_parser("vacuum-progress", help="Show running vacuums and how far along they are")
     vacuum_progress.set_defaults(func=cmd_vacuum_progress, render=render_vacuum_progress)

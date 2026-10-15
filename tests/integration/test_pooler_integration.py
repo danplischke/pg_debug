@@ -151,8 +151,9 @@ class TestBehindATransactionPooler:
             ["tune-queries", ONE_CUSTOMER],
             ["--access-mode", "restricted", "shard-readiness", "--interval", "0.5"],
             ["--access-mode", "restricted", "history"],
+            ["--access-mode", "restricted", "activity", "--sample", "1", "--sample-interval", "0.1"],
         ],
-        ids=["health", "restricted-health", "model", "tune-queries", "shard-readiness", "history"],
+        ids=["health", "restricted-health", "model", "tune-queries", "shard-readiness", "history", "activity-sample"],
     )
     def test_a_command_that_runs_many_statements_works_twice_in_a_row(self, server, run, args):
         """psycopg prepares a statement it has run five times on one connection,

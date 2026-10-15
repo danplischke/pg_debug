@@ -27,6 +27,7 @@ from ..baseline import Partition
 from ..baseline import describe_key
 from ..baseline import health_finding_key
 from ..db.privileges import is_withheld
+from ..waits import WaitProfile
 
 if TYPE_CHECKING:
     from ..db.privileges import StatisticsAccess
@@ -294,6 +295,132 @@ def _lock_tree_lines(node: Mapping[str, Any], depth: int, lines: list[str]) -> N
 MAX_QUERY_WIDTH = 120
 
 
+# -- Waits ---------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Diagnosed:
+    """Rows to render, with what the waits in the same moment amount to beneath them.
+
+    Only the text shows the diagnosis: ``--json`` keeps printing the rows
+    the library returned, and :meth:`PgDebug.classify_waits` returns it.
+    """
+
+    rows: Any
+    diagnosis: Any
+
+
+def with_wait_diagnosis(render: Callable[[Any], str]) -> Callable[[Any], str]:
+    """A renderer that also renders a :class:`Diagnosed` result's diagnosis, beneath the rows."""
+
+    def rendered(result: Any) -> str:
+        if isinstance(result, Diagnosed):
+            diagnosis = render_wait_diagnosis(result.diagnosis)
+            return f"{render(result.rows)}\n\n{diagnosis}" if diagnosis else render(result.rows)
+        if isinstance(result, WaitProfile):
+            return render_wait_profile(result)
+        return render(result)
+
+    rendered.__name__ = render.__name__
+    rendered.__doc__ = render.__doc__
+    return rendered
+
+
+def render_wait_diagnosis(diagnosis: Any) -> str:
+    """Render the patterns found in one snapshot's waits, with their evidence, and what was seen and not classified."""
+    if not diagnosis.classifications and not diagnosis.declined:
+        return ""
+    lines = ["What the waits amount to:"]
+    for found in diagnosis.classifications:
+        lines.append(f"  [{found.severity.value}, {found.confidence.value}] {found.summary}")
+        lines.append(f"      {found.detail}")
+        if found.judgment:
+            lines.append(f"      Judgment: {found.judgment}")
+    for refusal in diagnosis.declined:
+        lines.append(f"  Not classified: {refusal}")
+    return "\n".join(lines)
+
+
+def render_wait_profile(profile: Any) -> str:
+    """Render a sampled wait profile: how it was sampled, AAS, then waits and queries by share."""
+    timing = profile.timing
+    achieved = f"{timing.achieved_interval_seconds}s" if timing.achieved_interval_seconds is not None else "not measured"
+    lines = [
+        f"{timing.samples} samples of {profile.source} over {timing.span_seconds}s, one every {achieved} "
+        f"(asked: {timing.requested_interval_seconds}s; gaps {timing.shortest_gap_seconds}s to {timing.longest_gap_seconds}s).",
+        f"Average active sessions: {profile.active_sessions}, {profile.active_client_sessions} of them client backends "
+        f"(at most {profile.active_sessions_max} in one sample).",
+        "",
+    ]
+    if profile.waits:
+        lines.append(
+            render_rows(
+                [
+                    {"wait": wait["wait"], "aas": wait["active_sessions"], "share": f"{wait['share'] * 100:.1f}%", "samples": wait["samples"]}
+                    for wait in profile.waits
+                ]
+            )
+        )
+    else:
+        lines.append("(no session was active in any sample)")
+    if profile.queries:
+        lines.append("")
+        grouping = {
+            "query_id": "query_id",
+            "normalized_text": "text, constants replaced",
+            "mixed": "query_id where the server reported one, text otherwise",
+        }
+        lines.append(f"By query (grouped by {grouping.get(profile.query_grouping, profile.query_grouping)}):")
+        lines.append(
+            render_rows(
+                [
+                    {
+                        "aas": query["active_sessions"],
+                        "share": f"{query['share'] * 100:.1f}%",
+                        "top waits": ", ".join(f"{wait['wait']} {wait['share_of_query'] * 100:.0f}%" for wait in query["waits"]),
+                        "query": query["query"] or f"({query['backend_type']})",
+                    }
+                    for query in profile.queries
+                ],
+                max_width=ACTIVITY_CELL_WIDTH,
+            )
+        )
+    extension = profile.extension
+    if extension:
+        lines.append("")
+        if extension.get("read"):
+            lines.append(f"Also read from {extension['source']}:")
+            aas = extension.get("active_sessions")
+            if aas is not None:
+                lines.append(f"  average active sessions {aas} over {extension.get('window_seconds')}s")
+            for wait in extension.get("waits", [])[:10]:
+                idle = " (idle)" if wait.get("idle") else ""
+                lines.append(f"  {wait['wait']}: {wait['samples']} samples{idle}")
+            lines.append(f"  {extension['note']}")
+        else:
+            lines.append(f"{extension['source']} is installed and was not read: {extension['reason']}.")
+    lines.append("")
+    if profile.query_grouping_reason:
+        lines.append(profile.query_grouping_reason)
+    lines.extend(profile.notes)
+    lines.append("Every attribution above is a candidate: each sample is exact, the profile is a sample.")
+    return "\n".join(lines)
+
+
+def note_withheld_waits(access: StatisticsAccess, profile: Any) -> str | None:
+    """What ``activity --sample`` could not count of the backends PostgreSQL withheld the state of, and why."""
+    count = profile.withheld_per_sample
+    if not count:
+        return None
+    return _noting(
+        access,
+        [
+            f"Up to {count} backend{'s' if count != 1 else ''} in a sample {'was' if count == 1 else 'were'} shown without state, "
+            "wait or query, so whether they were active cannot be told, and they are in no figure of the profile."
+        ],
+    )
+
+
 def render_vacuum_progress(rows: Sequence[Mapping[str, Any]]) -> str:
     """Render running vacuums with their progress through the heap."""
     if not rows:
@@ -515,6 +642,11 @@ def render_migration_review(reviews: Sequence[Any]) -> str:
         lines.append(f"    held for: {review.duration.value}")
         lines.append(f"    {review.summary}")
         lines.append(f"    {review.detail}")
+        lock_timeout = review.timeouts.get("lock_timeout")
+        if review.lock_timeout_advice:
+            lines.append(f"    {review.lock_timeout_advice}")
+        elif lock_timeout and lock_timeout.get("milliseconds"):
+            lines.append(f"    lock_timeout: {lock_timeout['value']} ({lock_timeout['source']})")
         if review.safer:
             lines.append("    safer:")
             for statement in review.safer:
@@ -977,6 +1109,7 @@ def note_withheld_sample(access: StatisticsAccess, withheld: int, sort_by: str) 
 
 
 __all__ = [
+    "Diagnosed",
     "Shown",
     "format_duration",
     "lock_tree_nodes",
@@ -985,6 +1118,7 @@ __all__ = [
     "note_withheld_queries",
     "note_withheld_sample",
     "note_withheld_vacuums",
+    "note_withheld_waits",
     "render_activity",
     "render_column_stats",
     "render_configuration_review",
@@ -1001,6 +1135,9 @@ __all__ = [
     "render_plan_findings",
     "render_rows",
     "render_vacuum_progress",
+    "render_wait_diagnosis",
+    "render_wait_profile",
     "to_json",
+    "with_wait_diagnosis",
     "withheld_because",
 ]

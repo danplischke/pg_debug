@@ -18,6 +18,10 @@ from pg_debug.model import Severity
 from pg_debug.plans.tree import ExplainPlanArtifact
 from pg_debug.plans.tree import PlanNode
 from pg_debug.top_queries import QuerySample
+from pg_debug.waits import SampleTiming
+from pg_debug.waits import WaitClassification
+from pg_debug.waits import WaitDiagnosis
+from pg_debug.waits import WaitProfile
 
 #: A role shown every role's activity and statements, as a superuser is.
 MONITOR = StatisticsAccess(role="monitor", reads_all_stats=True)
@@ -38,6 +42,7 @@ def pg_client():
         client.statistics_access = AsyncMock(return_value=MONITOR)
         client.withheld_backends = AsyncMock(return_value=[])
         client.counting_windows = AsyncMock(return_value={"tables": None, "checkpoints": None, "statements": None})
+        client.classify_waits = AsyncMock(return_value=WaitDiagnosis())
         yield client
 
 
@@ -627,6 +632,136 @@ def test_activity_renders_blocking(pg_client):
     assert "12.5s" in out
     assert "41" in out
     assert "UPDATE orders SET status = 'paid' WHERE id = 1" in out
+
+
+def a_ddl_queue_diagnosis() -> WaitDiagnosis:
+    return WaitDiagnosis(
+        classifications=[
+            WaitClassification(
+                kind="ddl_lock_queue",
+                confidence=Confidence.PROVEN,
+                severity=Severity.HIGH,
+                summary="pid 20 waits for ACCESS EXCLUSIVE on public.t, held up by pid 10 (ACCESS SHARE), and 1 statement queues behind it.",
+                detail="PostgreSQL grants a lock in the order it was asked for.",
+                pids=[20, 10, 30],
+                evidence={"waiter": 20},
+            )
+        ],
+        examined=3,
+    )
+
+
+def test_activity_says_what_the_waits_amount_to_beneath_the_rows(pg_client):
+    pg_client.list_activity = AsyncMock(return_value=[{"pid": 20, "state": "active", "query": "ALTER TABLE t ADD COLUMN y int"}])
+    pg_client.classify_waits = AsyncMock(return_value=a_ddl_queue_diagnosis())
+
+    code, out, _ = run(["activity"])
+
+    assert code == 0
+    assert out.index("ALTER TABLE t") < out.index("What the waits amount to:")
+    assert "[high, proven] pid 20 waits for ACCESS EXCLUSIVE on public.t" in out
+
+
+def test_activity_json_keeps_printing_the_rows(pg_client):
+    rows = [{"pid": 20, "state": "active", "query": "ALTER TABLE t ADD COLUMN y int"}]
+    pg_client.list_activity = AsyncMock(return_value=rows)
+    pg_client.classify_waits = AsyncMock(return_value=a_ddl_queue_diagnosis())
+
+    code, out, _ = run(["--json", "activity"])
+
+    assert code == 0
+    assert json.loads(out) == rows
+
+
+def test_locks_say_what_the_waits_amount_to(pg_client):
+    pg_client.lock_tree = AsyncMock(return_value=[{"pid": 10, "state": "idle in transaction", "blocking": [], "blocked_total": 0}])
+    pg_client.classify_waits = AsyncMock(return_value=a_ddl_queue_diagnosis())
+
+    code, out, _ = run(["locks"])
+
+    assert code == 0
+    assert "pid 10:" in out
+    assert "What the waits amount to:" in out
+
+
+def a_profile(**overrides) -> WaitProfile:
+    timing = SampleTiming(
+        samples=20,
+        requested_seconds=10,
+        requested_interval_seconds=0.5,
+        achieved_interval_seconds=0.52,
+        shortest_gap_seconds=0.5,
+        longest_gap_seconds=0.61,
+        span_seconds=9.88,
+        started_at=None,
+    )
+    fields = {
+        "source": "pg_stat_activity",
+        "timing": timing,
+        "active_sessions": 1.5,
+        "active_sessions_max": 3,
+        "active_client_sessions": 1.5,
+        "waits": [{"wait": "Lock:transactionid", "active_sessions": 1.0, "share": 0.6667, "samples": 20}],
+        "queries": [
+            {
+                "active_sessions": 1.0,
+                "share": 0.6667,
+                "waits": [{"wait": "Lock:transactionid", "share_of_query": 1.0}],
+                "query": "UPDATE t SET n = n + 1",
+                "backend_type": "client backend",
+            }
+        ],
+        "notes": ["Each of the 20 samples is exact; the profile is a sample of the interval."],
+    }
+    fields.update(overrides)
+    return WaitProfile(**fields)
+
+
+def test_activity_sample_reports_samples_taken_and_the_interval_achieved(pg_client):
+    pg_client.sample_waits = AsyncMock(return_value=a_profile())
+
+    code, out, _ = run(["activity", "--sample", "10"])
+
+    assert code == 0
+    pg_client.sample_waits.assert_awaited_once_with(10.0, interval=0.5)
+    assert "20 samples of pg_stat_activity over 9.88s, one every 0.52s (asked: 0.5s" in out
+    assert "Average active sessions: 1.5" in out
+    assert "Lock:transactionid" in out
+    assert "UPDATE t SET n = n + 1" in out
+    assert "candidate" in out
+    pg_client.list_activity.assert_not_called()
+
+
+def test_activity_sample_json_is_the_profile(pg_client):
+    pg_client.sample_waits = AsyncMock(return_value=a_profile())
+
+    code, out, _ = run(["--json", "activity", "--sample", "10", "--sample-interval", "0.25"])
+
+    assert code == 0
+    pg_client.sample_waits.assert_awaited_once_with(10.0, interval=0.25)
+    payload = json.loads(out)
+    assert payload["timing"]["samples"] == 20
+    assert payload["timing"]["achieved_interval_seconds"] == 0.52
+    assert payload["exactness"] == "each sample is exact; the profile is a sample of the interval"
+
+
+def test_activity_sample_says_what_was_withheld(pg_client):
+    plain = StatisticsAccess(role="app", reads_all_stats=False, remedy="GRANT pg_monitor TO app")
+    pg_client.sample_waits = AsyncMock(return_value=a_profile(withheld_per_sample=4, statistics_access=plain))
+
+    code, _, err = run(["activity", "--sample", "10"])
+
+    assert code == 0
+    assert "Up to 4 backends in a sample were shown without state" in err
+    assert "GRANT pg_monitor TO app" in err
+
+
+@pytest.mark.parametrize("option", [["--all"], ["--blocked"], ["--min-duration", "5"]])
+def test_activity_sample_refuses_options_for_a_list(pg_client, option):
+    code, _, err = run(["activity", "--sample", "10", *option])
+
+    assert code == 1
+    assert "do not combine with it" in err
 
 
 def test_vacuum_progress_when_idle(pg_client):

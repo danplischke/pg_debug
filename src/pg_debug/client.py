@@ -68,6 +68,11 @@ from .sharding import ShardReadinessAssessor
 from .statistics import StatisticsInspector
 from .top_queries import QuerySample
 from .top_queries import TopQueriesCalc
+from .waits import DEFAULT_SAMPLE_INTERVAL
+from .waits import WaitDiagnosis
+from .waits import WaitProfile
+from .waits import WaitSampler
+from .waits import classify_waits
 
 logger = logging.getLogger(__name__)
 
@@ -763,6 +768,45 @@ class PgDebug:
             :meth:`ActivityInspector.lock_tree`.
         """
         return await ActivityInspector(await self.sql_driver()).lock_tree()
+
+    async def sample_waits(self, seconds: float, interval: float = DEFAULT_SAMPLE_INTERVAL) -> WaitProfile:
+        """Sample what active sessions wait on, without an extension.
+
+        Reads pg_stat_activity every ``interval`` seconds for ``seconds``, one
+        statement per sample, leaving out pg-debug's own backend and
+        statements, and builds a profile: average active sessions overall,
+        per wait event and per query. Where pg_wait_sampling is installed its
+        profile over the same window is read too; where Azure's Query Store
+        records waits, its most recent interval.
+
+        Args:
+            seconds: How long to sample.
+            interval: Seconds between samples (default 0.5).
+
+        Returns:
+            A :class:`~pg_debug.waits.WaitProfile` with the number of samples
+            taken and the interval achieved, measured on the server's clock.
+            Each sample is exact; the profile is a sample, so its
+            attributions are candidates.
+
+        Raises:
+            InvalidArgumentError: If the duration or interval is not one a
+                sample can be taken with.
+        """
+        return await WaitSampler(await self.sql_driver()).sample(seconds, interval=interval)
+
+    async def classify_waits(self) -> WaitDiagnosis:
+        """Name the patterns in one snapshot of the server's waits.
+
+        A lock queue behind DDL, an idle-in-transaction session blocking
+        others, row lock contention, and LWLock pressure on BufferMapping or
+        LockManager, each with the pids, lock modes and relation it was read
+        from, and a confidence.
+
+        Returns:
+            A :class:`~pg_debug.waits.WaitDiagnosis`.
+        """
+        return await classify_waits(await self.sql_driver())
 
     # -- Diagnostics ---------------------------------------------------------
 
