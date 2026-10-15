@@ -599,6 +599,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The README documented `list_objects(schema, ...)` and
+  `get_object_details(schema, name, ...)`; the parameters are `schema_name` and
+  `object_name`, so a call with the documented keywords raised `TypeError`. Its
+  feature list also named none of the commands added in this release.
+
 - One health check that failed ended the whole `health` run. A lock on one
   table (a migration holding ACCESS EXCLUSIVE, say) timed out the first index
   check, and `health` printed only `canceling statement due to statement
