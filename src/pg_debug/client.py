@@ -10,6 +10,9 @@ from typing import Any
 from typing import Literal
 
 from .activity import ActivityInspector
+from .audit import AuditReport
+from .audit import SecurityAuditor
+from .audit import UpgradeChecker
 from .configuration import ConfigFinding
 from .configuration import ConfigurationReviewer
 from .context import QueryContext
@@ -622,6 +625,46 @@ class PgDebug:
         """
         reviewer = ConfigurationReviewer(await self.sql_driver(), platform=await self._detect_platform())
         return await reviewer.review()
+
+    # -- Audits --------------------------------------------------------------
+
+    async def check_upgrade(self, to: int | None = None) -> AuditReport:
+        """Say what stands between this cluster and ``pg_upgrade`` to a newer major version.
+
+        Reads, from the connection, what ``pg_upgrade`` refuses (``reg*``
+        columns, prepared transactions, a checksum setting the new cluster
+        will not share), what it carries across incomplete (logical slots and
+        subscriptions before 17, extended statistics), and what is better
+        done before (extension updates, MD5 passwords). Read-only, so it
+        runs in restricted mode.
+
+        Args:
+            to: The major version to upgrade to. Defaults to the newest one
+                pg-debug knows was released.
+
+        Returns:
+            An :class:`~pg_debug.audit.AuditReport`: the findings, most severe
+            first, and what each check examined or why it could not tell.
+
+        Raises:
+            InvalidArgumentError: If ``to`` is not newer than the server.
+        """
+        checker = UpgradeChecker(await self.sql_driver(), platform=await self._detect_platform())
+        return await checker.check(to=to)
+
+    async def audit_security(self) -> AuditReport:
+        """Read the server's authentication rules, roles, privileges and row-level security for what lets too much in.
+
+        The authentication rules are readable by a superuser only; for any
+        other role that check reports that it could not tell rather than
+        passing. Read-only, so it runs in restricted mode.
+
+        Returns:
+            An :class:`~pg_debug.audit.AuditReport`: the findings, most severe
+            first, and what each check examined or why it could not tell.
+        """
+        auditor = SecurityAuditor(await self.sql_driver(), platform=await self._detect_platform())
+        return await auditor.audit()
 
     # -- Partitioning --------------------------------------------------------
 

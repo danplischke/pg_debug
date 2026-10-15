@@ -475,6 +475,108 @@ def test_config_exit_code_fires_only_on_high_severity(pg_client):
     assert run(["config", "--exit-code"])[0] == cli.UNHEALTHY_EXIT_CODE
 
 
+# -- upgrade-check and security ------------------------------------------------
+
+
+def audit(*findings, unknown=False, command="security"):
+    from pg_debug.audit import AuditReport
+    from pg_debug.audit import CheckOutcome
+    from pg_debug.audit import CheckStatus
+
+    checks = [CheckOutcome(check="ssl", status=CheckStatus.FOUND if findings else CheckStatus.CLEAR, examined="ssl = off")]
+    if unknown:
+        checks.append(CheckOutcome(check="hba_rules", status=CheckStatus.UNKNOWN, examined="nothing", reason="only a superuser may read them"))
+    return AuditReport(
+        command=command, server_version="16.4", findings=list(findings), checks=checks, target_version=18 if command == "upgrade-check" else None
+    )
+
+
+def audit_finding(severity=Severity.MEDIUM, subject="ssl", check="ssl"):
+    from pg_debug.audit import AuditFinding
+
+    return AuditFinding(
+        check=check,
+        subject=subject,
+        severity=severity,
+        confidence=Confidence.PROVEN,
+        summary="ssl is off.",
+        detail="detail",
+        remediation=["ALTER SYSTEM SET ssl = on;"],
+    )
+
+
+def test_upgrade_check_passes_its_target(pg_client):
+    pg_client.check_upgrade = AsyncMock(return_value=audit(command="upgrade-check"))
+
+    code, out, _ = run(["upgrade-check", "--to", "17"])
+
+    assert code == 0
+    pg_client.check_upgrade.assert_awaited_once_with(to=17)
+    assert out.startswith("Upgrade from PostgreSQL 16.4 to 18")
+
+
+def test_security_renders_findings_and_every_check(pg_client):
+    pg_client.audit_security = AsyncMock(return_value=audit(audit_finding()))
+
+    code, out, _ = run(["security"])
+
+    assert code == 0
+    assert "[medium] ssl: ssl" in out
+    assert "ALTER SYSTEM SET ssl = on;" in out
+    assert "found    ssl: ssl = off" in out
+    assert out.strip().endswith("1 finding (1 medium).")
+
+
+def test_a_check_that_could_not_tell_is_never_read_as_a_pass(pg_client):
+    pg_client.audit_security = AsyncMock(return_value=audit(unknown=True))
+
+    code, out, _ = run(["security", "--exit-code"])
+
+    assert code == 0
+    assert "unknown  hba_rules: only a superuser may read them" in out
+    assert "No findings; 1 check could not tell (hba_rules), so this is not a clean bill." in out
+
+
+def test_security_exit_code_fires_only_on_high_severity(pg_client):
+    pg_client.audit_security = AsyncMock(return_value=audit(audit_finding(Severity.MEDIUM)))
+    assert run(["security", "--exit-code"])[0] == 0
+
+    pg_client.audit_security = AsyncMock(return_value=audit(audit_finding(Severity.HIGH)))
+    assert run(["security", "--exit-code"])[0] == cli.UNHEALTHY_EXIT_CODE
+
+
+def test_an_audit_baseline_silences_what_was_accepted(pg_client, tmp_path):
+    path = tmp_path / "security.json"
+    pg_client.audit_security = AsyncMock(return_value=audit(audit_finding(Severity.HIGH)))
+    run(["security", "--save-baseline", str(path)])
+
+    code, out, _ = run(["security", "--exit-code", "--baseline", str(path)])
+    assert code == 0
+    assert "1 known finding(s), nothing new" in out
+
+    pg_client.audit_security = AsyncMock(
+        return_value=audit(audit_finding(Severity.HIGH), audit_finding(Severity.HIGH, subject="role app", check="privileged_roles"))
+    )
+    code, out, _ = run(["security", "--exit-code", "--baseline", str(path)])
+    assert code == cli.UNHEALTHY_EXIT_CODE
+    assert "privileged_roles: role app" in out
+
+
+def test_audit_json_marks_findings_against_the_baseline(pg_client, tmp_path):
+    path = tmp_path / "upgrade.json"
+    pg_client.check_upgrade = AsyncMock(return_value=audit(audit_finding(), command="upgrade-check"))
+    run(["upgrade-check", "--save-baseline", str(path)])
+    pg_client.check_upgrade = AsyncMock(return_value=audit(audit_finding(), audit_finding(subject="other"), unknown=True, command="upgrade-check"))
+
+    code, out, _ = run(["--json", "upgrade-check", "--baseline", str(path)])
+
+    payload = json.loads(out)
+    assert code == 0
+    assert payload["target_version"] == 18
+    assert [(f["subject"], f["baseline"]) for f in payload["findings"]] == [("ssl", "known"), ("other", "new")]
+    assert payload["checks"][1] == {"check": "hba_rules", "status": "unknown", "examined": "nothing", "reason": "only a superuser may read them"}
+
+
 def test_check_migration_reads_a_file(pg_client, tmp_path):
     pg_client.check_migration = AsyncMock(return_value=[])
     migration = tmp_path / "001_add_column.sql"

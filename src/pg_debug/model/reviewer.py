@@ -11,6 +11,7 @@ from ..db import SafeSqlDriver
 from ..db import SqlDriver
 from ..severity import Confidence
 from . import columns
+from . import indexes
 from . import keys
 from . import layout
 from .result import DEFAULT_MIN_ROWS
@@ -33,6 +34,9 @@ RULES: dict[RuleId, Rule] = {
     RuleId.BLANK_PADDED_CHAR: columns.blank_padded_chars,
     RuleId.NULLABLE_NEVER_NULL: columns.nullable_never_null,
     RuleId.LOW_CARDINALITY_TEXT: columns.low_cardinality_text,
+    RuleId.JSON_COLUMN: columns.json_columns,
+    RuleId.PRIMARY_KEY_OVERFLOW: keys.primary_key_overflow,
+    RuleId.MOSTLY_NULL_INDEX: indexes.mostly_null_indexes,
 }
 
 

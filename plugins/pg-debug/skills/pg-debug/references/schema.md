@@ -18,7 +18,8 @@ pg-debug model --exit-code               # exit 3 on a high-severity finding (CI
 
 Rules: `unindexed_foreign_key`, `foreign_key_type_mismatch`,
 `missing_primary_key`, `column_order_padding`, `naive_timestamp`,
-`blank_padded_char`, `nullable_never_null`, `low_cardinality_text`, `all`.
+`blank_padded_char`, `nullable_never_null`, `low_cardinality_text`,
+`json_column`, `primary_key_overflow`, `mostly_null_index`, `all`.
 Needs no extension, and each rule is one catalog query, so it is safe to point
 at production.
 
@@ -44,8 +45,55 @@ tested rather than believed. Its remediation is a `CREATE TABLE` sketch, not a
 migration: constraints, defaults, indexes and triggers are not reproduced, and
 saying so is part of relaying it honestly.
 
+`primary_key_overflow` is proven: it reads the sequence's last value, and
+says how much of the type (or of a sequence still `AS integer` behind a
+`bigint` column) is used. Relay the share and the deadline it implies; the
+remediation rewrites the table and every integer column referencing it, so on
+a large table propose the batched new-column migration the detail mentions
+rather than the in-place `ALTER`. A sequence the role may not read, or one
+never called, is not reported. `json_column` and `mostly_null_index` are
+candidates: run the `verify` query, and for `mostly_null_index` also ask
+whether any query looks for `column IS NULL` or reads the column in index
+order with no condition on it, the two things the partial index cannot serve.
+
 An empty result means the model has nothing wrong with it that these rules can
 see — say that, rather than reaching for something to report.
+
+## Before a major upgrade, and auditing security
+
+```bash
+pg-debug upgrade-check --to 18           # what pg_upgrade refuses, drops or leaves to do
+pg-debug security                        # who can get in, and what they can do there
+pg-debug security --exit-code --baseline security-baseline.json   # CI: fail on a new high finding
+```
+
+Both print their findings, then one line per check: `clear`, `found`,
+`unknown` (it could not read what it needed, and says why) or `n/a`. **Relay
+the `unknown` lines.** Password hashes (`md5_passwords`) and `pg_hba.conf`
+(`hba_rules`) are readable by a superuser only; for any other role, and on
+most managed platforms, those checks cannot tell, and an audit that skipped
+them is not a pass. The report's last line says so.
+
+`upgrade-check` reads one database. `reg_type_columns`, `extension_versions`
+and `statistics_after_upgrade` cover only the connected one, and the report
+names the others to run it against. What it checks is `pg_upgrade` 18's own
+list: `reg*` columns it refuses (`regclass`, `regrole` and `regtype` are fine),
+prepared transactions, a `data_checksums` setting the target's initdb default
+does not share (18 enables them; `initdb --no-data-checksums` or
+`pg_checksums --enable` fixes it), logical slots and subscriptions on a server
+before 17 (silently dropped), extended statistics (not carried by 18, so
+`ANALYZE` after), extensions behind their default version, and MD5 passwords
+(deprecated in 18). It is not `pg_upgrade --check`: recommend running that
+too, from the new binaries, before the upgrade.
+
+`security` findings are proven except `rls_coverage`, a candidate: a table
+without row-level security, granted to other roles, beside tables in the same
+schema that have it. Its `verify` lists who may read the table; ask whether it
+is meant to be readable in full before proposing a policy. `rls_without_policy`
+is often deliberate (a table kept to a service role), so present it as a
+question. `version_currency` compares the server with releases pg-debug knew
+of on the date it states; repeat that date, because a newer minor release
+makes a "current" verdict wrong.
 
 ## Reviewing a migration before it runs
 
