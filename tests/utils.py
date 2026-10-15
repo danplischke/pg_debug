@@ -212,7 +212,9 @@ def _postgres_container(version: str) -> Iterator[tuple[Container, str]]:
             pytest.skip(f"PostgreSQL container failed to start: {logs[:500]}...")
 
         # Get assigned port
-        port = container.ports["5432/tcp"][0]["HostPort"]
+        bindings = (container.ports or {}).get("5432/tcp")
+        assert bindings, f"Container {container_name} published no port for 5432"
+        port = bindings[0]["HostPort"]
         connection_string = f"postgresql://postgres:{postgres_password}@localhost:{port}/{postgres_db}"
 
         last_error = _wait_until_ready(connection_string, container, "PostgreSQL")

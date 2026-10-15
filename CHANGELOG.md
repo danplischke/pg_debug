@@ -477,6 +477,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- pg-debug pins pglast 7.20 instead of 7.11, so installing it no longer holds
+  pglast back at the older release. It still parses with PostgreSQL 17's
+  grammar, now from 17.7. psycopg-pool 3.3.3, pydantic 2.14 and
+  instructor 1.17 are the versions the lockfile now tests with.
+
 - A statement that failed was logged at ERROR with its full text, so a
   `health` run with six checks timing out behind a lock printed close to 300
   lines of pg-debug's own SQL to stderr, and restricted mode logged each

@@ -61,7 +61,8 @@ async def test_the_alternatives_not_chosen_are_reported_with_their_costs_and_why
         patch.object(tool, "_estimate_index_size_2", AsyncMock(return_value=1_000_000.0)),
     ):
         explain_cls.return_value.explain = AsyncMock(return_value=plan)
-        chosen, cost = await tool._generate_recommendations([(QUERY, parse_sql(QUERY)[0].stmt, 1.0)])
+        queries: list[tuple[str, Any, float]] = [(QUERY, parse_sql(QUERY)[0].stmt, 1.0)]
+        chosen, cost = await tool._generate_recommendations(queries)
 
     assert {idx.columns for idx in chosen} == {("a", "b")}
     assert cost == 10.0

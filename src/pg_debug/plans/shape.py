@@ -26,6 +26,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
+from typing import cast
 
 from pglast import parser as pg_parser
 from pglast import split
@@ -135,7 +136,8 @@ def split_queries(text: str) -> list[tuple[str, str]]:
             compared against the other's shape.
     """
     try:
-        statements = [s.strip() for s in split(text, with_parser=True) if s.strip()]
+        # Without only_slices, split returns the statements' text.
+        statements = [s.strip() for s in cast("tuple[str, ...]", split(text, with_parser=True)) if s.strip()]
     except Exception as e:
         raise InvalidArgumentError(f"Could not split the queries into statements: {e}") from e
     if not statements:

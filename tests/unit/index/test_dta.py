@@ -1179,7 +1179,7 @@ async def test_enumerate_greedy_pareto_cost_benefit(async_sql_driver):
 
     # Create test queries
     q1 = "SELECT * FROM test_table WHERE col1 = 1"
-    queries = [(q1, parse_sql(q1)[0].stmt, 1.0)]
+    queries: list[tuple[str, Any, float]] = [(q1, parse_sql(q1)[0].stmt, 1.0)]
 
     # Create candidate indexes
     candidate_indexes = set()
