@@ -284,7 +284,8 @@ transaction left by a client can stay open indefinitely.
 
 `pg-debug logs FILE...` reads server logs with no connection: stderr (with
 `--prefix` set to the server's `log_line_prefix`, or detected), csvlog and
-jsonlog, plain or `.gz`. Each finding names the `file:line` it was read from.
+jsonlog, plain or `.gz`; `--format` names the format where detecting it from
+each file is not wanted. Each finding names the `file:line` it was read from.
 Messages are matched in English (`lc_messages` C or English). When a kind of
 event is absent the report says which setting it depends on, since a quiet
 log is not a healthy server.
