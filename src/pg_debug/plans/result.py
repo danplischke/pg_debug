@@ -61,6 +61,10 @@ class PlanIssue(str, Enum):
     LOSSY_BITMAP = "lossy_bitmap"
     #: Parallel workers were planned for and not granted.
     WORKERS_NOT_LAUNCHED = "workers_not_launched"
+    #: An Append over many partitions of one table, every one of them scanned
+    #: and filtered on the partition key, most of them for no rows: pruning
+    #: could not use the condition. Inferred, so a candidate.
+    UNPRUNED_PARTITIONS = "unpruned_partitions"
 
 
 #: Reading order for findings that matter equally. A wrong row estimate is the
@@ -76,6 +80,7 @@ ISSUE_ORDER = {
     PlanIssue.HASH_SPILLED: 6,
     PlanIssue.LOSSY_BITMAP: 7,
     PlanIssue.WORKERS_NOT_LAUNCHED: 8,
+    PlanIssue.UNPRUNED_PARTITIONS: 9,
 }
 
 

@@ -365,3 +365,65 @@ def test_a_healthy_plan_produces_no_findings_from_any_rule():
     ctx = context(root, columns={"s.visits": {"country", "city"}})
 
     assert [finding for rule in RULES for finding in rule(root, ctx)] == []
+
+
+# -- unpruned_partitions ----------------------------------------------------
+
+
+def partition_scans(count=8, matching=1, condition="(date(p_{n}.ts) = '2026-03-05'::date)", loops=1):
+    return [
+        node(
+            "Seq Scan",
+            actual_rows=50 if n < matching else 0,
+            ms=2.0,
+            loops=loops,
+            relation_name=f"pr_{n}",
+            schema_name="public",
+            alias=f"p_{n}",
+            filter=condition.format(n=n),
+        )
+        for n in range(count)
+    ]
+
+
+def partitions_of(count=8, key=("ts",)):
+    return {f"public.pr_{n}": {"root": "public.pr", "partitions": count, "key_columns": list(key)} for n in range(count)}
+
+
+def test_an_append_that_kept_every_partition_it_filtered_on_the_key_is_a_candidate():
+    from pg_debug.plans.rules import unpruned_partitions
+
+    append = node("Append", ms=20.0, children=partition_scans(), subplans_removed=0)
+    (finding,) = unpruned_partitions(append, context(append, partitions=partitions_of()))
+
+    assert finding.issue is PlanIssue.UNPRUNED_PARTITIONS
+    assert finding.relation == "public.pr"
+    assert "scanned 8 of 8 partitions" in finding.summary and "7 of them returned no rows" in finding.summary
+    assert finding.evidence["confidence"] == "candidate"
+    assert finding.evidence["partition_key"] == ["ts"]
+
+
+@pytest.mark.parametrize(
+    ("append_kwargs", "scans_kwargs", "partitions"),
+    [
+        ({"subplans_removed": 3}, {}, partitions_of()),  # run-time pruning worked
+        ({}, {"count": 3}, partitions_of(3)),  # too few to matter
+        ({}, {"condition": "(p_{n}.v = 3)"}, partitions_of()),  # not filtered on the key
+        ({}, {"matching": 6}, partitions_of()),  # most partitions had rows: the condition covered them
+        ({}, {}, {}),  # not partitions, as far as the catalog says
+    ],
+)
+def test_unpruned_partitions_stays_quiet_when_the_plan_does_not_argue_it(append_kwargs, scans_kwargs, partitions):
+    from pg_debug.plans.rules import unpruned_partitions
+
+    append = node("Append", ms=20.0, children=partition_scans(**scans_kwargs), **append_kwargs)
+    assert unpruned_partitions(append, context(append, partitions=partitions)) == []
+
+
+def test_a_partition_never_executed_means_run_time_pruning_did_its_job():
+    from pg_debug.plans.rules import unpruned_partitions
+
+    scans = partition_scans()
+    scans[3].actual_loops = 0
+    append = node("Append", ms=20.0, children=scans)
+    assert unpruned_partitions(append, context(append, partitions=partitions_of())) == []

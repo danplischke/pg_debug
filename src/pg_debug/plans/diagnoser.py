@@ -84,6 +84,29 @@ WHERE (n.nspname || '.' || c.relname) = ANY({}::text[])
 """
 
 
+# Which of the plan's relations are partitions: the table each belongs to, how
+# many partitions that table has, and the key columns of every level of
+# partitioning above it, any of which a condition could prune on.
+PARTITIONS_SQL = """
+SELECT
+    n.nspname AS schema,
+    c.relname AS table,
+    rn.nspname || '.' || r.relname AS root,
+    (SELECT count(*) FROM pg_partition_tree(r.oid) AS t WHERE t.isleaf) AS partitions,
+    (SELECT array_agg(DISTINCT a.attname)
+       FROM pg_partition_ancestors(c.oid) AS anc
+       JOIN pg_partitioned_table AS pt ON pt.partrelid = anc.relid
+       CROSS JOIN LATERAL unnest(pt.partattrs::int2[]) AS k(attnum)
+       JOIN pg_attribute AS a ON a.attrelid = anc.relid AND a.attnum = k.attnum) AS key_columns
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_class r ON r.oid = pg_partition_root(c.oid)
+JOIN pg_namespace rn ON rn.oid = r.relnamespace
+WHERE c.relispartition
+  AND (n.nspname || '.' || c.relname) = ANY({}::text[])
+"""
+
+
 #: What :func:`parse_plan` accepts: the JSON text EXPLAIN printed, or that
 #: text already decoded — the list EXPLAIN wraps its one plan in, or the plan
 #: object itself, which is also the shape ``auto_explain`` logs.
@@ -323,6 +346,7 @@ class PlanDiagnoser:
             covered=await self._covered_column_sets(relations),
             columns=await self._relation_columns(relations),
             work_mem=await self._work_mem(),
+            partitions=await self._partitions(relations),
         )
 
     async def _stale_relations(self, relations: Sequence[str]) -> dict[str, dict[str, Any]]:
@@ -352,6 +376,17 @@ class PlanDiagnoser:
             columns.setdefault(f"{row['schema']}.{row['table']}", set()).add(str(row["column"]))
         return columns
 
+    async def _partitions(self, relations: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """The plan's relations that are partitions, with their table and its partition keys."""
+        return {
+            f"{row['schema']}.{row['table']}": {
+                "root": row["root"],
+                "partitions": int(row["partitions"] or 0),
+                "key_columns": list(row["key_columns"] or []),
+            }
+            for row in await self._rows(PARTITIONS_SQL, relations)
+        }
+
     async def _rows(self, query: LiteralString, relations: Sequence[str]) -> list[dict[str, Any]]:
         if not relations:
             return []
@@ -371,4 +406,14 @@ class PlanDiagnoser:
         return str(rows[0].cells["work_mem"]) if rows else None
 
 
-__all__ = ["COLUMNS_SQL", "EXTENDED_STATISTICS_SQL", "PlanDiagnoser", "PlanInput", "diagnose_plan", "offline_context", "parse_plan", "run_rules"]
+__all__ = [
+    "COLUMNS_SQL",
+    "EXTENDED_STATISTICS_SQL",
+    "PARTITIONS_SQL",
+    "PlanDiagnoser",
+    "PlanInput",
+    "diagnose_plan",
+    "offline_context",
+    "parse_plan",
+    "run_rules",
+]
