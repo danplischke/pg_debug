@@ -78,6 +78,13 @@ class StatementStatistics:
         same queryid, user and database."""
         return self.version >= (1, 9)
 
+    @property
+    def has_stats_since(self) -> bool:
+        """1.11, with PostgreSQL 17, records when each entry started counting
+        (``stats_since``): after an eviction, or a reset of that statement
+        alone, it is later than the extension's own reset."""
+        return self.version >= (1, 11)
+
 
 async def locate_pg_stat_statements(sql_driver: SqlDriver) -> StatementStatistics | None:
     """Find pg_stat_statements in this database, or None when it is not installed here."""

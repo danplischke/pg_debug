@@ -211,6 +211,7 @@ def render_activity(rows: Sequence[Mapping[str, Any]]) -> str:
             "wait": ":".join(p for p in (row.get("wait_event_type"), row.get("wait_event")) if p),
             "for": format_duration(row.get("state_seconds")),
             "blocked_by": ",".join(str(pid) for pid in row.get("blocked_by") or []),
+            "blocking": row.get("blocking_total") or "",
             "query": _withheld_details(row) if is_withheld(row) else row.get("query"),
         }
         for row in rows
@@ -315,6 +316,83 @@ def render_vacuum_progress(rows: Sequence[Mapping[str, Any]]) -> str:
         for row in rows
     ]
     return render_rows(projected)
+
+
+def _rate_amount(name: str, value: float) -> str:
+    """A counter's amount: bytes as a size, milliseconds as they are, the rest as a count."""
+    if name.endswith("bytes"):
+        sign = "-" if value < 0 else ""
+        return sign + humanize.naturalsize(abs(value), binary=True)
+    if name.endswith("_ms"):
+        return f"{value:,.1f}ms"
+    return f"{value:,.1f}" if value != int(value) else f"{int(value):,}"
+
+
+def render_server_rates(rates: Any) -> str:
+    """Render each view's counters as rates per second, and each refusal with its reason."""
+    lines: list[str] = [f"Measured over {rates.interval_seconds:g}s (PostgreSQL {rates.server_version})."]
+    for group in rates.groups:
+        title = f"{group.measures}" + (f" {group.subject}" if group.subject else "") + f" ({group.source}"
+        title += f", {group.interval_seconds:.1f}s)" if group.interval_seconds is not None else ")"
+        details = [f"{key} {value}" for key, value in (group.details or {}).items() if value is not None]
+        if details:
+            title += f" [{', '.join(details)}]"
+        lines.append("")
+        lines.append(title)
+        if group.refused:
+            lines.append(f"  refused: {group.refused}")
+            continue
+        width = max((len(counter.name) for counter in group.counters), default=0)
+        for counter in group.counters:
+            if counter.refused:
+                lines.append(f"  {counter.name.ljust(width)}  refused: {counter.refused}")
+                continue
+            rate, delta = _rate_amount(counter.name, counter.per_second), _rate_amount(counter.name, counter.delta)
+            line = f"  {counter.name.ljust(width)}  {rate}/s  ({'+' if counter.delta >= 0 else ''}{delta})"
+            if group.measures == "replication_slot":
+                line += f", retaining {_rate_amount(counter.name, counter.after)}"
+            lines.append(line)
+    if rates.idle_io:
+        lines.append("")
+        lines.append(f"{rates.idle_io} pg_stat_io row{'s' if rates.idle_io != 1 else ''} did no I/O during the interval.")
+    return "\n".join(lines)
+
+
+def render_pooler_report(report: Any) -> str:
+    """Render PgBouncer's pools, then the saturation they show, or that they show none."""
+    config = ", ".join(f"{key} {value}" for key, value in report.config.items())
+    lines = [f"{report.version or 'PgBouncer'}" + (f": {config}" if config else "")]
+    lines.append("")
+    pools = [
+        {
+            "pool": f"{pool.get('database')}/{pool.get('user')}",
+            "mode": pool.get("pool_mode"),
+            "cl_active": pool.get("cl_active"),
+            "cl_waiting": pool.get("cl_waiting"),
+            "sv_active": pool.get("sv_active"),
+            "sv_idle": pool.get("sv_idle"),
+            "sv_used": pool.get("sv_used"),
+            "maxwait": format_duration(pool.get("maxwait")) if pool.get("maxwait") else "",
+        }
+        for pool in report.pools
+    ]
+    lines.append(render_rows(pools, empty="(no pools: no client has connected through PgBouncer since it started)"))
+    if report.server:
+        server = report.server
+        lines.append(
+            f"\nServer: max_connections {server.get('max_connections')}, {server.get('superuser_reserved_connections')} reserved for "
+            f"superusers, {server.get('reserved_connections')} for pg_use_reserved_connections; "
+            f"{server.get('client_backends')} client backends now."
+        )
+    for command, reason in report.unavailable.items():
+        lines.append(f"\n{command} was refused: {reason}")
+    lines.append("")
+    if not report.findings:
+        waiting = sum(pool.get("cl_waiting") or 0 for pool in report.pools)
+        lines.append(f"No saturation: {len(report.pools)} pool(s) examined, {waiting} client(s) waiting.")
+    for finding in report.findings:
+        lines.append(f"[{finding.severity.value}] {finding.summary}")
+    return "\n".join(lines)
 
 
 def render_column_stats(result: Mapping[str, Any]) -> str:
@@ -872,6 +950,20 @@ def note_statement_window(windows: Mapping[str, Any]) -> str | None:
     return note
 
 
+def sampled_queries_text(queries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The sampled queries with ``change`` in a word: ``new``, ``slower 4.2x``, ``faster 3.1x``, or blank."""
+
+    def word(change: Mapping[str, Any] | None) -> str:
+        if not change or not change.get("kind"):
+            return ""
+        if change["kind"] == "new":
+            return "new"
+        ratio = change.get("ratio") or 1
+        return f"{change['kind']} {ratio if ratio >= 1 else 1 / ratio:.1f}x"
+
+    return [{**row, "change": word(row.get("change"))} for row in queries]
+
+
 def note_withheld_sample(access: StatisticsAccess, withheld: int, sort_by: str) -> str | None:
     """What ``top-queries --interval`` left out of its ranking, and why."""
     if not withheld:
@@ -910,8 +1002,11 @@ __all__ = [
     "render_object_details",
     "render_partition_candidates",
     "render_plan_findings",
+    "render_pooler_report",
     "render_rows",
+    "render_server_rates",
     "render_vacuum_progress",
+    "sampled_queries_text",
     "to_json",
     "withheld_because",
 ]

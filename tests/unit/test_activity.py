@@ -391,7 +391,9 @@ async def test_a_withheld_backend_in_a_transaction_is_listed_with_the_running_on
 
     query = executed_query(driver)
     assert f"WHEN a.query = '{HIDDEN_QUERY_TEXT}' THEN {IN_TRANSACTION}" in query
-    assert f"WITH {IN_TRANSACTION_CTE}" in query
+    # The CTE follows the blocking graph's, under one WITH RECURSIVE.
+    assert query.lstrip().startswith("WITH RECURSIVE")
+    assert IN_TRANSACTION_CTE in query
 
 
 @pytest.mark.asyncio

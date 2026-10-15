@@ -102,7 +102,9 @@ pg-debug model --schema public --proven-only
 pg-debug --json model | jq '.[] | select(.severity == "high")'
 
 pg-debug top-queries --sort-by mean_time --limit 5
-pg-debug top-queries --interval 10       # measure the next 10 seconds instead
+pg-debug top-queries --interval 10       # measure the next 10 seconds instead, flagging new and changed statements
+pg-debug server-rates --interval 10      # commits, I/O, temp files, WAL, checkpoints, slots: per second, now
+pg-debug pooler postgresql://admin@pooler:6432/pgbouncer   # are clients waiting in PgBouncer?
 
 pg-debug tune-queries "SELECT * FROM orders WHERE user_id = 42"
 pg-debug tune-workload --max-index-size-mb 500
@@ -144,6 +146,8 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `check-migration SQL` | a file path, inline SQL, or `-` for stdin; `--offline`, `--exit-code` |
 | `model` | `-s, --schema SCHEMA`, `-r, --rule RULES` (comma-separated, default `all`), `--proven-only`, `--min-rows N` (default 1000), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
 | `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10, ignored for cumulative `resources`), `-i, --interval SECONDS` |
+| `server-rates` | `-i, --interval SECONDS` (default 10) |
+| `pooler ADMIN_URL` | PgBouncer's admin console, `postgresql://user@host:6432/pgbouncer`; with `-d` too, the pool sizes are compared with the server's `max_connections` |
 | `tune-workload` | `--max-index-size-mb MB` (default 10000), `--method {dta,llm}` (default `dta`) |
 | `tune-queries QUERY...` | up to 10 queries, same options as `tune-workload` |
 
@@ -490,6 +494,21 @@ The tests run every command that keeps state through PgBouncer in transaction
 mode with prepared statements off and round robin on, which sends each
 transaction to the next backend.
 
+A pooler also hides saturation: a client waiting for one of the pool's
+server connections is not a backend yet, so `activity` cannot show it.
+`pg-debug pooler postgresql://admin@pooler:6432/pgbouncer` reads PgBouncer's
+admin console (`SHOW POOLS`, `SHOW STATS`, `SHOW DATABASES`, `SHOW CONFIG`)
+and reports clients waiting now and the oldest wait (`cl_waiting`,
+`maxwait`), the average wait over PgBouncer's last stats period, and, with
+`-d` as well, pools that can open more server connections than
+`max_connections` leaves for ordinary roles. The user has to be in
+`admin_users` or `stats_users`. The console is not PostgreSQL: it speaks only
+the simple query protocol and has no transactions, so it is read on a
+connection of its own, not through pg-debug's driver, and is sent nothing but
+those four `SHOW` commands and `SHOW VERSION`. Point `-d` at the server
+itself where you can: through a full pool, reading `max_connections` waits in
+line like every other client.
+
 SQL arguments accept `-` to read the statement from stdin:
 
 ```bash
@@ -573,7 +592,7 @@ context = QueryContext.from_file("pg-debug.toml")
 | `explain_query(sql, analyze=False, hypothetical_indexes=None)` | `ExplainPlanArtifact` |
 | `diagnose_query(sql, min_ratio=10)` | `list[PlanFinding]` — most severe first |
 | `diagnose_plan(plan, min_ratio=10)` | `list[PlanFinding]` — the same, over `EXPLAIN (ANALYZE, FORMAT JSON)` output; works in restricted mode. `pg_debug.diagnose_plan(plan)` does it with no database at all |
-| `list_activity(include_idle=False, min_duration_seconds=None, blocked_only=False)` | `list[dict]` — one per backend, with `blocked_by` and `in_transaction`; to a role without `pg_read_all_stats`, another role's backend in a transaction is listed with `query` `<insufficient privilege>` |
+| `list_activity(include_idle=False, min_duration_seconds=None, blocked_only=False)` | `list[dict]` — one per backend, root blockers first, with `blocked_by`, `blocking_total` and `in_transaction`; to a role without `pg_read_all_stats`, another role's backend in a transaction is listed with `query` `<insufficient privilege>` |
 | `lock_tree()` | `list[dict]` — one per root blocker, waiters nested under `blocking`; each node says `in_transaction` |
 | `vacuum_progress()` | `list[dict]` — one per running vacuum |
 | `explain_index_use(sql, index=None)` | `list[IndexUse]` — one per index on the query's tables, unused first, each with `findings` |
@@ -585,7 +604,9 @@ context = QueryContext.from_file("pg-debug.toml")
 | `review_configuration()` | `list[ConfigFinding]` — most severe first |
 | `suggest_partitions(sql=None, min_table_bytes=1GB, min_pruning_share=0.5, limit=200)` | `list[PartitionCandidate]` — recommended first, then by size |
 | `get_top_queries(sort_by="resources", limit=10, interval_seconds=None)` | `list[dict]` — one per query; a sample leaves out other roles' statements whose queryid is withheld |
-| `sample_top_queries(interval_seconds, sort_by="resources", limit=10)` | `QuerySample` — `queries`, and `withheld`, how many other roles' statements ran and could not be ranked |
+| `sample_top_queries(interval_seconds, sort_by="resources", limit=10)` | `QuerySample` — `queries`, each with `change` (`new`, `slower` or `faster`, a candidate, with the figures; or None), `withheld`, how many other roles' statements ran and could not be ranked, `statement_window`, and `changes_refused`, why nothing was judged changed |
+| `sample_server_rates(interval_seconds=10)` | `ServerRates` — `groups`, one `RateGroup` per view row (`measures`, `source`, `subject`, `interval_seconds`, `counters` with `delta` and `per_second`, or `refused` with the reason), and `idle_io` |
+| `inspect_pooler(admin_url)` | `PoolerReport` — `pools`, `stats`, `databases`, `config`, `server` (or `server_refused`), and `findings` of saturation, most severe first |
 | `statistics_access()` | `StatisticsAccess` — `role`, `reads_all_stats`, `member`, `remedy` |
 | `withheld_backends()` | `list[dict]` — `pid`, `datname`, `usename`, `application_name`, `in_transaction`, `xmin_age`, `locks`, `blocking` |
 | `analyze_workload_indexes(...)` / `analyze_query_indexes(queries, ...)` | `dict` with `summary`, `recommendations`, `query_impact` |
@@ -827,7 +848,7 @@ is the same for coding agents.
 | `index/` | `tune-workload` and `tune-queries`: the search in `base.py`, the `dta` and `llm` methods, and the report. |
 | `index_use/` | `index-use`: the query's predicates, the catalog it compares them with, and the verdict for each index. |
 | `model/`, `migration/`, `partition/` | `model`, `check-migration` and `partitions`. |
-| `activity.py`, `configuration.py`, `schema.py`, `statistics.py`, `top_queries.py` | Features that fit in one file. |
+| `activity.py`, `configuration.py`, `pooler.py`, `schema.py`, `server_rates.py`, `statistics.py`, `top_queries.py` | Features that fit in one file. |
 | `baseline.py` | `--baseline` and `--save-baseline`: the identity each finding is known by, and the file that records them. |
 
 A feature is one module until it needs a second file. `tests/unit/` mirrors

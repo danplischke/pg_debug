@@ -80,7 +80,14 @@ PostgreSQL showed the connecting role: `statistics_access()` says whether it is
 shown everything and how it could be; `withheld_backends()` gives
 `in_transaction`, `locks` and `blocking` for each backend it is not; and
 `sample_top_queries(interval_seconds, ...)` returns the ranking with
-`withheld`, how many other roles' statements ran and could not be ranked.
+`withheld`, how many other roles' statements ran and could not be ranked,
+each query's `change` (`new`, `slower`, `faster`: candidates) and
+`changes_refused` when nothing could be judged.
+`sample_server_rates(interval_seconds=10)` returns `ServerRates`, whose
+`groups` each carry `counters` with `delta` and `per_second`, or `refused`
+with the reason; `rates.group("database")` picks one. `inspect_pooler(admin_url)`
+returns `PoolerReport` with PgBouncer's `pools`, `stats`, `config` and the
+saturation `findings`.
 `counting_windows()` says since when the table, checkpoint and
 `pg_stat_statements` counters have counted; relay it with any cumulative
 figure, since a crash or a reset starts them again.

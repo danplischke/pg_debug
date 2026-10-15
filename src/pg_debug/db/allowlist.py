@@ -512,6 +512,9 @@ ALLOWED_FUNCTIONS: set[str] = {
     "pg_last_wal_receive_lsn",
     "pg_last_wal_replay_lsn",
     "pg_last_xact_replay_timestamp",
+    # WAL position: reads where WAL is, and subtracts two positions
+    "pg_current_wal_lsn",
+    "pg_wal_lsn_diff",
     # Hypopg functions
     "hypopg",
     "hypopg_create_index",

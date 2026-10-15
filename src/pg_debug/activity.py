@@ -70,6 +70,45 @@ NOT_IDLE = f"""
 """
 
 
+#: Who waits on whom, read once for every backend, and everything beneath each
+#: blocker: the ones waiting on it, the ones waiting on those, and so on. UNION
+#: rather than UNION ALL ends the walk at a cycle, which a deadlock is until the
+#: server breaks it. The caller writes ``WITH RECURSIVE`` before these.
+BLOCKING_CTES = """
+    waits AS (
+        SELECT w.pid AS waiter, unnest(pg_blocking_pids(w.pid)) AS blocker
+        FROM pg_stat_activity w
+    ),
+    beneath(root, waiter) AS (
+        SELECT blocker, waiter FROM waits
+        UNION
+        SELECT b.root, w.waiter FROM beneath b JOIN waits w ON w.blocker = b.waiter
+    )
+"""
+
+
+def culprits_first(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Backends ordered culprits first: the root blockers, then blockers that wait themselves, then waiters, then the rest.
+
+    A root blocker waits on nothing and blocks others, and ending it frees
+    them; a waiter is a victim, and ending it frees nothing. Blockers are
+    ordered by how many backends wait on them, directly or through others
+    (``blocking_total``); within each kind, the order the rows came in is
+    kept.
+    """
+
+    def rank(row: dict[str, Any]) -> tuple[int, int]:
+        blocking = row.get("blocking_total") or 0
+        waiting = bool(row.get("blocked_by"))
+        if blocking and not waiting:
+            return (0, -blocking)
+        if blocking:
+            return (1, -blocking)
+        return (2 if waiting else 3, 0)
+
+    return sorted(rows, key=rank)
+
+
 class ActivityInspector:
     """Reads pg_stat_activity and the vacuum progress view."""
 
@@ -93,9 +132,15 @@ class ActivityInspector:
 
         Returns:
             One dict per backend. ``blocked_by`` holds the pids blocking it
-            (empty when it is not blocked), the ``*_seconds`` fields give the
-            age of the current state, query and transaction, and
-            ``in_transaction`` says whether it is in one.
+            (empty when it is not blocked), ``blocking_total`` how many
+            backends wait on it, directly or behind others that do, the
+            ``*_seconds`` fields give the age of the current state, query and
+            transaction, and ``in_transaction`` says whether it is in one.
+            Culprits come first: the root blockers (blocking others, waiting
+            on none), the one blocking the most first, then blockers that
+            wait themselves, then the waiters, then the rest, longest in its
+            state first. ``blocking_total`` counts every backend on the
+            server, listed or not.
 
         Note:
             Without pg_read_all_stats, which pg_monitor includes, PostgreSQL
@@ -119,7 +164,8 @@ class ActivityInspector:
             params.append(min_duration_seconds)
 
         query = f"""
-            WITH {IN_TRANSACTION_CTE}
+            WITH RECURSIVE {BLOCKING_CTES},
+            {IN_TRANSACTION_CTE}
             SELECT
                 a.pid,
                 a.datname,
@@ -130,7 +176,8 @@ class ActivityInspector:
                 a.state,
                 a.wait_event_type,
                 a.wait_event,
-                pg_blocking_pids(a.pid) AS blocked_by,
+                ARRAY(SELECT w.blocker FROM waits w WHERE w.waiter = a.pid ORDER BY w.blocker) AS blocked_by,
+                (SELECT count(DISTINCT b.waiter) FROM beneath b WHERE b.root = a.pid AND b.waiter <> a.pid)::int AS blocking_total,
                 EXTRACT(EPOCH FROM clock_timestamp() - a.state_change)::float8 AS state_seconds,
                 EXTRACT(EPOCH FROM clock_timestamp() - a.query_start)::float8 AS query_seconds,
                 EXTRACT(EPOCH FROM clock_timestamp() - a.xact_start)::float8 AS transaction_seconds,
@@ -145,7 +192,7 @@ class ActivityInspector:
             """
 
         rows = await SafeSqlDriver.execute_param_query(self.sql_driver, query, params)
-        return [row.cells for row in rows] if rows else []
+        return culprits_first([row.cells for row in rows] if rows else [])
 
     async def blocked_backends(self) -> list[dict[str, Any]]:
         """List only the backends waiting on a lock held by another backend.

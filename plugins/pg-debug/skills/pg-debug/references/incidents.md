@@ -17,7 +17,11 @@ pg-debug vacuum-progress             # is that vacuum going to finish?
 ```
 
 `activity` hides idle backends by default and excludes its own connection.
-Each row carries `blocked_by` — the pids holding the lock it is waiting for.
+Each row carries `blocked_by` — the pids holding the lock it is waiting for —
+and `blocking_total`, how many backends wait on it directly or behind others
+that do. Culprits come first: root blockers (blocking, waiting on nothing),
+the one blocking the most first, then blockers that wait themselves, then
+the waiters, who are victims: ending one frees nothing.
 
 When backends are waiting on each other, `locks` does the tracing:
 

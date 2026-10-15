@@ -17,8 +17,11 @@ from .db.statements import PG_STAT_STATEMENTS
 from .db.statements import THIS_DATABASE
 from .db.statements import StatementStatistics
 from .db.statements import locate_pg_stat_statements
+from .db.window import CountingWindow
+from .db.window import statement_window
 from .errors import ExtensionRequiredError
 from .errors import InvalidArgumentError
+from .severity import Confidence
 
 logger = logging.getLogger(__name__)
 
@@ -56,21 +59,148 @@ _WITHHELD_IDENTITY = (
 )
 
 
+#: How far a statement's mean time during the sample has to be from its mean
+#: before it, as a factor either way, to be called changed.
+DEFAULT_CHANGE_RATIO = 3.0
+
+#: How many times longer than the sample a statement's counters must have been
+#: counting before it, for its mean before the sample to be a history the
+#: sample can be compared with, and for one missing from it to be new.
+MIN_WINDOW_FACTOR = 10.0
+
+
+@dataclass(frozen=True)
+class ChangeRule:
+    """When a sampled statement is called changed rather than merely large.
+
+    A statement that ranks high in a sample may always have; what is worth
+    knowing first is the one that is new, or whose mean time moved. Both are
+    inferred: from comparing the sample with the statement's own record before
+    it, which is only a history when it is much longer than the sample. They
+    are candidates; :meth:`explain`, or ``diagnose`` on the statement, confirm
+    one.
+
+    Attributes:
+        sample_seconds: How long the sample was.
+        window: How long pg_stat_statements had counted at the second snapshot.
+        ratio: How far the mean has to move, as a factor either way.
+        min_window_factor: How many samples long the record before the sample
+            has to be.
+    """
+
+    sample_seconds: float
+    window: CountingWindow
+    ratio: float = DEFAULT_CHANGE_RATIO
+    min_window_factor: float = MIN_WINDOW_FACTOR
+
+    @property
+    def needed_seconds(self) -> float:
+        return self.sample_seconds * self.min_window_factor
+
+    def refusal(self) -> str | None:
+        """Why no statement in the sample can be judged, or None when they can."""
+        seconds = self.window.seconds
+        if seconds is None:
+            return (
+                "Whether a statement is new or changed is not judged: pg_stat_statements before 1.9 does not record "
+                "when it was last reset, so how long the record the sample is compared with is cannot be told."
+            )
+        before = seconds - self.sample_seconds
+        if before < self.needed_seconds:
+            return (
+                f"Whether a statement is new or changed is not judged: pg_stat_statements had counted for {max(before, 0):,.0f}s "
+                f"before the sample, and a record {self.min_window_factor:g} times the {self.sample_seconds:g}s sample "
+                f"({self.needed_seconds:,.0f}s) is needed to compare it with."
+            )
+        return None
+
+    def judge(self, row: dict[str, Any], baseline: dict[str, Any] | None, delta: dict[str, Any], reset: bool) -> dict[str, Any] | None:
+        """Whether one sampled statement is new or changed, with the figures; None when neither.
+
+        Args:
+            row: The statement in the second snapshot.
+            baseline: The statement in the first, None when it was not there.
+            delta: Its counters over the sample.
+            reset: Whether its counters went backwards, so that it has no
+                record before the sample to compare with.
+        """
+        if reset:
+            return {"kind": None, "refused": "its counters started again during the sample, so it has no record before it to compare with"}
+        if baseline is None:
+            note = "not in pg_stat_statements before the sample"
+            if self.window.evicted:
+                note += (
+                    f"; pg_stat_statements has evicted statements {self.window.evicted:,} times since its reset, "
+                    "so it may have run before and been evicted"
+                )
+            return {"kind": "new", "confidence": Confidence.CANDIDATE.value, "reason": note}
+
+        since = row.get("stats_since")
+        if since is not None:
+            # 1.11 dates each entry: one evicted and recorded again, or reset
+            # alone, has a record shorter than the extension's window.
+            counted = (self.window.now - since).total_seconds() - self.sample_seconds
+            if counted < self.needed_seconds:
+                return {
+                    "kind": None,
+                    "refused": (
+                        f"its record before the sample is {max(counted, 0):,.0f}s long, under the {self.needed_seconds:,.0f}s "
+                        "needed to compare the sample with"
+                    ),
+                }
+
+        calls = baseline.get("calls") or 0
+        if calls <= 0 or not delta.get("calls"):
+            return None
+        before_mean = (baseline.get("total_exec_time") or 0) / calls
+        now_mean = delta["mean_exec_time"]
+        if before_mean <= 0 or now_mean <= 0:
+            return None
+        factor = now_mean / before_mean
+        if 1 / self.ratio < factor < self.ratio:
+            return None
+        kind = "slower" if factor > 1 else "faster"
+        return {
+            "kind": kind,
+            "confidence": Confidence.CANDIDATE.value,
+            "ratio": factor,
+            "sample_mean_exec_time": now_mean,
+            "sample_calls": delta["calls"],
+            "previous_mean_exec_time": before_mean,
+            "previous_calls": calls,
+            "reason": (
+                f"{now_mean:,.2f}ms a call over {delta['calls']:,} call(s) in the sample, against {before_mean:,.2f}ms "
+                f"over its {calls:,} call(s) before it"
+            ),
+        }
+
+
 @dataclass(frozen=True)
 class QuerySample:
     """Query activity measured over an interval, and what the measurement had to leave out.
 
     Attributes:
         queries: The ranking, as :meth:`TopQueriesCalc.sample` returns it.
+            Each carries ``change``: None, or a dict whose ``kind`` is
+            ``new``, ``slower`` or ``faster`` (a candidate, with the figures),
+            or None with ``refused`` saying why that statement could not be
+            judged.
         withheld: How many of other roles' statements ran during the interval
             and are not in ``queries``: pg_stat_statements withholds their
             queryid and text from a role without pg_read_all_stats, so their
             counters cannot be followed from one snapshot to the next. 0 for a
             role shown everything.
+        statement_window: How long pg_stat_statements had counted at the
+            second snapshot (:meth:`CountingWindow.to_dict`).
+        changes_refused: Why no statement was judged new or changed: the
+            record before the sample is unknown, or not much longer than the
+            sample. None when they were judged.
     """
 
     queries: list[dict[str, Any]]
     withheld: int = 0
+    statement_window: dict[str, Any] | None = None
+    changes_refused: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -165,12 +295,21 @@ class TopQueriesCalc:
         before = await self._counter_snapshot(stats)
         await asyncio.sleep(interval_seconds)
         after = await self._counter_snapshot(stats)
+        window = await self._statement_window(stats)
 
-        deltas = self._diff_snapshots(self._by_statement(before), self._by_statement(after))
+        rule = ChangeRule(sample_seconds=interval_seconds, window=window)
+        refused = rule.refusal()
+        deltas = self._diff_snapshots(self._by_statement(before), self._by_statement(after), rule=None if refused else rule)
         return QuerySample(
             queries=self._rank(deltas, sort_by=sort_by, limit=limit),
             withheld=self._withheld_that_ran(before, after),
+            statement_window=window.to_dict(),
+            changes_refused=refused,
         )
+
+    async def _statement_window(self, stats: StatementStatistics) -> CountingWindow:
+        """How long pg_stat_statements has counted: the record a sample is compared with."""
+        return await statement_window(self.sql_driver, stats)
 
     @staticmethod
     def _by_statement(rows: list[dict[str, Any]]) -> dict[Any, dict[str, Any]]:
@@ -214,6 +353,7 @@ class TopQueriesCalc:
                 userid,
                 dbid,
                 {"toplevel" if stats.has_toplevel else "NULL AS toplevel"},
+                {"stats_since" if stats.has_stats_since else "NULL::timestamptz AS stats_since"},
                 query,
                 calls,
                 {stats.total_time} AS total_exec_time,
@@ -243,12 +383,19 @@ class TopQueriesCalc:
         return text.upper().rstrip(";").split(" ", 1)[0] in _TRANSACTION_CONTROL
 
     @staticmethod
-    def _diff_snapshots(before: dict[Any, dict[str, Any]], after: dict[Any, dict[str, Any]]) -> list[dict[str, Any]]:
+    def _diff_snapshots(
+        before: dict[Any, dict[str, Any]],
+        after: dict[Any, dict[str, Any]],
+        rule: ChangeRule | None = None,
+    ) -> list[dict[str, Any]]:
         """Subtract two snapshots, keeping only queries that ran in between.
 
         The snapshots are keyed by statement, as :meth:`_by_statement` keys
         them: a statement whose queryid is withheld is not one statement in
         either, has no delta, and is counted by :meth:`_withheld_that_ran`.
+
+        Each delta carries ``change``, as :meth:`ChangeRule.judge` judges it
+        when a rule is given, and None otherwise.
         """
         counters = ("calls", "total_exec_time", "rows", "shared_blks_hit", "shared_blks_read", "shared_blks_dirtied", "wal_bytes")
         deltas: list[dict[str, Any]] = []
@@ -264,9 +411,11 @@ class TopQueriesCalc:
             # A query missing from the first snapshot is new; one whose counters
             # went backwards means pg_stat_statements was reset or the entry was
             # evicted and reused. Both are measured from zero.
+            reset = False
             if baseline is not None and (row["calls"] or 0) < (baseline["calls"] or 0):
                 logger.debug("pg_stat_statements counters went backwards for %s; treating the entry as new", key)
                 baseline = None
+                reset = True
 
             delta = {"query": row["query"], "queryid": row["queryid"]}
             for counter in counters:
@@ -278,6 +427,7 @@ class TopQueriesCalc:
                 continue
 
             delta["mean_exec_time"] = delta["total_exec_time"] / delta["calls"] if delta["calls"] else 0.0
+            delta["change"] = rule.judge(row, baseline, delta, reset) if rule is not None else None
             deltas.append(delta)
 
         return deltas

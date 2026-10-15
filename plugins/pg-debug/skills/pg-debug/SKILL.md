@@ -108,6 +108,8 @@ and answering the question.
 | The database is stuck. Who is blocking whom? | `pg-debug activity --blocked`, `locks`, `vacuum-progress` | [incidents.md](references/incidents.md) |
 | Is the database healthy? | `pg-debug health` | [health.md](references/health.md) |
 | What is the database spending its time on? | `pg-debug top-queries --interval 10` | [health.md](references/health.md) |
+| What is the server doing per second right now? (commits, I/O, temp files, WAL, checkpoints, slot growth) | `pg-debug server-rates --interval 10` | [health.md](references/health.md) |
+| Are clients waiting in PgBouncer? Is the pool too small? | `pg-debug pooler postgresql://user@host:6432/pgbouncer` | [platforms.md](references/platforms.md) |
 | Are the server's settings right? | `pg-debug config` | [health.md](references/health.md) |
 | Is the schema built well? | `pg-debug model` | [schema.md](references/schema.md) |
 | Is this migration safe to run? | `pg-debug check-migration <file>` | [schema.md](references/schema.md) |
