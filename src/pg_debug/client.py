@@ -20,6 +20,7 @@ from .db import check_hypopg_installation_status
 from .db import obfuscate_password
 from .db import privileges
 from .db.driver import check_statement_timeout
+from .db.extensions import hypopg_unobtainable
 from .db.privileges import StatisticsAccess
 from .db.statements import locate_pg_stat_statements
 from .db.window import checkpoint_window
@@ -33,9 +34,11 @@ from .health import DatabaseHealthTool
 from .health import HealthCheckResult
 from .health import HealthType
 from .health.checks.index import MIN_WINDOW_DAYS
+from .index.base import DEFAULT_MAX_REGRESSION_FACTOR
 from .index.base import MAX_NUM_INDEX_TUNING_QUERIES
 from .index.base import IndexTuningBase
 from .index.dta import DatabaseTuningAdvisor
+from .index.heuristic import StatisticsIndexAdvisor
 from .index.presentation import TextPresentation
 from .index_use import IndexUse
 from .index_use import IndexUseAnalyzer
@@ -876,6 +879,7 @@ class PgDebug:
         max_index_size_mb: int = 10000,
         method: TuningMethod = "dta",
         llm_model: str | None = None,
+        max_regression_factor: float = DEFAULT_MAX_REGRESSION_FACTOR,
     ) -> dict[str, Any]:
         """Recommend indexes for the workload recorded by pg_stat_statements.
 
@@ -886,18 +890,27 @@ class PgDebug:
                 requires the ``llm`` extra.
             llm_model: Model to use for the ``llm`` method, overriding the
                 client's own setting for this call.
+            max_regression_factor: How far the recommended set may raise any
+                one query's planner cost over its cost without it, as a
+                fraction: the default, 0.1, refuses an index that makes any
+                query cost more than 1.1 times what it did.
 
         Returns:
             A dict with ``summary``, ``recommendations`` and ``query_impact``.
             When nothing is worth recommending, ``recommendations`` says so.
+            Either way ``workload`` says where the queries came from and the
+            window pg_stat_statements counted them in, and
+            ``regression_check``, ``consolidations`` and
+            ``refused_candidates`` what was checked and refused.
 
         Raises:
-            InvalidArgumentError: If ``method`` is not ``dta`` or ``llm``.
+            InvalidArgumentError: If ``method`` is not ``dta`` or ``llm``, or
+                ``max_regression_factor`` is negative.
             ExtensionRequiredError: If HypoPG is not installed.
             IndexTuningError: If the tables have never been analyzed, none of
                 the workload could be analyzed, or the analysis failed.
         """
-        presentation = await self._index_tuning_presentation(method, llm_model)
+        presentation = await self._index_tuning_presentation(method, llm_model, max_regression_factor)
         return await presentation.analyze_workload(max_index_size_mb=max_index_size_mb)
 
     async def analyze_query_indexes(
@@ -906,6 +919,7 @@ class PgDebug:
         max_index_size_mb: int = 10000,
         method: TuningMethod = "dta",
         llm_model: str | None = None,
+        max_regression_factor: float = DEFAULT_MAX_REGRESSION_FACTOR,
     ) -> dict[str, Any]:
         """Recommend indexes for a specific list of queries.
 
@@ -916,10 +930,19 @@ class PgDebug:
             method: ``dta`` (default) or ``llm``.
             llm_model: Model to use for the ``llm`` method, overriding the
                 client's own setting for this call.
+            max_regression_factor: How far the recommended set may raise any
+                one query's planner cost over its cost without it, as a
+                fraction (0.1 is 10%).
 
         Returns:
-            A dict with ``summary``, ``recommendations`` and ``query_impact``.
-            When nothing is worth recommending, ``recommendations`` says so.
+            A dict with ``summary``, ``recommendations`` and ``query_impact``,
+            as :meth:`analyze_workload_indexes` returns. Where HypoPG can be
+            neither used nor created and ``method`` is ``dta``, instead a
+            dict with ``costed: False``, ``note``, ``hypopg`` (why it cannot
+            be had), ``candidates`` inferred from pg_stats, each graded and
+            marked ``candidate``, and ``refused``; and ``google_db_advisor``
+            where Cloud SQL's or AlloyDB's advisor is installed. None of
+            those was costed by the planner.
 
         Raises:
             InvalidArgumentError: If no queries are given, or too many.
@@ -936,23 +959,41 @@ class PgDebug:
             # opening a connection rather than failing deep in the analysis.
             raise InvalidArgumentError("The 'llm' method analyzes one query at a time. Pass a single query, or use the 'dta' method.")
 
-        presentation = await self._index_tuning_presentation(method, llm_model)
+        if max_regression_factor < 0:
+            raise InvalidArgumentError(f"max_regression_factor must be 0 or more, not {max_regression_factor}.")
+        if method == "dta":
+            # Where HypoPG cannot be had, statistics can still suggest
+            # candidates, marked as never costed, rather than only the hint.
+            driver = await self.sql_driver()
+            unobtainable = await hypopg_unobtainable(driver, platform=self._detect_platform)
+            if unobtainable is not None:
+                advice = await StatisticsIndexAdvisor(driver).advise(queries, unobtainable, await self._detect_platform())
+                return advice.to_dict()
+
+        presentation = await self._index_tuning_presentation(method, llm_model, max_regression_factor)
         return await presentation.analyze_queries(queries=queries, max_index_size_mb=max_index_size_mb)
 
-    async def _index_tuning_presentation(self, method: TuningMethod, llm_model: str | None = None) -> TextPresentation:
+    async def _index_tuning_presentation(
+        self,
+        method: TuningMethod,
+        llm_model: str | None = None,
+        max_regression_factor: float = DEFAULT_MAX_REGRESSION_FACTOR,
+    ) -> TextPresentation:
         if method not in ("dta", "llm"):
             raise InvalidArgumentError(f"Unknown index tuning method: {method}. Valid values are: dta, llm.")
+        if max_regression_factor < 0:
+            raise InvalidArgumentError(f"max_regression_factor must be 0 or more, not {max_regression_factor}.")
 
         driver = await self.sql_driver()
         advisor: IndexTuningBase
         if method == "dta":
-            advisor = DatabaseTuningAdvisor(driver)
+            advisor = DatabaseTuningAdvisor(driver, max_regression_factor=max_regression_factor)
         else:
             # Here rather than at the top: the method needs the llm extra, and
             # importing it without the extra raises MissingDependencyError.
             from .index.llm import LLMOptimizerTool
 
-            advisor = LLMOptimizerTool(driver, model=llm_model or self.llm_model)
+            advisor = LLMOptimizerTool(driver, model=llm_model or self.llm_model, max_regression_factor=max_regression_factor)
 
         # The advisor checks for HypoPG as well, but it does not know the
         # platform, which decides how to get HypoPG where it is missing.

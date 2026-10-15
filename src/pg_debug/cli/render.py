@@ -382,9 +382,14 @@ def render_object_details(details: Mapping[str, Any]) -> str:
 
 def render_index_recommendations(result: Mapping[str, Any]) -> str:
     """Render the output of the index tuning commands."""
+    if result.get("costed") is False:
+        return render_uncosted_index_candidates(result)
+
     recommendations = result.get("recommendations")
     if not recommendations or isinstance(recommendations, str):
-        return str(recommendations or "No index recommendations found.")
+        lines = [str(recommendations or "No index recommendations found.")]
+        lines += _index_tuning_checks(result)
+        return "\n".join(lines).rstrip()
 
     summary = result.get("summary", {})
     lines = [
@@ -402,6 +407,8 @@ def render_index_recommendations(result: Mapping[str, Any]) -> str:
         lines.append(f"   size: {rec.get('index_estimated_size', 'unknown')}")
         lines.append(f"   on its own:            {individual.get('improvement_multiple', '?')}x improvement")
         lines.append(f"   after earlier indexes: {progressive.get('improvement_multiple', '?')}x improvement")
+        if "queries_using_index" in rec:
+            lines.append(f"   used by:               {rec['queries_using_index']} of {rec.get('workload_queries', '?')} workload queries")
         if rec.get("warning"):
             lines.append(f"   warning: {rec['warning']}")
         lines.append("")
@@ -412,6 +419,111 @@ def render_index_recommendations(result: Mapping[str, Any]) -> str:
         lines.append(f"  cost {impact['base_cost']} -> {impact['new_cost']} ({impact['improvement_multiple']}x)")
         lines.append("")
 
+    lines += _index_tuning_checks(result)
+    return "\n".join(lines).rstrip()
+
+
+def _index_tuning_checks(result: Mapping[str, Any]) -> list[str]:
+    """What the advisor checked and refused, and what the workload was: the lines under the recommendations."""
+    lines: list[str] = []
+    for merge in result.get("consolidations") or []:
+        if merge.get("merged"):
+            lines.append(f"Merged {' and '.join(merge['indexes'])}")
+            lines.append(
+                f"  into {merge['into']}: no query costs more than {merge['worst_ratio']:.2f}x what it did with both, "
+                f"{humanize.naturalsize(merge['size_before_bytes'])} -> {humanize.naturalsize(merge['size_after_bytes'])}"
+            )
+        else:
+            lines.append(f"Not merged: {' and '.join(merge['indexes'])}")
+            lines.append(f"  {merge.get('reason')}")
+    if result.get("consolidations"):
+        lines.append("")
+
+    check = result.get("regression_check")
+    if check:
+        bound = 1 + float(check["max_regression_factor"])
+        worst = check.get("worst_query")
+        line = f"Regression bound: each of {check['queries_checked']} queries, re-costed with the final set, may cost {bound:.2f}x its baseline"
+        if worst and worst.get("ratio") is not None:
+            line += f"; the most any costs now is {worst['ratio']:.2f}x"
+        lines.append(line + ".")
+        for refused in check.get("refused") or []:
+            lines.append(f"  refused {refused['index']}:")
+            for query in refused.get("queries") or []:
+                lines.append(f"    {query['ratio']:.2f}x ({query['baseline_cost']} -> {query['cost_with_set']}): {query['query']}")
+        lines.append("")
+
+    refused_candidates = result.get("refused_candidates") or []
+    if refused_candidates:
+        lines.append(f"Refused candidates ({len(refused_candidates)}):")
+        for candidate in refused_candidates:
+            cost = f" cost {candidate['execution_cost']} (baseline {candidate['baseline_cost']})" if "execution_cost" in candidate else ""
+            lines.append(f"  {'; '.join(candidate['indexes']) or '(no indexes)'}:{cost}")
+            lines.append(f"    {candidate['reason']}")
+        lines.append("")
+
+    workload = result.get("workload")
+    if workload:
+        line = f"Workload: {workload.get('queries', '?')} queries from {_WORKLOAD_SOURCES.get(workload.get('source'), workload.get('source'))}"
+        if workload.get("source") == "query_store":
+            window = workload.get("counting_window") or {}
+            if window.get("counting_since"):
+                since = datetime.fromisoformat(window["counting_since"])
+                age = humanize.naturaldelta(timedelta(seconds=window.get("counting_seconds") or 0))
+                line += f", counted since {since:%Y-%m-%d %H:%M %Z} ({age})"
+                if window.get("statements_evicted"):
+                    line += f", with {window['statements_evicted']:,} evictions since"
+            else:
+                line += ", over a window pg_stat_statements did not record"
+        lines.append(line + ".")
+        if workload.get("note"):
+            lines.append(f"  {workload['note']}")
+    return lines
+
+
+_WORKLOAD_SOURCES = {
+    "query_store": "pg_stat_statements",
+    "query_list": "the queries given",
+    "sql_file": "the SQL file",
+    "args": "the workload given",
+}
+
+
+def render_uncosted_index_candidates(result: Mapping[str, Any]) -> str:
+    """Render the candidates inferred from statistics where HypoPG cannot be had."""
+    lines = [str(result.get("hypopg", "")).strip(), "", f"NOT COSTED BY THE PLANNER. {result.get('note', '')}", ""]
+    candidates = result.get("candidates") or []
+    if not candidates:
+        lines.append("No index candidates from the statistics.")
+        lines.append("")
+    for number, candidate in enumerate(candidates, start=1):
+        lines.append(f"{number}. [{candidate['severity']}] (candidate) {candidate['definition']}")
+        lines.append(f"   expected rows: {candidate['table_rows']:,} -> {candidate['expected_rows']:,}")
+        for step in candidate.get("steps") or []:
+            lines.append(
+                f"     {step['column']} {step['operator']}: n_distinct {step['n_distinct']}, null_frac {step['null_frac']}, "
+                f"about {step['rows_after']:,} rows left"
+            )
+        for note in candidate.get("notes") or []:
+            lines.append(f"   left out: {note}")
+        lines.append(f"   verify: {candidate['verify']}")
+        lines.append("")
+    refused = result.get("refused") or []
+    if refused:
+        lines.append(f"Examined and refused ({len(refused)}):")
+        for item in refused:
+            where = f"{item['table']}: " if item.get("table") else ""
+            lines.append(f"  {where}{item['reason']}")
+            lines.append(f"    query: {item['query']}")
+        lines.append("")
+    google = result.get("google_db_advisor")
+    if google:
+        lines.append("google_db_advisor:")
+        if google.get("error"):
+            lines.append(f"  {google['error']}")
+        for recommendation in google.get("recommendations") or []:
+            lines.append("  " + ", ".join(f"{key}: {value}" for key, value in recommendation.items()))
+        lines.append(f"  {google.get('note', '')}")
     return "\n".join(lines).rstrip()
 
 
@@ -911,6 +1023,7 @@ __all__ = [
     "render_partition_candidates",
     "render_plan_findings",
     "render_rows",
+    "render_uncosted_index_candidates",
     "render_vacuum_progress",
     "to_json",
     "withheld_because",

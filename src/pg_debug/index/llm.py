@@ -12,6 +12,7 @@ from ..errors import MissingDependencyError
 from ..parsing import TableAliasVisitor
 from ..plans.explain import ExplainPlanTool
 from ..plans.hypothetical import IndexDefinition
+from .base import DEFAULT_MAX_REGRESSION_FACTOR
 from .base import IndexRecommendation
 from .base import IndexTuningBase
 from .llm_settings import DEFAULT_LLM_MODEL
@@ -85,6 +86,7 @@ class LLMOptimizerTool(IndexTuningBase):
         max_no_progress_attempts: int = 5,
         pareto_alpha: float = 2.0,
         model: str | None = None,
+        max_regression_factor: float = DEFAULT_MAX_REGRESSION_FACTOR,
     ):
         """
         Args:
@@ -94,8 +96,10 @@ class LLMOptimizerTool(IndexTuningBase):
             pareto_alpha: How heavily index size counts against execution cost.
             model: Model to ask for candidate indexes. Defaults to
                 ``PG_DEBUG_LLM_MODEL``, then :data:`DEFAULT_LLM_MODEL`.
+            max_regression_factor: How far the recommended set may raise the
+                query's planner cost over its baseline, as a fraction.
         """
-        super().__init__(sql_driver)
+        super().__init__(sql_driver, max_regression_factor=max_regression_factor)
         self.sql_driver = sql_driver
         self.max_no_progress_attempts = max_no_progress_attempts
         self.pareto_alpha = pareto_alpha
@@ -155,6 +159,10 @@ class LLMOptimizerTool(IndexTuningBase):
         )
 
         best_config = original_config
+
+        # Every alternative evaluated, so the ones not chosen can be reported
+        # with their costs and why: (scored, what beat it then, error).
+        evaluated: list[tuple[ScoredIndexes | None, set[Index], float | None, str | None]] = []
 
         # Initialize attempt history for this run
         attempt_history: list[ScoredIndexes] = [original_config]
@@ -249,6 +257,8 @@ class LLMOptimizerTool(IndexTuningBase):
                     attempt_history.append(latest_config)
                     logger.info("Latest config: %s", latest_config)
 
+                    evaluated.append((latest_config, set(index_set), best_config.objective_score, None))
+
                     # If this is better than what we've seen so far, update our best
                     # Minimum 2% improvement required
                     if latest_config.objective_score < best_config.objective_score:
@@ -257,6 +267,7 @@ class LLMOptimizerTool(IndexTuningBase):
                 except Exception as e:
                     # We discard the alternative. We are seeing this happen due to invalid index definitions.
                     logger.error("Error evaluating alternative %d/%d: %s", i + 1, len(index_alternatives), str(e))
+                    evaluated.append((None, set(index_set), None, str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__))
 
             # Keep only the 5 best results in the attempt history
             attempt_history.sort(key=lambda x: x.objective_score)
@@ -280,9 +291,50 @@ class LLMOptimizerTool(IndexTuningBase):
         else:
             logger.info("No better index configuration found")
 
+        self._refused_candidates = self._describe_refused(evaluated, best_config, original_config)
+
         # Convert Index objects to IndexConfig objects for return
         best_index_config_set = {index.to_index_recommendation() for index in best_config.indexes}
         return (best_index_config_set, best_config.execution_cost)
+
+    @staticmethod
+    def _describe_refused(
+        evaluated: list[tuple[ScoredIndexes | None, set[Index], float | None, str | None]],
+        chosen: ScoredIndexes,
+        original: ScoredIndexes,
+    ) -> list[dict[str, Any]]:
+        """Each alternative the model proposed and this did not choose, with its costs and why.
+
+        The objective is ``log(cost) + alpha * log(size)``: lower is better,
+        and an alternative is chosen only when it beats the best so far. One
+        that did, and was later beaten, is reported as superseded.
+        """
+        refused: list[dict[str, Any]] = []
+        seen: set[frozenset[Index]] = set()
+        for scored, indexes, best_then, error in evaluated:
+            key = frozenset(indexes)
+            if (scored is not None and scored is chosen) or key in seen:
+                continue
+            seen.add(key)
+            entry: dict[str, Any] = {"indexes": sorted(index.to_index_definition().definition for index in indexes)}
+            if scored is None:
+                entry["reason"] = f"the planner could not cost it: {error}"
+                refused.append(entry)
+                continue
+            entry.update(
+                {
+                    "execution_cost": round(scored.execution_cost, 2),
+                    "baseline_cost": round(original.execution_cost, 2),
+                    "index_size_bytes": int(scored.index_size),
+                    "objective_score": round(scored.objective_score, 4),
+                }
+            )
+            if best_then is not None and scored.objective_score >= best_then:
+                entry["reason"] = f"its objective {scored.objective_score:.4f} did not beat the best so far, {best_then:.4f}"
+            else:
+                entry["reason"] = f"superseded by an alternative with objective {chosen.objective_score:.4f}"
+            refused.append(entry)
+        return refused
 
     async def _estimate_index_size_2(self, index_set: set[IndexDefinition], min_size_penalty: float = 1024 * 1024) -> float:
         """

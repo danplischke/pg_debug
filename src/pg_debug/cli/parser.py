@@ -15,6 +15,7 @@ from ..client import AccessMode
 from ..context import CONFIG_FILE_NAME
 from ..health import HealthType
 from ..health.checks.index import MIN_WINDOW_DAYS
+from ..index.base import DEFAULT_MAX_REGRESSION_FACTOR
 from ..index.base import MAX_NUM_INDEX_TUNING_QUERIES
 from ..index.llm_settings import DEFAULT_LLM_MODEL
 from ..model import DEFAULT_MIN_ROWS
@@ -541,5 +542,14 @@ def _add_tuning_arguments(parser: argparse.ArgumentParser) -> None:
         choices=["dta", "llm"],
         default="dta",
         help="dta (default) searches index combinations against the planner; llm asks a language model and needs the llm extra.",
+    )
+    parser.add_argument(
+        "--max-regression-factor",
+        type=float,
+        default=DEFAULT_MAX_REGRESSION_FACTOR,
+        help=(
+            "Refuse an index that raises any query's planner cost above (1 + this) times its cost without the "
+            f"recommended set (default: {DEFAULT_MAX_REGRESSION_FACTOR}, Azure's default; 0 refuses any rise)."
+        ),
     )
     add_context_arguments(parser)

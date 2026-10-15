@@ -41,7 +41,10 @@ def pg(pool):
 @pytest.fixture
 def hypopg_installed():
     """HypoPG present, so index tuning gets past the client's own check for it."""
-    with patch("pg_debug.client.check_hypopg_installation_status", AsyncMock(return_value=(True, ""))) as check:
+    with (
+        patch("pg_debug.client.check_hypopg_installation_status", AsyncMock(return_value=(True, ""))) as check,
+        patch("pg_debug.client.hypopg_unobtainable", AsyncMock(return_value=None)),
+    ):
         yield check
 
 

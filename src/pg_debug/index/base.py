@@ -1,9 +1,11 @@
 import json
 import logging
+import re
 import time
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Iterable
+from collections.abc import Iterator
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
@@ -22,7 +24,9 @@ from ..db import split_table_reference
 from ..db import table_identifier
 from ..db.statements import PG_STAT_STATEMENTS
 from ..db.statements import THIS_DATABASE
+from ..db.statements import StatementStatistics
 from ..db.statements import locate_pg_stat_statements
+from ..db.window import statement_window
 from ..errors import ExtensionRequiredError
 from ..errors import IndexTuningError
 from ..errors import InvalidArgumentError
@@ -32,6 +36,7 @@ from ..parsing import TableAliasVisitor
 from ..plans import ExplainPlanTool
 from ..plans.hypothetical import IndexDefinition
 from ..plans.tree import calculate_improvement_multiple
+from ..queries.hypopg import HYPOPG_RESET_SQL
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +67,39 @@ HIDDEN_QUERY_TEXT = "<insufficient privilege>"
 #: real improvement. Raise it for a service where writes dominate; 0 restores
 #: the previous behaviour of ignoring maintenance entirely.
 DEFAULT_WRITE_WEIGHT = 0.1
+
+#: How far the recommended set may raise any one query's planner cost, as a
+#: fraction of what the query cost before: 0.1 lets a query cost up to 1.1
+#: times its baseline. It is Azure's default for the same bound
+#: (``index_tuning.max_regression_factor``), and like Azure's it bounds the
+#: planner's cost, not the time a query takes.
+#:
+#: The bound is a judgment, not a measurement. The planner prunes paths whose
+#: costs lie within about 1% of each other, and a join search over many
+#: tables is not exhaustive, so a few percent either way is noise; a tenth is
+#: well above that and well below a plan that has really gone wrong. Set it
+#: to 0 to refuse any rise at all.
+DEFAULT_MAX_REGRESSION_FACTOR = 0.1
+
+#: Wider than this, a merged index is not proposed: the advisor's own
+#: candidates stop at three columns, and a merge should not build what the
+#: search itself would not.
+DEFAULT_MAX_INDEX_WIDTH = 3
+
+# Sizes of the hypothetical indexes created so far.
+#
+# This reads the hypopg() function rather than the hypopg_list_indexes view it
+# backs. HypoPG's extension script grants no privileges on its views, and a
+# view is private to its owner by default, so any role that did not create the
+# extension gets "permission denied for view hypopg_list_indexes". Functions
+# default to EXECUTE for PUBLIC, and hypopg() exposes both columns needed here.
+HYPOTHETICAL_INDEX_SIZES_SQL = "SELECT indexname AS index_name, hypopg_relation_size(indexrelid) AS index_size FROM hypopg();"
+
+#: HypoPG names a hypothetical index ``<oid>`` followed by its access method,
+#: its table and its columns, truncated to an identifier's 63 bytes, whatever
+#: name the CREATE INDEX statement gave it. Plans show that name.
+_HYPOTHETICAL_NAME = re.compile(r"^<\d+>(.*)$")
+_MAX_IDENTIFIER_BYTES = 63
 
 #: Relation kinds an index can be created on: ordinary tables, materialized
 #: views and partitioned tables. A view is not one of them — it has no storage
@@ -149,6 +187,9 @@ class IndexRecommendationAnalysis:
     #: What this index will be maintained for: the writes on its table that
     #: touch every index, and the share of updates currently avoiding them.
     write_load: dict[str, float] = field(default_factory=dict)
+    #: The workload queries whose plan, with the whole recommended set in
+    #: place, reads this index.
+    queries_using: list[str] = field(default_factory=list)
 
     @property
     def table(self) -> str:
@@ -200,6 +241,23 @@ class IndexTuningResult:
     recommendations: list[IndexRecommendationAnalysis] = field(default_factory=list)
     dta_traces: list[str] = field(default_factory=list)
 
+    #: The regression bound: the factor, how many queries it checked, the
+    #: worst ratio left, and each index it refused with the queries it
+    #: raised. None when nothing was recommended to check.
+    regression_check: dict[str, Any] | None = None
+    #: Pairs of recommended indexes sharing a leading column: merged into
+    #: one where the merged index served every query within the bound, and
+    #: refused with the figure where it did not.
+    consolidations: list[dict[str, Any]] = field(default_factory=list)
+    #: Candidates evaluated and not recommended, with their costs and why:
+    #: the ``llm`` method's alternatives, and any index no query's plan reads
+    #: once the rest of the set is in place.
+    refused_candidates: list[dict[str, Any]] = field(default_factory=list)
+    #: For a workload read from pg_stat_statements, how long it has been
+    #: counting: the window the sample was drawn from. None otherwise, or
+    #: when it could not be read.
+    workload_window: dict[str, Any] | None = None
+
 
 def candidate_str(indexes: Iterable[IndexDefinition] | Iterable[IndexRecommendation] | Iterable[IndexRecommendationAnalysis]) -> str:
     return ", ".join(f"{idx.table}({','.join(idx.columns)})" for idx in indexes) if indexes else "(no indexes)"
@@ -209,11 +267,22 @@ class IndexTuningBase(ABC):
     def __init__(
         self,
         sql_driver: SqlDriver,
+        max_regression_factor: float = DEFAULT_MAX_REGRESSION_FACTOR,
     ):
         """
         :param sql_driver: Database access
+        :param max_regression_factor: How far the recommended set may raise
+            any one query's planner cost above its cost without it, as a
+            fraction (0.1 is 10%). See DEFAULT_MAX_REGRESSION_FACTOR.
+
+        Raises:
+            InvalidArgumentError: If the factor is negative.
         """
+        if max_regression_factor < 0:
+            raise InvalidArgumentError(f"max_regression_factor must be 0 or more, not {max_regression_factor}.")
         self.sql_driver = sql_driver
+        self.max_regression_factor = max_regression_factor
+        self.max_index_width = DEFAULT_MAX_INDEX_WIDTH
 
         # Add memoization caches
         self.cost_cache: dict[frozenset[IndexDefinition], float] = {}
@@ -233,6 +302,15 @@ class IndexTuningBase(ABC):
         # Set when part of the workload could not be read; see
         # _describe_dropped_queries.
         self._workload_warning: str | None = None
+
+        # Where the workload was read from, when it came from
+        # pg_stat_statements, so its counting window can be reported.
+        self._statement_stats: StatementStatistics | None = None
+        # What _format_recommendations checked and refused on the way.
+        self._regression_check: dict[str, Any] | None = None
+        self._consolidations: list[dict[str, Any]] = []
+        # What the method evaluated and did not choose; see LLMOptimizerTool.
+        self._refused_candidates: list[dict[str, Any]] = []
 
     async def analyze_workload(
         self,
@@ -277,6 +355,10 @@ class IndexTuningBase(ABC):
         session_id = str(int(time.time()))
         self._analysis_start_time = time.time()
         self._dta_traces = []  # Reset traces at start of analysis
+        self._statement_stats = None
+        self._regression_check = None
+        self._consolidations = []
+        self._refused_candidates = []
 
         # Clear the caches at the beginning of each analysis
         self._size_estimate_cache = {}
@@ -354,6 +436,12 @@ class IndexTuningBase(ABC):
                     # Generate and evaluate index recommendations
                     recommendations: tuple[set[IndexRecommendation], float] = await self._generate_recommendations(query_weights)
                     session.recommendations = await self._format_recommendations(query_weights, recommendations)
+                    session.regression_check = self._regression_check
+                    session.consolidations = self._consolidations
+                    session.refused_candidates = self._refused_candidates
+
+                if session.workload_source == "query_store":
+                    session.workload_window = await self._workload_window()
 
         except PgDebugError:
             raise
@@ -571,6 +659,7 @@ class IndexTuningBase(ABC):
     async def _get_query_stats_direct(self, min_calls: int = 50, min_avg_time_ms: float = 5.0, limit: int = 100) -> list[dict[str, Any]]:
         """Direct implementation of query stats collection: this database's statements only."""
         stats = await locate_pg_stat_statements(self.sql_driver)
+        self._statement_stats = stats
         if stats is None:
             # Without it there is no workload to read, which an empty result
             # would report as nothing to recommend.
@@ -598,6 +687,25 @@ class IndexTuningBase(ABC):
             [min_calls, min_avg_time_ms, limit],
         )
         return [dict(row.cells) for row in result] if result else []
+
+    async def _workload_window(self) -> dict[str, Any] | None:
+        """How long pg_stat_statements had been counting when the workload was read from it.
+
+        HypoPG's costs are deterministic: the same queries, statistics and
+        index set plan to the same cost on every run. The workload is not. It
+        is the costliest statements recorded since the last reset, so another
+        run, after more traffic, a reset or an eviction, can tune for other
+        queries; the window says what this run's sample covered.
+        """
+        if self._statement_stats is None:
+            return None
+        try:
+            return (await statement_window(self.sql_driver, self._statement_stats)).to_dict()
+        except Exception as e:
+            # The recommendations stand without it; the reader is told the
+            # window is unknown rather than given none.
+            logger.debug("Could not read pg_stat_statements' counting window: %s", e)
+            return None
 
     async def write_load(self, table: str) -> dict[str, float]:
         """How many writes on this table every index has to be maintained for.
@@ -838,55 +946,331 @@ class IndexTuningBase(ABC):
         # The factor stands in for per-entry overhead and the default fillfactor.
         return int(width * max(entries, 1.0) * 2.0)
 
+    async def measure_index_sizes(self, indexes: list[IndexRecommendation]) -> None:
+        """Have HypoPG measure each index, and keep its numbers on the index and in the cache.
+
+        The creates and the measurement go in one transaction on purpose.
+        Hypothetical indexes live in the backend that created them, and
+        neither the connection pool nor a transaction pooler in front of the
+        server promises the next statement the same backend — measuring in a
+        second call can land on another and see no indexes at all, which
+        would silently make every candidate look free. Only the last
+        statement's results come back, so the size query goes last, and the
+        reset runs after it in the same transaction.
+        """
+        if not indexes:
+            return
+        create_and_measure = (
+            SafeSqlDriver.param_sql_to_query(
+                "SELECT hypopg_create_index({});" * len(indexes),
+                [idx.definition for idx in indexes],
+            )
+            + HYPOTHETICAL_INDEX_SIZES_SQL
+        )
+        result = await self.sql_driver.execute_query(cast(LiteralString, create_and_measure), cleanup=HYPOPG_RESET_SQL)
+        if result is None:
+            return
+        index_map = {r.cells["index_name"]: r.cells["index_size"] for r in result}
+        for idx in indexes:
+            if idx.name in index_map:
+                idx.estimated_size_bytes = index_map[idx.name]
+                # The planner's own number, so the objective function, the
+                # size budget and the reported size all use it instead of the
+                # pg_stats guess.
+                self.record_measured_index_size(idx.table, idx.columns, idx.estimated_size_bytes)
+
+    async def _query_costs(self, query_weights: list[tuple[str, SelectStmt, float]], indexes: Iterable[IndexRecommendation]) -> list[float]:
+        """Each query's own planner cost with these indexes, unweighted, in workload order."""
+        configuration = frozenset(idx.index_definition for idx in indexes)
+        return [self.extract_cost_from_json_plan(await self.get_explain_plan_with_indexes(query, configuration)) for query, _, _ in query_weights]
+
+    async def _index_size(self, index: IndexRecommendation) -> int:
+        """The index's size: HypoPG's measurement where there is one, measured now where not."""
+        key = self._size_cache_key(index.table, index.columns)
+        if key not in self._measured_size_cache:
+            try:
+                await self.measure_index_sizes([index])
+            except Exception as e:
+                logger.debug("Could not measure %s: %s", index.definition, e)
+        return await self._estimate_index_size(index.table, list(index.columns))
+
     async def _format_recommendations(
         self, query_weights: list[tuple[str, SelectStmt, float]], best_config: tuple[set[IndexRecommendation], float]
     ) -> list[IndexRecommendationAnalysis]:
-        """Format recommendations into a list of IndexRecommendation objects."""
-        # build final recommendations from best_config
-        recommendations: list[IndexRecommendationAnalysis] = []
-        total_size = 0
-        budget_bytes = self.budget_mb * 1024 * 1024
+        """Check the chosen set, then describe each index in it.
+
+        The search optimises the workload's total, which an improvement to one
+        query can carry past a regression in another. So before anything is
+        recommended, indexes that share a leading column are merged where one
+        index serves both (:meth:`_consolidate`), the size budget is applied,
+        and every query is costed again against the final set, refusing an
+        index that raises any query past the regression bound
+        (:meth:`_bound_regressions`).
+        """
+        budget_mb = getattr(self, "budget_mb", -1)
+        budget_bytes = budget_mb * 1024 * 1024 if budget_mb > 0 else -1
         individual_base_cost = await self._evaluate_configuration_cost(query_weights, frozenset()) or 1.0
+
+        # Most beneficial on its own first: the order to create them in, and
+        # the same order on every run, which a set's iteration order is not.
+        individual: dict[IndexRecommendation, float] = {}
+        for index in best_config[0]:
+            individual[index] = await self._evaluate_configuration_cost(query_weights, frozenset([index.index_definition]))
+        chosen = sorted(best_config[0], key=lambda idx: (individual[idx], idx.table, idx.columns))
+
+        chosen = await self._consolidate(query_weights, chosen)
+
+        within_budget: list[IndexRecommendation] = []
+        total_size = 0
+        for index in chosen:
+            size = await self._index_size(index)
+            if budget_bytes < 0 or total_size + size <= budget_bytes:
+                within_budget.append(index)
+                total_size += size
+            else:
+                self.dta_trace(f"Skipping index: {candidate_str([index])} because it exceeds budget")
+
+        final = await self._bound_regressions(query_weights, within_budget) if within_budget else []
+
+        queries_using = await self._queries_using(query_weights, final)
+        final = await self._drop_unread(query_weights, final, queries_using, individual_base_cost)
+
+        recommendations: list[IndexRecommendationAnalysis] = []
         progressive_base_cost = individual_base_cost
         indexes_so_far: list[IndexRecommendation] = []
-        for index_config in best_config[0]:
-            indexes_so_far.append(index_config)
-            # Calculate the cost with only this index
-            progressive_cost = await self._evaluate_configuration_cost(
-                query_weights,
-                frozenset(idx.index_definition for idx in indexes_so_far),  # Indexes so far
-            )
-            individual_cost = await self._evaluate_configuration_cost(
-                query_weights,
-                frozenset([index_config.index_definition]),  # Only this index
-            )
-
-            size = await self._estimate_index_size(index_config.table, list(index_config.columns))
-            if budget_bytes < 0 or total_size + size <= budget_bytes:
-                self.dta_trace(f"Adding index: {candidate_str([index_config])}")
-                rec = IndexRecommendationAnalysis(
+        for index in final:
+            indexes_so_far.append(index)
+            progressive_cost = await self._evaluate_configuration_cost(query_weights, frozenset(idx.index_definition for idx in indexes_so_far))
+            individual_cost = await self._evaluate_configuration_cost(query_weights, frozenset([index.index_definition]))
+            self.dta_trace(f"Adding index: {candidate_str([index])}")
+            recommendations.append(
+                IndexRecommendationAnalysis(
                     index_recommendation=IndexRecommendation(
-                        table=index_config.table,
-                        columns=index_config.columns,
-                        using=index_config.using,
-                        potential_problematic_reason=index_config.potential_problematic_reason,
-                        estimated_size_bytes=size,
+                        table=index.table,
+                        columns=index.columns,
+                        using=index.using,
+                        potential_problematic_reason=index.potential_problematic_reason,
+                        estimated_size_bytes=await self._index_size(index),
                     ),
                     progressive_base_cost=progressive_base_cost,
                     progressive_recommendation_cost=progressive_cost,
                     individual_base_cost=individual_base_cost,
                     individual_recommendation_cost=individual_cost,
                     queries=[q for q, _, _ in query_weights],
-                    definition=index_config.definition,
-                    write_load=await self.write_load(index_config.table),
+                    definition=index.definition,
+                    write_load=await self.write_load(index.table),
+                    queries_using=queries_using.get(index, []),
                 )
-                progressive_base_cost = progressive_cost
-                recommendations.append(rec)
-                total_size += size
-            else:
-                self.dta_trace(f"Skipping index: {candidate_str([index_config])} because it exceeds budget")
+            )
+            progressive_base_cost = progressive_cost
 
         return recommendations
+
+    async def _bound_regressions(
+        self, query_weights: list[tuple[str, SelectStmt, float]], indexes: list[IndexRecommendation]
+    ) -> list[IndexRecommendation]:
+        """Refuse indexes until no query costs more than the bound allows over its baseline.
+
+        Every query is planned again with the whole set in place, and its
+        cost compared with its cost without any of it. While one exceeds
+        ``1 + max_regression_factor`` times its baseline, the index whose
+        removal leaves the fewest queries over the bound (and then the lowest
+        workload cost) is refused, with the queries it was in the set for.
+        Removing them all restores every baseline, so this ends.
+
+        Records what it checked in ``self._regression_check``.
+        """
+        limit = 1.0 + self.max_regression_factor
+        baseline = await self._query_costs(query_weights, [])
+        kept = list(indexes)
+        refused: list[dict[str, Any]] = []
+
+        while kept:
+            costs = await self._query_costs(query_weights, kept)
+            regressed = _over_bound(baseline, costs, limit)
+            if not regressed:
+                break
+            best: tuple[tuple[int, float], IndexRecommendation] | None = None
+            for index in kept:
+                rest = [idx for idx in kept if idx != index]
+                rest_costs = await self._query_costs(query_weights, rest)
+                rest_total = await self._evaluate_configuration_cost(query_weights, frozenset(i.index_definition for i in rest))
+                score = (len(_over_bound(baseline, rest_costs, limit)), rest_total)
+                if best is None or score < best[0]:
+                    best = (score, index)
+            assert best is not None
+            dropped = best[1]
+            kept.remove(dropped)
+            self.dta_trace(
+                f"Refusing index: {candidate_str([dropped])}: with it, {len(regressed)} queries cost more than {limit:.2f} times their baseline"
+            )
+            refused.append(
+                {
+                    "index": dropped.definition,
+                    "table": dropped.table,
+                    "columns": list(dropped.columns),
+                    "queries": [_cost_evidence(query_weights[i][0], baseline[i], costs[i]) for i in regressed],
+                }
+            )
+
+        final_costs = await self._query_costs(query_weights, kept)
+        ratio, at = _worst_ratio(baseline, final_costs)
+        self._regression_check = {
+            "max_regression_factor": self.max_regression_factor,
+            "queries_checked": len(query_weights),
+            "worst_query": _cost_evidence(query_weights[at][0], baseline[at], final_costs[at]) if at is not None else None,
+            "refused": refused,
+        }
+        return kept
+
+    async def _consolidate(self, query_weights: list[tuple[str, SelectStmt, float]], indexes: list[IndexRecommendation]) -> list[IndexRecommendation]:
+        """Merge two recommended indexes that share a leading column where one index serves both.
+
+        Index merging, after Chaudhuri and Narasayya (1999): for two btree
+        indexes on one table whose first column is the same, the merged index
+        is the wider one when one's columns lead the other's, and otherwise
+        one's columns followed by the other's remaining ones. It replaces both
+        if no query then costs more than ``1 + max_regression_factor`` times
+        what it cost with the two; the merged index is one index to store and
+        maintain instead of two. A pair that fails is kept, and the refusal
+        recorded with the query and the figure it failed on.
+
+        Records each merge and each refusal in ``self._consolidations``.
+        """
+        limit = 1.0 + self.max_regression_factor
+        kept = list(indexes)
+        tried: set[frozenset[IndexDefinition]] = set()
+        merged_one = True
+        while merged_one:
+            merged_one = False
+            reference: list[float] | None = None
+            for first, second in _pairs_sharing_a_leading_column(kept):
+                pair = frozenset({first.index_definition, second.index_definition})
+                if pair in tried:
+                    continue
+                tried.add(pair)
+                if reference is None:
+                    reference = await self._query_costs(query_weights, kept)
+
+                passed: tuple[float, list[IndexRecommendation], IndexRecommendation, float] | None = None
+                failed: dict[str, Any] = {}
+                for columns in _merged_columns(first.columns, second.columns):
+                    if len(columns) > self.max_index_width:
+                        failed.setdefault(
+                            "reason", f"the merged index would have {len(columns)} columns, more than the {self.max_index_width} allowed"
+                        )
+                        continue
+                    merged = (
+                        first
+                        if columns == first.columns
+                        else second
+                        if columns == second.columns
+                        else IndexRecommendation(first.table, columns, first.using)
+                    )
+                    trial = [idx for idx in kept if idx not in (first, second)] + [merged]
+                    costs = await self._query_costs(query_weights, trial)
+                    ratio, worst = _worst_ratio(reference, costs)
+                    if ratio <= limit:
+                        total = await self._evaluate_configuration_cost(query_weights, frozenset(i.index_definition for i in trial))
+                        if passed is None or total < passed[0]:
+                            passed = (total, trial, merged, ratio)
+                    elif worst is not None and ("ratio" not in failed or ratio < failed["ratio"]):
+                        failed.update(
+                            {
+                                "tried": merged.definition,
+                                "ratio": round(ratio, 3),
+                                "query": query_weights[worst][0],
+                                "cost_with_both": round(reference[worst], 2),
+                                "cost_with_merged": round(costs[worst], 2),
+                                "reason": (
+                                    f"with {merged.definition} in place of both, a query costs {ratio:.2f} times what it costs "
+                                    f"with the two, over the bound of {limit:.2f}"
+                                ),
+                            }
+                        )
+
+                both = [first.definition, second.definition]
+                if passed is None:
+                    self.dta_trace(f"Not merging {candidate_str([first, second])}: {failed.get('reason')}")
+                    self._consolidations.append({"merged": False, "indexes": both, **failed})
+                    continue
+
+                _, trial, merged, ratio = passed
+                size_before = await self._index_size(first) + await self._index_size(second)
+                size_after = await self._index_size(merged)
+                self.dta_trace(f"Merging {candidate_str([first, second])} into {candidate_str([merged])}")
+                self._consolidations.append(
+                    {
+                        "merged": True,
+                        "indexes": both,
+                        "into": merged.definition,
+                        "worst_ratio": round(ratio, 3),
+                        "size_before_bytes": size_before,
+                        "size_after_bytes": size_after,
+                    }
+                )
+                kept = trial
+                merged_one = True
+                break
+        return kept
+
+    async def _drop_unread(
+        self,
+        query_weights: list[tuple[str, SelectStmt, float]],
+        indexes: list[IndexRecommendation],
+        queries_using: dict[IndexRecommendation, list[str]],
+        base_cost: float,
+    ) -> list[IndexRecommendation]:
+        """Refuse the indexes no query's plan reads once the whole set is in place.
+
+        The greedy search adds one index at a time, and an index chosen early
+        can be displaced by one chosen later: each query's plan then reads the
+        later one, and the earlier only costs writes. Whether a plan reads an
+        index is matched by HypoPG's name for it, so before refusing one the
+        planner is asked as well: without it, no query may cost more than with
+        it. An index whose name did not match but whose removal costs
+        something is kept.
+        """
+        unread = [index for index in indexes if not queries_using.get(index)]
+        if not unread:
+            return indexes
+        costs = await self._query_costs(query_weights, indexes)
+        kept = list(indexes)
+        for index in unread:
+            rest = [idx for idx in kept if idx != index]
+            if any(without > with_it * (1 + 1e-9) for without, with_it in zip(await self._query_costs(query_weights, rest), costs, strict=True)):
+                logger.debug("No plan named %s, but removing it raises a cost; keeping it", index.definition)
+                continue
+            kept = rest
+            alone = await self._evaluate_configuration_cost(query_weights, frozenset([index.index_definition]))
+            self.dta_trace(f"Refusing index: {candidate_str([index])}: no query's plan reads it with the rest of the set in place")
+            self._refused_candidates.append(
+                {
+                    "indexes": [index.definition],
+                    "execution_cost": round(alone, 2),
+                    "baseline_cost": round(base_cost, 2),
+                    "reason": (
+                        "with the rest of the recommended set in place no query's plan reads it, and removing it raises no "
+                        "query's cost: an index chosen later serves its queries, and it would only cost writes"
+                    ),
+                }
+            )
+        return kept
+
+    async def _queries_using(
+        self, query_weights: list[tuple[str, SelectStmt, float]], indexes: list[IndexRecommendation]
+    ) -> dict[IndexRecommendation, list[str]]:
+        """For each index, the queries whose plan reads it with the whole set in place."""
+        using: dict[IndexRecommendation, list[str]] = {index: [] for index in indexes}
+        if not indexes:
+            return using
+        configuration = frozenset(idx.index_definition for idx in indexes)
+        for query, _, _ in query_weights:
+            names = set(_index_names(await self.get_explain_plan_with_indexes(query, configuration)))
+            for index in indexes:
+                if any(is_hypothetical_name_of(name, index.index_definition) for name in names):
+                    using[index].append(query)
+        return using
 
     @staticmethod
     def extract_cost_from_json_plan(plan_data: dict[str, Any]) -> float:
@@ -971,3 +1355,75 @@ class IndexTuningBase(ABC):
     async def _generate_recommendations(self, query_weights: list[tuple[str, SelectStmt, float]]) -> tuple[set[IndexRecommendation], float]:
         """Generate index tuning queries."""
         pass
+
+
+def _cost_evidence(query: str, baseline: float, cost: float) -> dict[str, Any]:
+    return {
+        "query": query,
+        "baseline_cost": round(baseline, 2),
+        "cost_with_set": round(cost, 2),
+        "ratio": round(cost / baseline, 3) if baseline > 0 else None,
+    }
+
+
+def _over_bound(baseline: list[float], costs: list[float], limit: float) -> list[int]:
+    """The positions of the queries that cost more than ``limit`` times their baseline."""
+    return [i for i, (base, cost) in enumerate(zip(baseline, costs, strict=True)) if base > 0 and cost > base * limit]
+
+
+def _worst_ratio(reference: list[float], costs: list[float]) -> tuple[float, int | None]:
+    """The largest ratio of cost to reference, and the query it belongs to."""
+    worst, at = 0.0, None
+    for i, (base, cost) in enumerate(zip(reference, costs, strict=True)):
+        if base > 0 and (at is None or cost / base > worst):
+            worst, at = cost / base, i
+    return worst, at
+
+
+def _pairs_sharing_a_leading_column(indexes: list[IndexRecommendation]) -> Iterator[tuple[IndexRecommendation, IndexRecommendation]]:
+    for i, first in enumerate(indexes):
+        for second in indexes[i + 1 :]:
+            if first.table == second.table and first.using == second.using == "btree" and first.columns[:1] == second.columns[:1]:
+                yield first, second
+
+
+def _merged_columns(first: tuple[str, ...], second: tuple[str, ...]) -> list[tuple[str, ...]]:
+    """The indexes that could replace both: the wider, when one leads the other; else each followed by the rest of the other."""
+    if second[: len(first)] == first:
+        return [second]
+    if first[: len(second)] == second:
+        return [first]
+    options = [first + tuple(c for c in second if c not in first), second + tuple(c for c in first if c not in second)]
+    return list(dict.fromkeys(options))
+
+
+def _index_names(plan: dict[str, Any]) -> Iterator[str]:
+    """Every index name a JSON plan reads, at any depth."""
+    stack: list[Any] = [plan.get("Plan")]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        name = node.get("Index Name")
+        if isinstance(name, str):
+            yield name
+        stack.extend(node.get("Plans") or [])
+
+
+def is_hypothetical_name_of(name: str, index: IndexDefinition) -> bool:
+    """Whether a plan's index name is HypoPG's name for this index.
+
+    HypoPG ignores the name in the CREATE INDEX statement and calls the
+    index ``<oid>``, its access method, its table and its columns, joined
+    with underscores and cut at 63 bytes. A cut name is matched as a prefix,
+    which only a name of the full 63 bytes can be.
+    """
+    match = _HYPOTHETICAL_NAME.match(name)
+    if not match:
+        return False
+    stem = match.group(1)
+    _, table = split_table_reference(index.table)
+    expected = "_".join([index.using, table, *index.columns])
+    if stem == expected:
+        return True
+    return len(name.encode()) >= _MAX_IDENTIFIER_BYTES and expected.startswith(stem)

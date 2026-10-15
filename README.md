@@ -144,7 +144,7 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `check-migration SQL` | a file path, inline SQL, or `-` for stdin; `--offline`, `--exit-code` |
 | `model` | `-s, --schema SCHEMA`, `-r, --rule RULES` (comma-separated, default `all`), `--proven-only`, `--min-rows N` (default 1000), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
 | `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10, ignored for cumulative `resources`), `-i, --interval SECONDS` |
-| `tune-workload` | `--max-index-size-mb MB` (default 10000), `--method {dta,llm}` (default `dta`) |
+| `tune-workload` | `--max-index-size-mb MB` (default 10000), `--method {dta,llm}` (default `dta`), `--max-regression-factor F` (default 0.1: refuse an index that makes any query cost more than 1.1 times its cost without the set; 0 refuses any rise) |
 | `tune-queries QUERY...` | up to 10 queries, same options as `tune-workload` |
 
 `execute`, `explain`, `diagnose`, `index-use`, `tune-workload` and
@@ -588,7 +588,7 @@ context = QueryContext.from_file("pg-debug.toml")
 | `sample_top_queries(interval_seconds, sort_by="resources", limit=10)` | `QuerySample` — `queries`, and `withheld`, how many other roles' statements ran and could not be ranked |
 | `statistics_access()` | `StatisticsAccess` — `role`, `reads_all_stats`, `member`, `remedy` |
 | `withheld_backends()` | `list[dict]` — `pid`, `datname`, `usename`, `application_name`, `in_transaction`, `xmin_age`, `locks`, `blocking` |
-| `analyze_workload_indexes(...)` / `analyze_query_indexes(queries, ...)` | `dict` with `summary`, `recommendations`, `query_impact` |
+| `analyze_workload_indexes(...)` / `analyze_query_indexes(queries, ...)` | `dict` with `summary`, `recommendations` (each with `queries_using`), `query_impact`, `regression_check`, `consolidations`, `refused_candidates` and `workload` (source, and `pg_stat_statements`' counting window); where HypoPG cannot be had, `analyze_query_indexes` returns `costed: False` with `candidates` inferred from `pg_stats` instead |
 
 Each `HealthCheckResult` carries `healthy`, a text `summary`, the flagged
 `findings` (one dict per object), the `metrics` behind the verdict and, for a
@@ -753,6 +753,19 @@ runs on pganalyze's
   `MAX_NUM_INDEX_TUNING_QUERIES` (10) queries. `analyze_workload_indexes`
   (`tune-workload`) selects from `pg_stat_statements` instead: up to 100
   queries with at least 50 calls and a mean execution time of 5 ms or more.
+- Before recommending, the advisor re-costs every query against the final set
+  and refuses an index that makes any query cost more than
+  `1 + --max-regression-factor` times its baseline (0.1 by default, Azure's
+  default for the same bound; a planner cost, not a time). It merges two
+  indexes that share a leading column into one where that serves every query
+  within the same bound, and refuses an index no query's plan reads once the
+  rest of the set is in place. Each refusal is reported with its figure.
+- Where HypoPG is neither installed nor offered by the server, `tune-queries`
+  returns candidates inferred from `pg_stats` (PgHero's heuristic: most
+  selective equality columns first, stopping at about 50 expected rows),
+  marked `candidate` and never costed by the planner. On Cloud SQL and
+  AlloyDB with `google_db_advisor` installed, its recommendations are added;
+  restricted mode does not run it.
 - A `SQL_ASCII` database stores bytes in no declared encoding. Unless an
   encoding is named for the connection (`client_encoding` in the URL,
   `PGCLIENTENCODING`, `options`, a service file, or `ALTER DATABASE`/`ALTER

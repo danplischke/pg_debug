@@ -311,6 +311,25 @@ async def check_hypopg_installation_status(
     return False, text.paragraphs(_hypopg_unavailable(text, detection, pg_version, allowlist))
 
 
+async def hypopg_unobtainable(
+    sql_driver: SqlDriver,
+    platform: Callable[[], Awaitable[PlatformDetection]] | None = None,
+) -> str | None:
+    """Why HypoPG can be neither used nor created in this database, or None when it can be.
+
+    Installed, it can be used; listed in ``pg_available_extensions``, it can
+    be created, and the advice is to create it. Neither, and nothing from SQL
+    can get it here: the platform does not offer it, or the package is not on
+    the server. The message says which, as
+    :func:`check_hypopg_installation_status` does.
+    """
+    status = await check_extension(sql_driver, "hypopg", include_messages=False)
+    if status.is_installed or status.is_available:
+        return None
+    _, message = await check_hypopg_installation_status(sql_driver, platform=platform)
+    return message
+
+
 class _Text:
     """Writes the same advice as markdown or as plain text."""
 
