@@ -167,6 +167,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   immediate shutdown, a failover or a restore moves; not the server's uptime,
   since a clean restart keeps the counters.
 
+- `activity --sample SECONDS` (`--sample-interval`, default 0.5) and
+  `PgDebug.sample_waits(seconds, interval=)`, with its `SyncPgDebug` twin.
+  `activity` showed each backend's wait at one instant, and the only way to
+  learn where time went over a minute was `pg_wait_sampling`, which most
+  servers and managed platforms do not have. The sampler reads
+  `pg_stat_activity` once per sample, one statement each, and reports
+  average active sessions overall, for client backends, per wait event and
+  per query (by `query_id` where the server reports one, by text with
+  constants replaced where it does not, saying why). It states the samples
+  taken and the interval achieved, measured on the server's clock, marks
+  every attribution a candidate (each sample is exact; the profile is a
+  sample), leaves out pg-debug's own backend and statements, and says how
+  many backends' state was withheld from a role without `pg_read_all_stats`.
+  Where `pg_wait_sampling` is installed its profile over the same window is
+  read too; where Azure's Query Store records waits, its last interval.
+
+- `activity` and `locks` end their text with what the waits in that moment
+  amount to, and `PgDebug.classify_waits()` returns it: a lock queue behind a
+  statement waiting for ACCESS EXCLUSIVE (or another lock that blocks
+  writes), an idle-in-transaction session blocking others, row lock
+  contention, and LWLock pressure on `BufferMapping` or `LockManager`. They
+  showed each backend's wait and who blocks whom, and the pattern — the
+  queued queries are victims of the DDL, which is the victim of the idle
+  transaction — was left to the reader. Each comes from one statement with
+  the pids, lock modes and relation it rests on, and a confidence: proven
+  when `pg_locks` shows it, a candidate when inferred, with the judgment in
+  it said. `--json` keeps printing the rows.
+
+- `check-migration` reads the `lock_timeout` and `statement_timeout` each
+  statement would run with — a `SET` earlier in the migration, the query
+  context, the `ALTER ROLE ... SET` of the role the context names, or the
+  default — and takes `--role`, `--set`, `--config` and `--no-config` for
+  them. It advised a short `lock_timeout` in passing and could not tell
+  whether one was set: a `SET lock_timeout` in the file changed nothing in its
+  report. Now a statement that waits for ACCESS EXCLUSIVE, SHARE ROW EXCLUSIVE
+  or SHARE on an existing table with no `lock_timeout` carries
+  `lock_timeout_advice`, saying why: while it waits for its lock, every later
+  statement that conflicts with that lock queues behind it.
+
 ### Changed
 
 - A statement that failed was logged at ERROR with its full text, so a

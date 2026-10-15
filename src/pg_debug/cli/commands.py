@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 from typing import Any
 
 from ..db.privileges import is_withheld
+from ..errors import InvalidArgumentError
+from .render import Diagnosed
 from .render import Shown
 from .render import lock_tree_nodes
 from .render import note_statement_window
@@ -18,6 +20,7 @@ from .render import note_withheld_lock_tree
 from .render import note_withheld_queries
 from .render import note_withheld_sample
 from .render import note_withheld_vacuums
+from .render import note_withheld_waits
 from .streams import read_sql
 from .streams import read_sql_or_file
 from .streams import read_stdin
@@ -25,6 +28,7 @@ from .streams import read_stdin
 if TYPE_CHECKING:
     from ..client import PgDebug
     from ..db.privileges import StatisticsAccess
+    from ..waits import WaitDiagnosis
 
 
 async def cmd_schemas(pg: PgDebug, args: argparse.Namespace) -> Any:
@@ -71,6 +75,35 @@ async def cmd_column_stats(pg: PgDebug, args: argparse.Namespace) -> Any:
 
 
 async def cmd_activity(pg: PgDebug, args: argparse.Namespace) -> Any:
+    if args.sample is not None:
+        return await _sample_waits(pg, args)
+    shown = await _list_activity(pg, args)
+    return _diagnosed(shown, await pg.classify_waits())
+
+
+async def _sample_waits(pg: PgDebug, args: argparse.Namespace) -> Any:
+    if args.include_idle or args.min_duration is not None or args.blocked:
+        raise InvalidArgumentError(
+            "--sample reports what active sessions waited on over an interval; --all, --min-duration and --blocked choose "
+            "backends for a list of them at one instant, and do not combine with it."
+        )
+    profile = await pg.sample_waits(args.sample, interval=args.sample_interval)
+    access = profile.statistics_access
+    if access is None or access.reads_all_stats:
+        return profile
+    return Shown(profile, note=note_withheld_waits(access, profile))
+
+
+def _diagnosed(result: Any, diagnosis: WaitDiagnosis) -> Any:
+    """The result, with what the waits in it amount to for the text to show beneath it."""
+    if not diagnosis.classifications and not diagnosis.declined:
+        return result
+    if isinstance(result, Shown):
+        return Shown(result.rows, text=Diagnosed(result.rows if result.text is None else result.text, diagnosis), note=result.note)
+    return Shown(result, text=Diagnosed(result, diagnosis))
+
+
+async def _list_activity(pg: PgDebug, args: argparse.Namespace) -> Any:
     rows = await pg.list_activity(
         include_idle=args.include_idle,
         min_duration_seconds=args.min_duration,
@@ -102,7 +135,8 @@ async def cmd_activity(pg: PgDebug, args: argparse.Namespace) -> Any:
 
 async def cmd_locks(pg: PgDebug, args: argparse.Namespace) -> Any:
     roots = await pg.lock_tree()
-    return await _noting(pg, roots, lock_tree_nodes(roots), note_withheld_lock_tree)
+    shown = await _noting(pg, roots, lock_tree_nodes(roots), note_withheld_lock_tree)
+    return _diagnosed(shown, await pg.classify_waits())
 
 
 async def cmd_vacuum_progress(pg: PgDebug, args: argparse.Namespace) -> Any:

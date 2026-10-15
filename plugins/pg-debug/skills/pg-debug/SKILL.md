@@ -106,6 +106,7 @@ and answering the question.
 | Why are the row estimates wrong? | `pg-debug column-stats <table>`, `health --type statistics` | [slow-queries.md](references/slow-queries.md) |
 | Why does the application see other rows or plans? (row-level security, a role, session variables) | `pg-debug explain --role ROLE --set NAME=VALUE "<query>"`, or the project's `pg-debug.toml` | [slow-queries.md](references/slow-queries.md) |
 | The database is stuck. Who is blocking whom? | `pg-debug activity --blocked`, `locks`, `vacuum-progress` | [incidents.md](references/incidents.md) |
+| What are sessions waiting on? (no pg_wait_sampling needed) | `pg-debug activity --sample 10` | [incidents.md](references/incidents.md) |
 | Is the database healthy? | `pg-debug health` | [health.md](references/health.md) |
 | What is the database spending its time on? | `pg-debug top-queries --interval 10` | [health.md](references/health.md) |
 | Are the server's settings right? | `pg-debug config` | [health.md](references/health.md) |
