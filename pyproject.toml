@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "psycopg[binary]>=3.3.2",
     "humanize>=4.15.0",
-    "pglast==7.20",
+    "pglast==7.21",
     "psycopg-pool>=3.3.0",
 ]
 license = "MIT"
