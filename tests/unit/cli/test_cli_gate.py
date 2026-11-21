@@ -11,6 +11,7 @@ import pytest
 
 from pg_debug import cli
 from pg_debug.health import HealthCheckResult
+from pg_debug.logs import analyze_logs
 from pg_debug.model import Confidence
 from pg_debug.model import ModelFinding
 from pg_debug.model import RuleId
@@ -238,6 +239,23 @@ def test_logs_need_no_database(pg_client):
     assert len(cannot_show) == 1
     assert "No auto_explain plan was logged" in cannot_show[0]
     pg_client.__aenter__.assert_not_called()
+
+
+def test_logs_with_nothing_to_read_say_what_they_need(pg_client):
+    code, _, err = run(["logs"])
+    assert code != 0
+    assert "--from-database" in err
+    pg_client.__aenter__.assert_not_called()
+
+
+def test_logs_from_the_database_go_through_the_client(pg_client):
+    pg_client.read_server_logs = AsyncMock(return_value=analyze_logs([FIXTURES / "rds-pg16.csv"]))
+
+    code, out, _ = run(["-d", "postgresql://x/y", "logs", "--from-database", "--latest", "2", "postgresql.log.2026-11-21-18.csv"])
+
+    assert code == 0
+    assert "Plans auto_explain logged" in out
+    pg_client.read_server_logs.assert_awaited_once_with(files=["postgresql.log.2026-11-21-18.csv"], latest=2, min_ratio=10.0)
 
 
 def test_logs_as_json_and_with_a_format(pg_client):

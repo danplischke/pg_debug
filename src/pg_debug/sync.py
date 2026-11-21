@@ -34,6 +34,7 @@ from .health.checks.index import MIN_WINDOW_DAYS
 from .history import HistoryReport
 from .index.base import DEFAULT_MAX_REGRESSION_FACTOR
 from .index_use import IndexUse
+from .logs import LogReport
 from .migration import StatementReview
 from .model import DEFAULT_MIN_ROWS
 from .model import ModelFinding
@@ -373,6 +374,10 @@ class SyncPgDebug:
     ) -> QuerySample:
         """Measure the most expensive queries over an interval, and say what the ranking left out."""
         return self._call(self._client.sample_top_queries, interval_seconds, sort_by=sort_by, limit=limit)
+
+    def read_server_logs(self, files: list[str] | None = None, latest: int = 1, min_ratio: float | None = None) -> LogReport:
+        """Read the server's own log files over SQL, through log_fdw, and report what they say happened."""
+        return self._call(self._client.read_server_logs, files=files, latest=latest, min_ratio=min_ratio)
 
     def snapshot_top_queries(self) -> QuerySnapshot:
         """Read pg_stat_statements' counters now, to compare a later moment with."""

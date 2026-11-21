@@ -50,6 +50,8 @@ from .index.heuristic import StatisticsIndexAdvisor
 from .index.presentation import TextPresentation
 from .index_use import IndexUse
 from .index_use import IndexUseAnalyzer
+from .logs import LogReport
+from .logs.server import read_server_logs
 from .migration import MigrationLinter
 from .migration import StatementReview
 from .model import DEFAULT_MIN_ROWS
@@ -1070,6 +1072,33 @@ class PgDebug:
         sample_sort = {"resources": "resources", "mean_time": "mean", "total_time": "total"}[sort_by]
         top_queries_tool = TopQueriesCalc(sql_driver=await self.sql_driver())
         return await top_queries_tool.measure(interval_seconds, sort_by=sample_sort, limit=limit)  # type: ignore[arg-type]
+
+    async def read_server_logs(self, files: list[str] | None = None, latest: int = 1, min_ratio: float | None = None) -> LogReport:
+        """Read the server's own log files over SQL, through ``log_fdw``, and report what they say happened.
+
+        The same report :func:`pg_debug.analyze_logs` makes from files, for a
+        server whose log directory cannot be reached, as on RDS and Aurora:
+        each file is made a foreign table with ``log_fdw``, read, and the
+        transaction rolled back, so nothing is left behind. That is a write,
+        so restricted mode refuses it. Where the server writes both stderr
+        and csvlog, the csv file is read.
+
+        This follows ``log_fdw``'s documentation and source, and has not been
+        run on RDS.
+
+        Args:
+            files: Log files by name, as ``list_postgres_log_files()`` lists
+                them; None reads the latest ``latest``.
+            latest: How many of the latest files to read.
+            min_ratio: As :func:`pg_debug.analyze_logs` takes it.
+
+        Raises:
+            InvalidArgumentError: In restricted mode, without a ``log_fdw``
+                foreign server, or for a file not in the log directory.
+            ExtensionRequiredError: If ``log_fdw`` is not installed; the
+                message has the statements that install it.
+        """
+        return await read_server_logs(await self.sql_driver(), files=files, latest=latest, min_ratio=min_ratio)
 
     async def snapshot_top_queries(self) -> QuerySnapshot:
         """Read pg_stat_statements' counters now, to compare a later moment with.

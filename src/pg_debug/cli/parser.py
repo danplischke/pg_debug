@@ -42,6 +42,7 @@ from .commands import cmd_health
 from .commands import cmd_history
 from .commands import cmd_index_use
 from .commands import cmd_locks
+from .commands import cmd_logs
 from .commands import cmd_model
 from .commands import cmd_objects
 from .commands import cmd_partitions
@@ -655,7 +656,19 @@ def build_parser() -> argparse.ArgumentParser:
     logs = subparsers.add_parser(
         "logs", help="Read server logs for slow plans and statements, deadlocks, lock waits, temp files, vacuums, checkpoints and refused connections"
     )
-    logs.add_argument("files", nargs="+", metavar="FILE", help="Log files: stderr, csvlog or jsonlog, plain or .gz; - for stdin.")
+    logs.add_argument(
+        "files",
+        nargs="*",
+        metavar="FILE",
+        help="Log files: stderr, csvlog or jsonlog, plain or .gz; - for stdin. With --from-database, file names in the server's log directory.",
+    )
+    logs.add_argument(
+        "--from-database",
+        action="store_true",
+        help="Read the server's own log files over SQL through log_fdw (RDS, Aurora), with -d or DATABASE_URL. Each file is "
+        "made a foreign table and rolled back; restricted mode refuses.",
+    )
+    logs.add_argument("--latest", type=int, default=1, help="With --from-database and no FILE, how many of the latest files to read (default: 1).")
     logs.add_argument(
         "--prefix",
         metavar="PREFIX",
@@ -674,7 +687,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MIN_RATIO,
         help=f"For auto_explain plans: report row estimates off by at least this factor (default: {DEFAULT_MIN_RATIO:g}).",
     )
-    logs.set_defaults(render=render_log_report)
+    logs.set_defaults(func=cmd_logs, render=render_log_report)
 
     top_queries = subparsers.add_parser("top-queries", help="Report the most expensive queries (needs pg_stat_statements)")
     top_queries.add_argument(

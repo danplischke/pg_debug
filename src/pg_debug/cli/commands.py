@@ -86,6 +86,10 @@ def parse_values(text: str) -> list[Any]:
     return values
 
 
+async def cmd_logs(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.read_server_logs(files=args.files or None, latest=args.latest, min_ratio=args.min_ratio)
+
+
 async def cmd_index_use(pg: PgDebug, args: argparse.Namespace) -> Any:
     return await pg.explain_index_use(read_sql_or_file(args.sql), index=args.index)
 

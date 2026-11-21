@@ -95,7 +95,9 @@ async def run(args: argparse.Namespace) -> int:
         print(format_result(args, diagnose_plan(read_sql_or_file(args.sql), min_ratio=args.min_ratio)))
         return 0
 
-    if args.command == "logs":
+    if args.command == "logs" and not args.from_database:
+        if not args.files:
+            raise InvalidArgumentError("logs needs log files to read, or --from-database to read the server's own through log_fdw.")
         # A log is read as it is; there is nothing to connect to.
         print(format_result(args, analyze_logs(args.files, prefix=args.prefix, log_format=args.log_format, min_ratio=args.min_ratio)))
         return 0
