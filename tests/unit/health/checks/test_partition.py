@@ -45,7 +45,9 @@ def root(**overrides: Any) -> dict[str, Any]:
         "depth": 1,
         "relations": 4,
         "indexes": 4,
+        "leaf_indexes": 3,
         "one_partition_locks": 3,
+        "one_partition_locks_leaf_indexes": 2,
         "default_partition": None,
     }
     row.update(overrides)
@@ -375,6 +377,17 @@ async def test_a_tree_larger_than_the_fast_path_is_a_low_candidate_stated_as_the
     assert finding["evidence"]["estimated_locks"] == 123
     assert "pg_stat_statements could not be read" in finding["evidence"]["basis"]
     assert "fastpath" in finding["confirm"]
+
+
+@pytest.mark.asyncio
+async def test_before_16_the_partitioned_tables_own_indexes_are_not_counted():
+    """Before 16 the planner opens only the leaves' indexes: 41 tables and 80 of the 82 indexes."""
+    tree = root(leaves=40, relations=41, indexes=82, leaf_indexes=80, one_partition_locks=5, one_partition_locks_leaf_indexes=4)
+    (finding,) = (await run(FakeDriver(roots=[tree], version=150008))).findings
+
+    assert finding["evidence"]["estimated_locks"] == 121
+    assert finding["evidence"]["unpruned_locks"] == 121
+    assert finding["evidence"]["one_partition_locks"] == 4
 
 
 @pytest.mark.asyncio

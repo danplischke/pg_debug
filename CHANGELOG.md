@@ -270,8 +270,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fast path holds (16 slots before PostgreSQL 18, `max_locks_per_transaction`
   rounded up to a power of two from 18), estimated from what
   `pg_stat_statements` records filtering on the partition key and stated as
-  the worst case otherwise; and more than 1,000 partitions or three levels.
-  The lock estimate and the per-partition unique index are candidates.
+  the worst case otherwise, counting a partitioned table's own indexes only
+  from PostgreSQL 16, the first planner to open them; and more than 1,000
+  partitions or three levels. The lock estimate and the per-partition unique
+  index are candidates.
 
 - `check-migration` reviews `ATTACH PARTITION`, `DETACH PARTITION` and
   `CREATE TABLE ... PARTITION OF`, which it used to pass over in silence.
@@ -477,10 +479,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- pg-debug pins pglast 7.20 instead of 7.11, so installing it no longer holds
+- pg-debug pins pglast 7.23 instead of 7.11, so installing it no longer holds
   pglast back at the older release. It still parses with PostgreSQL 17's
-  grammar, now from 17.7. psycopg-pool 3.3.3, pydantic 2.14 and
-  instructor 1.17 are the versions the lockfile now tests with.
+  grammar, now from 17.7. psycopg 3.3.9, psycopg-pool 3.3.3, humanize 4.17,
+  pydantic 2.14 and instructor 1.17 are the versions the lockfile now tests
+  with.
 
 - A statement that failed was logged at ERROR with its full text, so a
   `health` run with six checks timing out behind a lock printed close to 300

@@ -51,6 +51,11 @@ PARTITION_HEALTH = "Partition health"
 #: is where ``LWLock:LockManager`` waits come from.
 FAST_PATH_SLOTS_BEFORE_18 = 16
 
+#: From PostgreSQL 16 the planner opens, and so locks, the indexes of a
+#: partitioned table as well as its leaves', for the unique-join proofs it
+#: gained then. Before, a query over the tree locks only the leaves' indexes.
+PLANNER_OPENS_PARTITIONED_INDEXES_MIN_VERSION = 16
+
 #: From PostgreSQL 18 the fast-path slots come in groups of this many, and a
 #: backend gets enough groups to hold max_locks_per_transaction, rounded up to
 #: a power of two, up to :data:`FAST_PATH_MAX_GROUPS`.
@@ -83,7 +88,10 @@ _EXCLUDED_SCHEMAS = "n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'p
 # every index on each of them (counted on PostgreSQL 16: a SELECT over a
 # 12-partition table with two indexes held 42 relation locks), and the most
 # any single-partition query locks, which is that partition, its ancestors
-# and their indexes.
+# and their indexes. Before PostgreSQL 16 the planner does not open the
+# indexes of a partitioned table, only those of its leaves, so the counts
+# without them are read too (on 12 and 15 the same query over 20 partitions
+# held 61 locks where 16 held 63).
 ROOTS_SQL = f"""
 SELECT
     n.nspname AS schema,
@@ -106,9 +114,13 @@ SELECT
     tree.depth,
     tree.relations,
     (SELECT count(*) FROM pg_partition_tree(c.oid) AS t JOIN pg_index AS i ON i.indrelid = t.relid) AS indexes,
+    (SELECT count(*) FROM pg_partition_tree(c.oid) AS t JOIN pg_index AS i ON i.indrelid = t.relid WHERE t.isleaf) AS leaf_indexes,
     (SELECT max((SELECT count(*) FROM pg_partition_ancestors(t.relid))
               + (SELECT count(*) FROM pg_partition_ancestors(t.relid) AS a JOIN pg_index AS i ON i.indrelid = a.relid))
        FROM pg_partition_tree(c.oid) AS t WHERE t.isleaf) AS one_partition_locks,
+    (SELECT max((SELECT count(*) FROM pg_partition_ancestors(t.relid))
+              + (SELECT count(*) FROM pg_index AS i WHERE i.indrelid = t.relid))
+       FROM pg_partition_tree(c.oid) AS t WHERE t.isleaf) AS one_partition_locks_leaf_indexes,
     (SELECT format('%I.%I', dn.nspname, d.relname)
        FROM pg_class AS d JOIN pg_namespace AS dn ON dn.oid = d.relnamespace
       WHERE d.oid = pt.partdefid) AS default_partition
@@ -266,6 +278,9 @@ class _Root:
     depth: int
     relations: int
     indexes: int
+    #: The indexes a query that prunes nothing opens: all of them from
+    #: PostgreSQL 16, only the leaves' before.
+    locked_indexes: int
     one_partition_locks: int
     default_partition: str | None
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -277,7 +292,7 @@ class _Root:
     @property
     def unpruned_locks(self) -> int:
         """Relation locks a query that prunes nothing takes: every table and index in the tree."""
-        return self.relations + self.indexes
+        return self.relations + self.locked_indexes
 
     @property
     def time_key(self) -> bool:
@@ -318,9 +333,9 @@ class PartitionHealthCalc:
         a ``kind``, a ``severity``, a ``confidence``, the ``evidence`` it was
         read from and, where there is one, a ``recipe``.
         """
-        roots = await self._roots()
-        settings = await self._settings()
         version = await get_postgres_version(self.sql_driver)
+        roots = await self._roots(version)
+        settings = await self._settings()
         slots = fast_path_slots(version, settings["max_locks_per_transaction"])
 
         metrics: dict[str, Any] = {
@@ -371,11 +386,13 @@ class PartitionHealthCalc:
 
     # -- Reading ------------------------------------------------------------
 
-    async def _roots(self) -> list[_Root]:
+    async def _roots(self, version: int) -> list[_Root]:
         rows = await self.sql_driver.execute_query(ROOTS_SQL)
+        opens_partitioned_indexes = version >= PLANNER_OPENS_PARTITIONED_INDEXES_MIN_VERSION
         roots = []
         for row in rows or []:
             cells = row.cells
+            indexes = int(cells["indexes"] or 0)
             roots.append(
                 _Root(
                     schema=cells["schema"],
@@ -390,8 +407,9 @@ class PartitionHealthCalc:
                     leaves=int(cells["leaves"] or 0),
                     depth=int(cells["depth"] or 0),
                     relations=int(cells["relations"] or 0),
-                    indexes=int(cells["indexes"] or 0),
-                    one_partition_locks=int(cells["one_partition_locks"] or 0),
+                    indexes=indexes,
+                    locked_indexes=indexes if opens_partitioned_indexes else int(cells["leaf_indexes"] or 0),
+                    one_partition_locks=int(cells["one_partition_locks" if opens_partitioned_indexes else "one_partition_locks_leaf_indexes"] or 0),
                     default_partition=cells["default_partition"],
                 )
             )
