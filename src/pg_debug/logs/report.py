@@ -26,10 +26,15 @@ from pathlib import Path
 from typing import Any
 
 from ..rules import DOCS_URL
+from .connections import ConnectionEvents
+from .connections import ConnectionReader
 from .parse import LogEntry
 from .parse import ParsedLog
 from .parse import read_log_text
 from .parse import read_logs
+from .statements import LoggedPlan
+from .statements import SlowStatement
+from .statements import StatementReader
 
 #: How many ``file:line`` references a grouped finding keeps.
 MAX_SOURCES = 5
@@ -260,6 +265,12 @@ class LogReport:
         checkpoint_warnings: Each ``checkpoints are occurring too frequently``.
         checkpoints: Checkpoints logged (``log_checkpoints``), by what
             started them: ``time``, ``wal``, ``immediate force wait``...
+        plans: The plans ``auto_explain`` logged, one per query, the most
+            total time first, each with what is wrong with its slowest run.
+        slow_statements: The statements ``log_min_duration_statement``
+            logged, one per query, the most total time first.
+        connections: Connections refused, ended or lost, by kind, the most
+            frequent first.
         notes: What the log cannot show: each kind of event that is absent,
             and the setting it depends on.
     """
@@ -278,6 +289,9 @@ class LogReport:
     autovacuum: list[AutovacuumRuns] = field(default_factory=list)
     checkpoint_warnings: list[CheckpointWarning] = field(default_factory=list)
     checkpoints: dict[str, int] = field(default_factory=dict)
+    plans: list[LoggedPlan] = field(default_factory=list)
+    slow_statements: list[SlowStatement] = field(default_factory=list)
+    connections: list[ConnectionEvents] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -296,6 +310,9 @@ class LogReport:
             "autovacuum": [a.to_dict() for a in self.autovacuum],
             "checkpoint_warnings": [c.to_dict() for c in self.checkpoint_warnings],
             "checkpoints": self.checkpoints,
+            "plans": [p.to_dict() for p in self.plans],
+            "slow_statements": [s.to_dict() for s in self.slow_statements],
+            "connections": [c.to_dict() for c in self.connections],
             "notes": self.notes,
         }
 
@@ -304,6 +321,7 @@ def analyze_logs(
     paths: Iterable[str | Path],
     prefix: str | None = None,
     log_format: str | None = None,
+    min_ratio: float | None = None,
 ) -> LogReport:
     """Read PostgreSQL server logs and report what they say happened. No database is needed.
 
@@ -316,6 +334,9 @@ def analyze_logs(
             holds is read.
         log_format: ``stderr``, ``csvlog`` or ``jsonlog``. Detected from each
             file's first lines when left out.
+        min_ratio: For the ``auto_explain`` plans diagnosed, how far a row
+            estimate has to be from the truth before it is reported, as a
+            factor; ``diagnose``'s default when left out.
 
     Returns:
         A :class:`LogReport`.
@@ -324,7 +345,7 @@ def analyze_logs(
         InvalidArgumentError: If a file cannot be read, or the format or the
             prefix is not one PostgreSQL has.
     """
-    return report(read_logs(paths, prefix=prefix, log_format=log_format))
+    return report(read_logs(paths, prefix=prefix, log_format=log_format), min_ratio=min_ratio)
 
 
 def analyze_log_lines(
@@ -332,14 +353,15 @@ def analyze_log_lines(
     prefix: str | None = None,
     log_format: str | None = None,
     source: str = "<lines>",
+    min_ratio: float | None = None,
 ) -> LogReport:
     """:func:`analyze_logs` over lines already in hand, such as a platform's log API returns."""
     parsed = ParsedLog()
     read_log_text("\n".join(line.rstrip("\n") for line in lines), source, parsed, prefix=prefix, log_format=log_format)
-    return report(parsed)
+    return report(parsed, min_ratio=min_ratio)
 
 
-def report(parsed: ParsedLog) -> LogReport:
+def report(parsed: ParsedLog, min_ratio: float | None = None) -> LogReport:
     """What the entries of a log say happened."""
     result = LogReport(
         sources=dict(parsed.formats),
@@ -352,12 +374,16 @@ def report(parsed: ParsedLog) -> LogReport:
     temp: dict[str | None, TempFileUse] = {}
     skipped: dict[tuple[str, str, str, str], SkippedVacuum] = {}
     runs: dict[tuple[str, str], AutovacuumRuns] = {}
+    statements = StatementReader(min_ratio=min_ratio)
+    connections = ConnectionReader()
     times = [entry.time for entry in parsed.entries if entry.time]
     if times:
         result.first_time, result.last_time = min(times), max(times)
 
     for entry in parsed.entries:
         message = entry.message
+        if statements.read(entry) or connections.read(entry):
+            continue
         if entry.level == "ERROR" and message.startswith("deadlock detected"):
             result.deadlocks.append(_deadlock(entry))
         elif entry.level == "ERROR" and message.startswith("canceling statement"):
@@ -384,6 +410,8 @@ def report(parsed: ParsedLog) -> LogReport:
     result.temp_files = sorted(temp.values(), key=lambda use: -use.total_bytes)
     result.skipped_vacuums = sorted(skipped.values(), key=lambda skip: -skip.times)
     result.autovacuum = sorted(runs.values(), key=lambda run: -run.longest_seconds)
+    result.plans, result.slow_statements = statements.finish()
+    result.connections = connections.finish()
     result.notes = _notes(result)
     return result
 
@@ -505,7 +533,25 @@ def _notes(result: LogReport) -> list[str]:
         )
     if not result.skipped_vacuums:
         notes.append("No skipped vacuum was logged. Autovacuum logs a skip only when log_autovacuum_min_duration is not -1.")
-    if not result.deadlocks and not result.checkpoint_warnings and not result.checkpoints and not result.lock_waits:
+    if not result.plans:
+        notes.append(
+            "No auto_explain plan was logged. Plans are logged only with auto_explain in shared_preload_libraries (on RDS and "
+            "Aurora, through the parameter group) and auto_explain.log_min_duration set; set auto_explain.log_format = 'json' "
+            "and auto_explain.log_analyze = on for plans that can be diagnosed."
+        )
+    recognised = (
+        result.deadlocks,
+        result.checkpoint_warnings,
+        result.checkpoints,
+        result.lock_waits,
+        result.temp_files,
+        result.autovacuum,
+        result.skipped_vacuums,
+        result.plans,
+        result.slow_statements,
+        result.connections,
+    )
+    if not any(recognised):
         notes.append(
             "Messages are matched in English. A server whose lc_messages is another language logs these in that language, "
             "and none of them will have been recognised."

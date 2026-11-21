@@ -30,6 +30,7 @@ from ..baseline import health_finding_key
 from ..baseline import previous_entry
 from ..db.privileges import is_withheld
 from ..rules import health_rule
+from ..tags import describe_tags
 from ..waits import WaitProfile
 
 if TYPE_CHECKING:
@@ -1281,6 +1282,43 @@ def render_log_report(report: Any) -> str:
     if report.checkpoints:
         counts = ", ".join(f"{count} {reason}" for reason, count in sorted(report.checkpoints.items(), key=lambda item: -item[1]))
         lines.append(f"Checkpoints logged, by what started them: {counts}.")
+
+    if report.plans:
+        lines += ["", "Plans auto_explain logged, by query, most total time first:"]
+        for logged in report.plans:
+            lines.append(
+                f"  {logged.runs} run(s), {logged.total_ms / 1000:.1f}s in all, slowest {logged.slowest_ms:,.0f} ms: "
+                f"{_one_line(logged.query) if logged.query else '(no query text)'} ({logged.sources[0]})"
+            )
+            lines.extend(f"    from {describe_tags(tags)}" for tags in logged.callers)
+            if logged.not_diagnosed:
+                lines.append(f"    not diagnosed: {logged.not_diagnosed}")
+            elif not logged.findings:
+                lines.append("    nothing wrong with the slowest run's plan, as far as the plan alone can tell")
+            for finding in logged.findings:
+                lines.append(f"    [{finding.severity.value}] {finding.summary}")
+
+    if report.slow_statements:
+        lines += ["", "Statements past log_min_duration_statement, by query, most total time first:"]
+        for slow in report.slow_statements:
+            lines.append(
+                f"  {slow.runs} run(s), {slow.total_ms / 1000:.1f}s in all, slowest {slow.slowest_ms:,.0f} ms: {_one_line(slow.query)} "
+                f"({slow.sources[0]})"
+            )
+            lines.extend(f"    from {describe_tags(tags)}" for tags in slow.callers)
+
+    if report.connections:
+        lines += ["", "Connections refused, ended or lost:"]
+        for events in report.connections:
+            when = f"{events.first_time} to {events.last_time}" if events.first_time and events.first_time != events.last_time else events.first_time
+            lines.append(f"  {events.kind}: {events.count}x{f', {when}' if when else ''} ({events.sources[0]})")
+            lines.append(f"    {events.example}")
+            if events.by:
+                top = sorted(events.by.items(), key=lambda item: -item[1])[:5]
+                lines.append(f"    by {', '.join(f'{who} ({count})' for who, count in top)}")
+            if events.details:
+                lines.append(f"    {', '.join(f'{detail}: {count}' for detail, count in events.details.items())}")
+            lines.append(f"    {events.meaning}")
 
     if report.unparsed_examples:
         lines += ["", "Lines not understood, for example:"]

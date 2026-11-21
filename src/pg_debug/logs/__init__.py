@@ -1,5 +1,6 @@
 """Server logs: what a PostgreSQL log says happened, read with no connection to the database."""
 
+from .connections import ConnectionEvents
 from .parse import FORMATS
 from .parse import LogEntry
 from .parse import prefix_pattern
@@ -14,17 +15,22 @@ from .report import SkippedVacuum
 from .report import TempFileUse
 from .report import analyze_log_lines
 from .report import analyze_logs
+from .statements import LoggedPlan
+from .statements import SlowStatement
 
 __all__ = [
     "FORMATS",
     "AutovacuumRuns",
     "CheckpointWarning",
+    "ConnectionEvents",
     "Deadlock",
     "DeadlockProcess",
     "LockWait",
     "LogEntry",
     "LogReport",
+    "LoggedPlan",
     "SkippedVacuum",
+    "SlowStatement",
     "TempFileUse",
     "analyze_log_lines",
     "analyze_logs",

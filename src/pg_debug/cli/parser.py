@@ -626,7 +626,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_context_arguments(plans)
     plans.set_defaults(func=cmd_plans, render=render_plan_shapes, json_payload=plan_shapes_json)
 
-    logs = subparsers.add_parser("logs", help="Read server logs for deadlocks, lock waits, temp files, vacuums and checkpoints")
+    logs = subparsers.add_parser(
+        "logs", help="Read server logs for slow plans and statements, deadlocks, lock waits, temp files, vacuums, checkpoints and refused connections"
+    )
     logs.add_argument("files", nargs="+", metavar="FILE", help="Log files: stderr, csvlog or jsonlog, plain or .gz; - for stdin.")
     logs.add_argument(
         "--prefix",
@@ -639,6 +641,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="log_format",
         choices=list(LOG_FORMATS),
         help="The log's format, as log_destination names it (default: detected from each file).",
+    )
+    logs.add_argument(
+        "--min-ratio",
+        type=float,
+        default=DEFAULT_MIN_RATIO,
+        help=f"For auto_explain plans: report row estimates off by at least this factor (default: {DEFAULT_MIN_RATIO:g}).",
     )
     logs.set_defaults(render=render_log_report)
 

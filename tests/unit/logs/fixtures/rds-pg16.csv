@@ -1,0 +1,679 @@
+2026-11-21 18:15:48.835 UTC,,,54,,6b01dfd4.36,1,,2026-11-21 18:15:48 UTC,,0,LOG,00000,"starting PostgreSQL 16.16 (Debian 16.16-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",,,,,,,,,"","postmaster",,0
+2026-11-21 18:15:48.835 UTC,,,54,,6b01dfd4.36,2,,2026-11-21 18:15:48 UTC,,0,LOG,00000,"listening on Unix socket ""/var/run/postgresql/.s.PGSQL.5432""",,,,,,,,,"","postmaster",,0
+2026-11-21 18:15:48.838 UTC,,,58,,6b01dfd4.3a,1,,2026-11-21 18:15:48 UTC,,0,LOG,00000,"database system was shut down at 2026-11-21 18:15:48 UTC",,,,,,,,,"","startup",,0
+2026-11-21 18:15:48.840 UTC,,,54,,6b01dfd4.36,3,,2026-11-21 18:15:48 UTC,,0,LOG,00000,"database system is ready to accept connections",,,,,,,,,"","postmaster",,0
+2026-11-21 18:15:48.964 UTC,,,54,,6b01dfd4.36,4,,2026-11-21 18:15:48 UTC,,0,LOG,00000,"received fast shutdown request",,,,,,,,,"","postmaster",,0
+2026-11-21 18:15:48.965 UTC,,,54,,6b01dfd4.36,5,,2026-11-21 18:15:48 UTC,,0,LOG,00000,"aborting any active transactions",,,,,,,,,"","postmaster",,0
+2026-11-21 18:15:48.966 UTC,,,54,,6b01dfd4.36,6,,2026-11-21 18:15:48 UTC,,0,LOG,00000,"background worker ""logical replication launcher"" (PID 61) exited with exit code 1",,,,,,,,,"","postmaster",,0
+2026-11-21 18:15:48.968 UTC,,,56,,6b01dfd4.38,1,,2026-11-21 18:15:48 UTC,,0,LOG,00000,"shutting down",,,,,,,,,"","checkpointer",,0
+2026-11-21 18:15:48.968 UTC,,,56,,6b01dfd4.38,2,,2026-11-21 18:15:48 UTC,,0,LOG,00000,"checkpoint starting: shutdown immediate",,,,,,,,,"","checkpointer",,0
+2026-11-21 18:15:48.970 UTC,,,56,,6b01dfd4.38,3,,2026-11-21 18:15:48 UTC,,0,LOG,00000,"checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.003 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=0/1504890, redo lsn=0/1504890",,,,,,,,,"","checkpointer",,0
+2026-11-21 18:15:48.973 UTC,,,54,,6b01dfd4.36,7,,2026-11-21 18:15:48 UTC,,0,LOG,00000,"database system is shut down",,,,,,,,,"","postmaster",,0
+2026-11-21 18:15:49.081 UTC,,,1,,6b01dfd5.1,1,,2026-11-21 18:15:49 UTC,,0,LOG,00000,"starting PostgreSQL 16.16 (Debian 16.16-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",,,,,,,,,"","postmaster",,0
+2026-11-21 18:15:49.082 UTC,,,1,,6b01dfd5.1,2,,2026-11-21 18:15:49 UTC,,0,LOG,00000,"listening on IPv4 address ""0.0.0.0"", port 5432",,,,,,,,,"","postmaster",,0
+2026-11-21 18:15:49.082 UTC,,,1,,6b01dfd5.1,3,,2026-11-21 18:15:49 UTC,,0,LOG,XX000,"could not create IPv6 socket for address ""::"": Address family not supported by protocol",,,,,,,,,"","postmaster",,0
+2026-11-21 18:15:49.083 UTC,,,1,,6b01dfd5.1,4,,2026-11-21 18:15:49 UTC,,0,LOG,00000,"listening on Unix socket ""/var/run/postgresql/.s.PGSQL.5432""",,,,,,,,,"","postmaster",,0
+2026-11-21 18:15:49.084 UTC,,,70,,6b01dfd5.46,1,,2026-11-21 18:15:49 UTC,,0,LOG,00000,"database system was shut down at 2026-11-21 18:15:48 UTC",,,,,,,,,"","startup",,0
+2026-11-21 18:15:49.088 UTC,,,1,,6b01dfd5.1,5,,2026-11-21 18:15:49 UTC,,0,LOG,00000,"database system is ready to accept connections",,,,,,,,,"","postmaster",,0
+2026-11-21 18:15:55.490 UTC,"root","root",80,"[local]",6b01dfdb.50,1,"startup",2026-11-21 18:15:55 UTC,3/1,0,FATAL,28000,"role ""root"" does not exist",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:09.431 UTC,"postgres","postgres",81,"172.17.0.1:49374",6b01dfe8.51,1,"INSERT",2026-11-21 18:16:08 UTC,3/5,732,LOG,00000,"duration: 875.937 ms  plan:
+{
+  ""Query Text"": ""INSERT INTO orders SELECT g, CASE WHEN g % 10 = 0 THEN 'open' ELSE 'closed' END, g % 1000 FROM generate_series(1, 1000000) g"",
+  ""Plan"": {
+    ""Node Type"": ""ModifyTable"",
+    ""Operation"": ""Insert"",
+    ""Parallel Aware"": false,
+    ""Async Capable"": false,
+    ""Relation Name"": ""orders"",
+    ""Alias"": ""orders"",
+    ""Startup Cost"": 0.00,
+    ""Total Cost"": 20000.00,
+    ""Plan Rows"": 0,
+    ""Plan Width"": 0,
+    ""Actual Startup Time"": 875.934,
+    ""Actual Total Time"": 875.935,
+    ""Actual Rows"": 0,
+    ""Actual Loops"": 1,
+    ""Shared Hit Blocks"": 1012735,
+    ""Shared Read Blocks"": 0,
+    ""Shared Dirtied Blocks"": 6370,
+    ""Shared Written Blocks"": 6374,
+    ""Local Hit Blocks"": 0,
+    ""Local Read Blocks"": 0,
+    ""Local Dirtied Blocks"": 0,
+    ""Local Written Blocks"": 0,
+    ""Temp Read Blocks"": 1709,
+    ""Temp Written Blocks"": 1709,
+    ""Plans"": [
+      {
+        ""Node Type"": ""Function Scan"",
+        ""Parent Relationship"": ""Outer"",
+        ""Parallel Aware"": false,
+        ""Async Capable"": false,
+        ""Function Name"": ""generate_series"",
+        ""Alias"": ""g"",
+        ""Startup Cost"": 0.00,
+        ""Total Cost"": 20000.00,
+        ""Plan Rows"": 1000000,
+        ""Plan Width"": 44,
+        ""Actual Startup Time"": 65.658,
+        ""Actual Total Time"": 198.284,
+        ""Actual Rows"": 1000000,
+        ""Actual Loops"": 1,
+        ""Shared Hit Blocks"": 0,
+        ""Shared Read Blocks"": 0,
+        ""Shared Dirtied Blocks"": 0,
+        ""Shared Written Blocks"": 0,
+        ""Local Hit Blocks"": 0,
+        ""Local Read Blocks"": 0,
+        ""Local Dirtied Blocks"": 0,
+        ""Local Written Blocks"": 0,
+        ""Temp Read Blocks"": 1709,
+        ""Temp Written Blocks"": 1709
+      }
+    ]
+  }
+}",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:09.462 UTC,"postgres","postgres",81,"172.17.0.1:49374",6b01dfe8.51,2,"INSERT",2026-11-21 18:16:08 UTC,3/0,0,LOG,00000,"duration: 907.582 ms  statement: INSERT INTO orders SELECT g, CASE WHEN g % 10 = 0 THEN 'open' ELSE 'closed' END, g % 1000 FROM generate_series(1, 1000000) g",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:09.538 UTC,"postgres","postgres",81,"172.17.0.1:49374",6b01dfe8.51,3,"ANALYZE",2026-11-21 18:16:08 UTC,3/0,0,LOG,00000,"duration: 76.051 ms  statement: ANALYZE orders",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:10.494 UTC,"postgres","postgres",81,"172.17.0.1:49374",6b01dfe8.51,4,"UPDATE",2026-11-21 18:16:08 UTC,3/7,734,LOG,00000,"duration: 954.657 ms  plan:
+{
+  ""Query Text"": ""UPDATE orders SET status = 'open' WHERE id % 10 < 6"",
+  ""Plan"": {
+    ""Node Type"": ""ModifyTable"",
+    ""Operation"": ""Update"",
+    ""Parallel Aware"": false,
+    ""Async Capable"": false,
+    ""Relation Name"": ""orders"",
+    ""Alias"": ""orders"",
+    ""Startup Cost"": 0.00,
+    ""Total Cost"": 21370.00,
+    ""Plan Rows"": 0,
+    ""Plan Width"": 0,
+    ""Actual Startup Time"": 954.636,
+    ""Actual Total Time"": 954.655,
+    ""Actual Rows"": 0,
+    ""Actual Loops"": 1,
+    ""Shared Hit Blocks"": 1814014,
+    ""Shared Read Blocks"": 0,
+    ""Shared Dirtied Blocks"": 3822,
+    ""Shared Written Blocks"": 3823,
+    ""Local Hit Blocks"": 0,
+    ""Local Read Blocks"": 0,
+    ""Local Dirtied Blocks"": 0,
+    ""Local Written Blocks"": 0,
+    ""Temp Read Blocks"": 0,
+    ""Temp Written Blocks"": 0,
+    ""Plans"": [
+      {
+        ""Node Type"": ""Seq Scan"",
+        ""Parent Relationship"": ""Outer"",
+        ""Parallel Aware"": false,
+        ""Async Capable"": false,
+        ""Relation Name"": ""orders"",
+        ""Alias"": ""orders"",
+        ""Startup Cost"": 0.00,
+        ""Total Cost"": 21370.00,
+        ""Plan Rows"": 333333,
+        ""Plan Width"": 38,
+        ""Actual Startup Time"": 0.010,
+        ""Actual Total Time"": 105.983,
+        ""Actual Rows"": 600000,
+        ""Actual Loops"": 1,
+        ""Filter"": ""((id % '10'::bigint) < 6)"",
+        ""Rows Removed by Filter"": 400000,
+        ""Shared Hit Blocks"": 6370,
+        ""Shared Read Blocks"": 0,
+        ""Shared Dirtied Blocks"": 0,
+        ""Shared Written Blocks"": 0,
+        ""Local Hit Blocks"": 0,
+        ""Local Read Blocks"": 0,
+        ""Local Dirtied Blocks"": 0,
+        ""Local Written Blocks"": 0,
+        ""Temp Read Blocks"": 0,
+        ""Temp Written Blocks"": 0
+      }
+    ]
+  }
+}",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:10.499 UTC,"postgres","postgres",81,"172.17.0.1:49374",6b01dfe8.51,5,"UPDATE",2026-11-21 18:16:08 UTC,3/0,0,LOG,00000,"duration: 960.123 ms  statement: UPDATE orders SET status = 'open' WHERE id % 10 < 6",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:10.573 UTC,"postgres","postgres",81,"172.17.0.1:49374",6b01dfe8.51,6,"SELECT",2026-11-21 18:16:08 UTC,3/8,0,LOG,00000,"duration: 72.382 ms  plan:
+{
+  ""Query Text"": ""SELECT count(*) FROM orders WHERE status = 'open' /*controller='orders',route='%2Forders%2Fopen'*/"",
+  ""Plan"": {
+    ""Node Type"": ""Aggregate"",
+    ""Strategy"": ""Plain"",
+    ""Partial Mode"": ""Finalize"",
+    ""Parallel Aware"": false,
+    ""Async Capable"": false,
+    ""Startup Cost"": 19691.66,
+    ""Total Cost"": 19691.67,
+    ""Plan Rows"": 1,
+    ""Plan Width"": 8,
+    ""Actual Startup Time"": 68.282,
+    ""Actual Total Time"": 72.373,
+    ""Actual Rows"": 1,
+    ""Actual Loops"": 1,
+    ""Shared Hit Blocks"": 10192,
+    ""Shared Read Blocks"": 0,
+    ""Shared Dirtied Blocks"": 0,
+    ""Shared Written Blocks"": 0,
+    ""Local Hit Blocks"": 0,
+    ""Local Read Blocks"": 0,
+    ""Local Dirtied Blocks"": 0,
+    ""Local Written Blocks"": 0,
+    ""Temp Read Blocks"": 0,
+    ""Temp Written Blocks"": 0,
+    ""Plans"": [
+      {
+        ""Node Type"": ""Gather"",
+        ""Parent Relationship"": ""Outer"",
+        ""Parallel Aware"": false,
+        ""Async Capable"": false,
+        ""Startup Cost"": 19691.45,
+        ""Total Cost"": 19691.66,
+        ""Plan Rows"": 2,
+        ""Plan Width"": 8,
+        ""Actual Startup Time"": 68.063,
+        ""Actual Total Time"": 72.365,
+        ""Actual Rows"": 3,
+        ""Actual Loops"": 1,
+        ""Workers Planned"": 2,
+        ""Workers Launched"": 2,
+        ""Single Copy"": false,
+        ""Shared Hit Blocks"": 10192,
+        ""Shared Read Blocks"": 0,
+        ""Shared Dirtied Blocks"": 0,
+        ""Shared Written Blocks"": 0,
+        ""Local Hit Blocks"": 0,
+        ""Local Read Blocks"": 0,
+        ""Local Dirtied Blocks"": 0,
+        ""Local Written Blocks"": 0,
+        ""Temp Read Blocks"": 0,
+        ""Temp Written Blocks"": 0,
+        ""Plans"": [
+          {
+            ""Node Type"": ""Aggregate"",
+            ""Strategy"": ""Plain"",
+            ""Partial Mode"": ""Partial"",
+            ""Parent Relationship"": ""Outer"",
+            ""Parallel Aware"": false,
+            ""Async Capable"": false,
+            ""Startup Cost"": 18691.45,
+            ""Total Cost"": 18691.46,
+            ""Plan Rows"": 1,
+            ""Plan Width"": 8,
+            ""Actual Startup Time"": 65.695,
+            ""Actual Total Time"": 65.696,
+            ""Actual Rows"": 1,
+            ""Actual Loops"": 3,
+            ""Shared Hit Blocks"": 10192,
+            ""Shared Read Blocks"": 0,
+            ""Shared Dirtied Blocks"": 0,
+            ""Shared Written Blocks"": 0,
+            ""Local Hit Blocks"": 0,
+            ""Local Read Blocks"": 0,
+            ""Local Dirtied Blocks"": 0,
+            ""Local Written Blocks"": 0,
+            ""Temp Read Blocks"": 0,
+            ""Temp Written Blocks"": 0,
+            ""Workers"": [
+            ],
+            ""Plans"": [
+              {
+                ""Node Type"": ""Seq Scan"",
+                ""Parent Relationship"": ""Outer"",
+                ""Parallel Aware"": true,
+                ""Async Capable"": false,
+                ""Relation Name"": ""orders"",
+                ""Alias"": ""orders"",
+                ""Startup Cost"": 0.00,
+                ""Total Cost"": 18525.33,
+                ""Plan Rows"": 66445,
+                ""Plan Width"": 0,
+                ""Actual Startup Time"": 25.173,
+                ""Actual Total Time"": 53.346,
+                ""Actual Rows"": 200000,
+                ""Actual Loops"": 3,
+                ""Filter"": ""(status = 'open'::text)"",
+                ""Rows Removed by Filter"": 133333,
+                ""Shared Hit Blocks"": 10192,
+                ""Shared Read Blocks"": 0,
+                ""Shared Dirtied Blocks"": 0,
+                ""Shared Written Blocks"": 0,
+                ""Local Hit Blocks"": 0,
+                ""Local Read Blocks"": 0,
+                ""Local Dirtied Blocks"": 0,
+                ""Local Written Blocks"": 0,
+                ""Temp Read Blocks"": 0,
+                ""Temp Written Blocks"": 0,
+                ""Workers"": [
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:10.573 UTC,"postgres","postgres",81,"172.17.0.1:49374",6b01dfe8.51,7,"SELECT",2026-11-21 18:16:08 UTC,3/0,0,LOG,00000,"duration: 72.925 ms  statement: SELECT count(*) FROM orders WHERE status = 'open' /*controller='orders',route='%2Forders%2Fopen'*/",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:10.627 UTC,"postgres","postgres",81,"172.17.0.1:49374",6b01dfe8.51,8,"SELECT",2026-11-21 18:16:08 UTC,3/9,0,LOG,00000,"duration: 53.018 ms  plan:
+{
+  ""Query Text"": ""SELECT count(*) FROM orders WHERE status = 'open' /*controller='orders',route='%2Forders%2Fopen'*/"",
+  ""Plan"": {
+    ""Node Type"": ""Aggregate"",
+    ""Strategy"": ""Plain"",
+    ""Partial Mode"": ""Finalize"",
+    ""Parallel Aware"": false,
+    ""Async Capable"": false,
+    ""Startup Cost"": 19691.66,
+    ""Total Cost"": 19691.67,
+    ""Plan Rows"": 1,
+    ""Plan Width"": 8,
+    ""Actual Startup Time"": 50.083,
+    ""Actual Total Time"": 53.012,
+    ""Actual Rows"": 1,
+    ""Actual Loops"": 1,
+    ""Shared Hit Blocks"": 10192,
+    ""Shared Read Blocks"": 0,
+    ""Shared Dirtied Blocks"": 0,
+    ""Shared Written Blocks"": 0,
+    ""Local Hit Blocks"": 0,
+    ""Local Read Blocks"": 0,
+    ""Local Dirtied Blocks"": 0,
+    ""Local Written Blocks"": 0,
+    ""Temp Read Blocks"": 0,
+    ""Temp Written Blocks"": 0,
+    ""Plans"": [
+      {
+        ""Node Type"": ""Gather"",
+        ""Parent Relationship"": ""Outer"",
+        ""Parallel Aware"": false,
+        ""Async Capable"": false,
+        ""Startup Cost"": 19691.45,
+        ""Total Cost"": 19691.66,
+        ""Plan Rows"": 2,
+        ""Plan Width"": 8,
+        ""Actual Startup Time"": 49.930,
+        ""Actual Total Time"": 53.006,
+        ""Actual Rows"": 3,
+        ""Actual Loops"": 1,
+        ""Workers Planned"": 2,
+        ""Workers Launched"": 2,
+        ""Single Copy"": false,
+        ""Shared Hit Blocks"": 10192,
+        ""Shared Read Blocks"": 0,
+        ""Shared Dirtied Blocks"": 0,
+        ""Shared Written Blocks"": 0,
+        ""Local Hit Blocks"": 0,
+        ""Local Read Blocks"": 0,
+        ""Local Dirtied Blocks"": 0,
+        ""Local Written Blocks"": 0,
+        ""Temp Read Blocks"": 0,
+        ""Temp Written Blocks"": 0,
+        ""Plans"": [
+          {
+            ""Node Type"": ""Aggregate"",
+            ""Strategy"": ""Plain"",
+            ""Partial Mode"": ""Partial"",
+            ""Parent Relationship"": ""Outer"",
+            ""Parallel Aware"": false,
+            ""Async Capable"": false,
+            ""Startup Cost"": 18691.45,
+            ""Total Cost"": 18691.46,
+            ""Plan Rows"": 1,
+            ""Plan Width"": 8,
+            ""Actual Startup Time"": 47.766,
+            ""Actual Total Time"": 47.767,
+            ""Actual Rows"": 1,
+            ""Actual Loops"": 3,
+            ""Shared Hit Blocks"": 10192,
+            ""Shared Read Blocks"": 0,
+            ""Shared Dirtied Blocks"": 0,
+            ""Shared Written Blocks"": 0,
+            ""Local Hit Blocks"": 0,
+            ""Local Read Blocks"": 0,
+            ""Local Dirtied Blocks"": 0,
+            ""Local Written Blocks"": 0,
+            ""Temp Read Blocks"": 0,
+            ""Temp Written Blocks"": 0,
+            ""Workers"": [
+            ],
+            ""Plans"": [
+              {
+                ""Node Type"": ""Seq Scan"",
+                ""Parent Relationship"": ""Outer"",
+                ""Parallel Aware"": true,
+                ""Async Capable"": false,
+                ""Relation Name"": ""orders"",
+                ""Alias"": ""orders"",
+                ""Startup Cost"": 0.00,
+                ""Total Cost"": 18525.33,
+                ""Plan Rows"": 66445,
+                ""Plan Width"": 0,
+                ""Actual Startup Time"": 10.293,
+                ""Actual Total Time"": 35.238,
+                ""Actual Rows"": 200000,
+                ""Actual Loops"": 3,
+                ""Filter"": ""(status = 'open'::text)"",
+                ""Rows Removed by Filter"": 133333,
+                ""Shared Hit Blocks"": 10192,
+                ""Shared Read Blocks"": 0,
+                ""Shared Dirtied Blocks"": 0,
+                ""Shared Written Blocks"": 0,
+                ""Local Hit Blocks"": 0,
+                ""Local Read Blocks"": 0,
+                ""Local Dirtied Blocks"": 0,
+                ""Local Written Blocks"": 0,
+                ""Temp Read Blocks"": 0,
+                ""Temp Written Blocks"": 0,
+                ""Workers"": [
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:10.627 UTC,"postgres","postgres",81,"172.17.0.1:49374",6b01dfe8.51,9,"SELECT",2026-11-21 18:16:08 UTC,3/0,0,LOG,00000,"duration: 53.300 ms  statement: SELECT count(*) FROM orders WHERE status = 'open' /*controller='orders',route='%2Forders%2Fopen'*/",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:10.729 UTC,"postgres","postgres",81,"172.17.0.1:49374",6b01dfe8.51,10,"SELECT",2026-11-21 18:16:08 UTC,3/10,0,LOG,00000,"duration: 101.169 ms  plan:
+{
+  ""Query Text"": ""SELECT pg_sleep(0.1) /*action='report',controller='reports'*/"",
+  ""Plan"": {
+    ""Node Type"": ""Result"",
+    ""Parallel Aware"": false,
+    ""Async Capable"": false,
+    ""Startup Cost"": 0.00,
+    ""Total Cost"": 0.01,
+    ""Plan Rows"": 1,
+    ""Plan Width"": 4,
+    ""Actual Startup Time"": 101.156,
+    ""Actual Total Time"": 101.157,
+    ""Actual Rows"": 1,
+    ""Actual Loops"": 1,
+    ""Shared Hit Blocks"": 0,
+    ""Shared Read Blocks"": 0,
+    ""Shared Dirtied Blocks"": 0,
+    ""Shared Written Blocks"": 0,
+    ""Local Hit Blocks"": 0,
+    ""Local Read Blocks"": 0,
+    ""Local Dirtied Blocks"": 0,
+    ""Local Written Blocks"": 0,
+    ""Temp Read Blocks"": 0,
+    ""Temp Written Blocks"": 0
+  }
+}",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:10.729 UTC,"postgres","postgres",81,"172.17.0.1:49374",6b01dfe8.51,11,"SELECT",2026-11-21 18:16:08 UTC,3/0,0,LOG,00000,"duration: 101.445 ms  statement: SELECT pg_sleep(0.1) /*action='report',controller='reports'*/",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:10.931 UTC,"postgres","postgres",81,"172.17.0.1:49374",6b01dfe8.51,12,"SELECT",2026-11-21 18:16:08 UTC,3/11,0,LOG,00000,"duration: 201.320 ms  plan:
+{
+  ""Query Text"": ""SELECT pg_sleep(0.2) /*action='export',controller='reports'*/"",
+  ""Plan"": {
+    ""Node Type"": ""Result"",
+    ""Parallel Aware"": false,
+    ""Async Capable"": false,
+    ""Startup Cost"": 0.00,
+    ""Total Cost"": 0.01,
+    ""Plan Rows"": 1,
+    ""Plan Width"": 4,
+    ""Actual Startup Time"": 201.302,
+    ""Actual Total Time"": 201.303,
+    ""Actual Rows"": 1,
+    ""Actual Loops"": 1,
+    ""Shared Hit Blocks"": 0,
+    ""Shared Read Blocks"": 0,
+    ""Shared Dirtied Blocks"": 0,
+    ""Shared Written Blocks"": 0,
+    ""Local Hit Blocks"": 0,
+    ""Local Read Blocks"": 0,
+    ""Local Dirtied Blocks"": 0,
+    ""Local Written Blocks"": 0,
+    ""Temp Read Blocks"": 0,
+    ""Temp Written Blocks"": 0
+  }
+}",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:10.931 UTC,"postgres","postgres",81,"172.17.0.1:49374",6b01dfe8.51,13,"SELECT",2026-11-21 18:16:08 UTC,3/0,0,LOG,00000,"duration: 201.559 ms  statement: SELECT pg_sleep(0.2) /*action='export',controller='reports'*/",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:10.938 UTC,"postgres","postgres",86,"172.17.0.1:49388",6b01dfea.56,1,"authentication",2026-11-21 18:16:10 UTC,3/12,0,FATAL,28P01,"password authentication failed for user ""postgres""","Connection matched file ""/var/lib/postgresql/data/pg_hba.conf"" line 128: ""host all all all scram-sha-256""",,,,,,,,"","client backend",,0
+2026-11-21 18:16:10.945 UTC,"postgres","postgres",87,"172.17.0.1:49404",6b01dfea.57,1,"authentication",2026-11-21 18:16:10 UTC,3/13,0,FATAL,28P01,"password authentication failed for user ""postgres""","Connection matched file ""/var/lib/postgresql/data/pg_hba.conf"" line 128: ""host all all all scram-sha-256""",,,,,,,,"","client backend",,0
+2026-11-21 18:16:10.951 UTC,"nosuchdb","nosuchdb",88,"172.17.0.1:49416",6b01dfea.58,1,"authentication",2026-11-21 18:16:10 UTC,3/14,0,FATAL,28P01,"password authentication failed for user ""nosuchdb""","Role ""nosuchdb"" does not exist.
+Connection matched file ""/var/lib/postgresql/data/pg_hba.conf"" line 128: ""host all all all scram-sha-256""",,,,,,,,"","client backend",,0
+2026-11-21 18:16:11.006 UTC,"postgres","postgres",97,"172.17.0.1:49502",6b01dfeb.61,1,"initializing",2026-11-21 18:16:11 UTC,,0,FATAL,53300,"sorry, too many clients already",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:11.218 UTC,"postgres","postgres",98,"172.17.0.1:49506",6b01dfeb.62,1,"idle in transaction",2026-11-21 18:16:11 UTC,3/17,0,FATAL,25P03,"terminating connection due to idle-in-transaction timeout",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:11.632 UTC,"postgres","postgres",99,"172.17.0.1:49510",6b01dfeb.63,1,"idle",2026-11-21 18:16:11 UTC,3/0,0,FATAL,57P01,"terminating connection due to administrator command",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:12.082 UTC,"postgres","postgres",101,"172.17.0.1:49518",6b01dfec.65,1,"idle in transaction",2026-11-21 18:16:12 UTC,3/20,0,LOG,08006,"unexpected EOF on client connection with an open transaction",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:44.874 UTC,"postgres","postgres",110,"172.17.0.1:44500",6b01e00c.6e,1,"CREATE TABLE",2026-11-21 18:16:44 UTC,3/0,0,LOG,00000,"duration: 53.610 ms  statement: CREATE TABLE cities (city int, zip int)",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:46.962 UTC,"postgres","postgres",110,"172.17.0.1:44500",6b01e00c.6e,2,"INSERT",2026-11-21 18:16:44 UTC,3/44,744,LOG,00000,"duration: 2086.101 ms  plan:
+{
+  ""Query Text"": ""INSERT INTO cities SELECT g % 1000, g % 1000 FROM generate_series(1, 2000000) g"",
+  ""Plan"": {
+    ""Node Type"": ""ModifyTable"",
+    ""Operation"": ""Insert"",
+    ""Parallel Aware"": false,
+    ""Async Capable"": false,
+    ""Relation Name"": ""cities"",
+    ""Alias"": ""cities"",
+    ""Startup Cost"": 0.00,
+    ""Total Cost"": 30000.00,
+    ""Plan Rows"": 0,
+    ""Plan Width"": 0,
+    ""Actual Startup Time"": 2086.097,
+    ""Actual Total Time"": 2086.098,
+    ""Actual Rows"": 0,
+    ""Actual Loops"": 1,
+    ""Shared Hit Blocks"": 2017694,
+    ""Shared Read Blocks"": 0,
+    ""Shared Dirtied Blocks"": 8850,
+    ""Shared Written Blocks"": 11483,
+    ""Local Hit Blocks"": 0,
+    ""Local Read Blocks"": 0,
+    ""Local Dirtied Blocks"": 0,
+    ""Local Written Blocks"": 0,
+    ""Temp Read Blocks"": 3418,
+    ""Temp Written Blocks"": 3418,
+    ""Plans"": [
+      {
+        ""Node Type"": ""Function Scan"",
+        ""Parent Relationship"": ""Outer"",
+        ""Parallel Aware"": false,
+        ""Async Capable"": false,
+        ""Function Name"": ""generate_series"",
+        ""Alias"": ""g"",
+        ""Startup Cost"": 0.00,
+        ""Total Cost"": 30000.00,
+        ""Plan Rows"": 2000000,
+        ""Plan Width"": 8,
+        ""Actual Startup Time"": 172.630,
+        ""Actual Total Time"": 491.705,
+        ""Actual Rows"": 2000000,
+        ""Actual Loops"": 1,
+        ""Shared Hit Blocks"": 0,
+        ""Shared Read Blocks"": 0,
+        ""Shared Dirtied Blocks"": 0,
+        ""Shared Written Blocks"": 0,
+        ""Local Hit Blocks"": 0,
+        ""Local Read Blocks"": 0,
+        ""Local Dirtied Blocks"": 0,
+        ""Local Written Blocks"": 0,
+        ""Temp Read Blocks"": 3418,
+        ""Temp Written Blocks"": 3418
+      }
+    ]
+  }
+}",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:46.969 UTC,"postgres","postgres",110,"172.17.0.1:44500",6b01e00c.6e,3,"INSERT",2026-11-21 18:16:44 UTC,3/0,0,LOG,00000,"duration: 2094.027 ms  statement: INSERT INTO cities SELECT g % 1000, g % 1000 FROM generate_series(1, 2000000) g",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:47.071 UTC,"postgres","postgres",110,"172.17.0.1:44500",6b01e00c.6e,4,"ANALYZE",2026-11-21 18:16:44 UTC,3/0,0,LOG,00000,"duration: 100.995 ms  statement: ANALYZE cities",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:47.158 UTC,"postgres","postgres",110,"172.17.0.1:44500",6b01e00c.6e,5,"SELECT",2026-11-21 18:16:44 UTC,3/47,0,LOG,00000,"duration: 86.081 ms  plan:
+{
+  ""Query Text"": ""SELECT count(*) FROM cities WHERE city = 7 AND zip = 7 /*controller='geo',action='lookup'*/"",
+  ""Plan"": {
+    ""Node Type"": ""Aggregate"",
+    ""Strategy"": ""Plain"",
+    ""Partial Mode"": ""Simple"",
+    ""Parallel Aware"": false,
+    ""Async Capable"": false,
+    ""Startup Cost"": 38850.00,
+    ""Total Cost"": 38850.01,
+    ""Plan Rows"": 1,
+    ""Plan Width"": 8,
+    ""Actual Startup Time"": 86.069,
+    ""Actual Total Time"": 86.070,
+    ""Actual Rows"": 1,
+    ""Actual Loops"": 1,
+    ""Shared Hit Blocks"": 8850,
+    ""Shared Read Blocks"": 0,
+    ""Shared Dirtied Blocks"": 0,
+    ""Shared Written Blocks"": 0,
+    ""Local Hit Blocks"": 0,
+    ""Local Read Blocks"": 0,
+    ""Local Dirtied Blocks"": 0,
+    ""Local Written Blocks"": 0,
+    ""Temp Read Blocks"": 0,
+    ""Temp Written Blocks"": 0,
+    ""Plans"": [
+      {
+        ""Node Type"": ""Seq Scan"",
+        ""Parent Relationship"": ""Outer"",
+        ""Parallel Aware"": false,
+        ""Async Capable"": false,
+        ""Relation Name"": ""cities"",
+        ""Alias"": ""cities"",
+        ""Startup Cost"": 0.00,
+        ""Total Cost"": 38850.00,
+        ""Plan Rows"": 2,
+        ""Plan Width"": 0,
+        ""Actual Startup Time"": 0.012,
+        ""Actual Total Time"": 85.871,
+        ""Actual Rows"": 2000,
+        ""Actual Loops"": 1,
+        ""Filter"": ""((city = 7) AND (zip = 7))"",
+        ""Rows Removed by Filter"": 1998000,
+        ""Shared Hit Blocks"": 8850,
+        ""Shared Read Blocks"": 0,
+        ""Shared Dirtied Blocks"": 0,
+        ""Shared Written Blocks"": 0,
+        ""Local Hit Blocks"": 0,
+        ""Local Read Blocks"": 0,
+        ""Local Dirtied Blocks"": 0,
+        ""Local Written Blocks"": 0,
+        ""Temp Read Blocks"": 0,
+        ""Temp Written Blocks"": 0
+      }
+    ]
+  }
+}",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:47.158 UTC,"postgres","postgres",110,"172.17.0.1:44500",6b01e00c.6e,6,"SELECT",2026-11-21 18:16:44 UTC,3/0,0,LOG,00000,"duration: 86.647 ms  statement: SELECT count(*) FROM cities WHERE city = 7 AND zip = 7 /*controller='geo',action='lookup'*/",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:53.385 UTC,"postgres","postgres",110,"172.17.0.1:44500",6b01e00c.6e,7,"SELECT",2026-11-21 18:16:44 UTC,3/49,0,LOG,00000,"duration: 1153.331 ms  plan:
+{
+  ""Query Text"": ""SELECT * FROM cities ORDER BY zip, city LIMIT 5 OFFSET 500000 /*controller='geo',action='page'*/"",
+  ""Plan"": {
+    ""Node Type"": ""Limit"",
+    ""Parallel Aware"": false,
+    ""Async Capable"": false,
+    ""Startup Cost"": 348797.69,
+    ""Total Cost"": 348797.70,
+    ""Plan Rows"": 5,
+    ""Plan Width"": 8,
+    ""Actual Startup Time"": 1153.312,
+    ""Actual Total Time"": 1153.315,
+    ""Actual Rows"": 5,
+    ""Actual Loops"": 1,
+    ""Shared Hit Blocks"": 8850,
+    ""Shared Read Blocks"": 0,
+    ""Shared Dirtied Blocks"": 0,
+    ""Shared Written Blocks"": 0,
+    ""Local Hit Blocks"": 0,
+    ""Local Read Blocks"": 0,
+    ""Local Dirtied Blocks"": 0,
+    ""Local Written Blocks"": 0,
+    ""Temp Read Blocks"": 18729,
+    ""Temp Written Blocks"": 23981,
+    ""Plans"": [
+      {
+        ""Node Type"": ""Sort"",
+        ""Parent Relationship"": ""Outer"",
+        ""Parallel Aware"": false,
+        ""Async Capable"": false,
+        ""Startup Cost"": 347547.69,
+        ""Total Cost"": 352547.69,
+        ""Plan Rows"": 2000000,
+        ""Plan Width"": 8,
+        ""Actual Startup Time"": 1012.117,
+        ""Actual Total Time"": 1055.330,
+        ""Actual Rows"": 500005,
+        ""Actual Loops"": 1,
+        ""Sort Key"": [""zip"", ""city""],
+        ""Sort Method"": ""external merge"",
+        ""Sort Space Used"": 35304,
+        ""Sort Space Type"": ""Disk"",
+        ""Shared Hit Blocks"": 8850,
+        ""Shared Read Blocks"": 0,
+        ""Shared Dirtied Blocks"": 0,
+        ""Shared Written Blocks"": 0,
+        ""Local Hit Blocks"": 0,
+        ""Local Read Blocks"": 0,
+        ""Local Dirtied Blocks"": 0,
+        ""Local Written Blocks"": 0,
+        ""Temp Read Blocks"": 18729,
+        ""Temp Written Blocks"": 23981,
+        ""Plans"": [
+          {
+            ""Node Type"": ""Seq Scan"",
+            ""Parent Relationship"": ""Outer"",
+            ""Parallel Aware"": false,
+            ""Async Capable"": false,
+            ""Relation Name"": ""cities"",
+            ""Alias"": ""cities"",
+            ""Startup Cost"": 0.00,
+            ""Total Cost"": 28850.00,
+            ""Plan Rows"": 2000000,
+            ""Plan Width"": 8,
+            ""Actual Startup Time"": 0.016,
+            ""Actual Total Time"": 141.975,
+            ""Actual Rows"": 2000000,
+            ""Actual Loops"": 1,
+            ""Shared Hit Blocks"": 8850,
+            ""Shared Read Blocks"": 0,
+            ""Shared Dirtied Blocks"": 0,
+            ""Shared Written Blocks"": 0,
+            ""Local Hit Blocks"": 0,
+            ""Local Read Blocks"": 0,
+            ""Local Dirtied Blocks"": 0,
+            ""Local Written Blocks"": 0,
+            ""Temp Read Blocks"": 0,
+            ""Temp Written Blocks"": 0
+          }
+        ]
+      }
+    ]
+  },
+  ""JIT"": {
+    ""Functions"": 2,
+    ""Options"": {
+      ""Inlining"": false,
+      ""Optimization"": false,
+      ""Expressions"": true,
+      ""Deforming"": true
+    },
+    ""Timing"": {
+      ""Generation"": 0.207,
+      ""Inlining"": 0.000,
+      ""Optimization"": 3.736,
+      ""Emission"": 74.067,
+      ""Total"": 78.010
+    }
+  }
+}",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:53.388 UTC,"postgres","postgres",110,"172.17.0.1:44500",6b01e00c.6e,8,"SELECT",2026-11-21 18:16:44 UTC,3/0,0,LOG,00000,"duration: 6228.570 ms  statement: SELECT * FROM cities ORDER BY zip, city LIMIT 5 OFFSET 500000 /*controller='geo',action='page'*/",,,,,,,,,"","client backend",,0
+2026-11-21 18:16:53.499 UTC,,,1,,6b01dfd5.1,6,,2026-11-21 18:15:49 UTC,,0,LOG,00000,"server process (PID 112) was terminated by signal 9: Killed",,,,,,,,,"","postmaster",,0
+2026-11-21 18:16:53.499 UTC,,,1,,6b01dfd5.1,7,,2026-11-21 18:15:49 UTC,,0,LOG,00000,"terminating any other active server processes",,,,,,,,,"","postmaster",,0
+2026-11-21 18:16:53.501 UTC,,,1,,6b01dfd5.1,8,,2026-11-21 18:15:49 UTC,,0,LOG,00000,"all server processes terminated; reinitializing",,,,,,,,,"","postmaster",,0
+2026-11-21 18:16:53.515 UTC,,,119,,6b01e015.77,1,,2026-11-21 18:16:53 UTC,,0,LOG,00000,"database system was interrupted; last known up at 2026-11-21 18:15:49 UTC",,,,,,,,,"","startup",,0
+2026-11-21 18:16:53.647 UTC,,,119,,6b01e015.77,2,,2026-11-21 18:16:53 UTC,,0,LOG,00000,"database system was not properly shut down; automatic recovery in progress",,,,,,,,,"","startup",,0
+2026-11-21 18:16:53.648 UTC,,,119,,6b01e015.77,3,,2026-11-21 18:16:53 UTC,,0,LOG,00000,"redo starts at 0/1504908",,,,,,,,,"","startup",,0
+2026-11-21 18:16:55.414 UTC,,,119,,6b01e015.77,4,,2026-11-21 18:16:53 UTC,,0,LOG,00000,"invalid magic number 0000 in WAL segment 000000010000000000000013, LSN 0/13726000, offset 7495680",,,,,,,,,"","startup",,0
+2026-11-21 18:16:55.414 UTC,,,119,,6b01e015.77,5,,2026-11-21 18:16:53 UTC,,0,LOG,00000,"redo done at 0/13725FA8 system usage: CPU: user: 1.57 s, system: 0.18 s, elapsed: 1.76 s",,,,,,,,,"","startup",,0
+2026-11-21 18:16:55.417 UTC,,,120,,6b01e015.78,1,,2026-11-21 18:16:53 UTC,,0,LOG,00000,"checkpoint starting: end-of-recovery immediate wait",,,,,,,,,"","checkpointer",,0
+2026-11-21 18:16:55.600 UTC,,,120,,6b01e015.78,2,,2026-11-21 18:16:53 UTC,,0,LOG,00000,"checkpoint complete: wrote 16386 buffers (100.0%); 0 WAL file(s) added, 0 removed, 18 recycled; write=0.079 s, sync=0.099 s, total=0.184 s; sync files=37, longest=0.076 s, average=0.003 s; distance=297093 kB, estimate=297093 kB; lsn=0/13726048, redo lsn=0/13726048",,,,,,,,,"","checkpointer",,0
+2026-11-21 18:16:55.605 UTC,,,1,,6b01dfd5.1,9,,2026-11-21 18:15:49 UTC,,0,LOG,00000,"database system is ready to accept connections",,,,,,,,,"","postmaster",,0
