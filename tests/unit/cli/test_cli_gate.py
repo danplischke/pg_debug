@@ -232,7 +232,11 @@ def test_logs_need_no_database(pg_client):
     assert "process 4344 waited for ShareLock on transaction 747, held by 4335" in out
     assert "1.7s acquired, process 4359 for AccessShareLock on relation 16389 of database 16388, held by 4347" in out
     assert "Checkpoints occurring too frequently: 6 warning(s), the closest 0s apart" in out
-    assert "What these logs cannot show" not in out, "every kind of event is in this log"
+    # Every kind of event is in this log but the plans auto_explain logs, which
+    # the server that wrote it did not load.
+    cannot_show = out.split("What these logs cannot show:\n", 1)[1].strip().splitlines()
+    assert len(cannot_show) == 1
+    assert "No auto_explain plan was logged" in cannot_show[0]
     pg_client.__aenter__.assert_not_called()
 
 

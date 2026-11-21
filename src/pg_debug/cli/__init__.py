@@ -100,6 +100,11 @@ async def run(args: argparse.Namespace) -> int:
         print(format_result(args, analyze_logs(args.files, prefix=args.prefix, log_format=args.log_format, min_ratio=args.min_ratio)))
         return 0
 
+    if args.command == "top-queries" and args.interval is not None and args.compare is not None:
+        raise InvalidArgumentError(
+            "top-queries takes --interval or --compare, not both: one measures a few seconds from now, the other since a snapshot."
+        )
+
     if args.command == "plans" and args.exit_code and not args.baseline:
         raise InvalidArgumentError("plans --exit-code needs --baseline FILE: without one there is no accepted shape for a plan to differ from.")
 

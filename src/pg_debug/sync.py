@@ -14,6 +14,7 @@ from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Iterable
 from concurrent.futures import Future
+from pathlib import Path
 from typing import Any
 from typing import TypeVar
 
@@ -51,6 +52,7 @@ from .server_rates import ServerRates
 from .sharding import DEFAULT_INTERVAL_SECONDS
 from .sharding import ShardReadiness
 from .top_queries import QuerySample
+from .top_queries import QuerySnapshot
 from .waits import DEFAULT_SAMPLE_INTERVAL
 from .waits import WaitDiagnosis
 from .waits import WaitProfile
@@ -359,6 +361,14 @@ class SyncPgDebug:
     ) -> QuerySample:
         """Measure the most expensive queries over an interval, and say what the ranking left out."""
         return self._call(self._client.sample_top_queries, interval_seconds, sort_by=sort_by, limit=limit)
+
+    def snapshot_top_queries(self) -> QuerySnapshot:
+        """Read pg_stat_statements' counters now, to compare a later moment with."""
+        return self._call(self._client.snapshot_top_queries)
+
+    def compare_top_queries(self, snapshot: QuerySnapshot | str | Path, sort_by: SortBy = "resources", limit: int = 10) -> QuerySample:
+        """The most expensive queries since a snapshot, ranked as a sample ranks them."""
+        return self._call(self._client.compare_top_queries, snapshot, sort_by=sort_by, limit=limit)
 
     def sample_server_rates(self, interval_seconds: float = DEFAULT_RATES_INTERVAL) -> ServerRates:
         """Measure the server's own counters over an interval, as rates per second."""

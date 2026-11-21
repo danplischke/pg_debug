@@ -262,6 +262,14 @@ def render_activity(rows: Sequence[Mapping[str, Any]]) -> str:
         }
         for row in rows
     ]
+    if any(row.get("tags") for row in rows):
+        # Who sent each query, ahead of the query, whose width it would
+        # otherwise take; the trace context is in --json.
+        for row, shown in zip(rows, projected, strict=True):
+            tags = {k: v for k, v in (row.get("tags") or {}).items() if k not in ("traceparent", "tracestate")}
+            query = shown.pop("query")
+            shown["from"] = describe_tags(tags)
+            shown["query"] = query
     cells = [
         {column: value if column == "query" and is_withheld(row) else _cell(value, ACTIVITY_CELL_WIDTH) for column, value in shown.items()}
         for row, shown in zip(rows, projected, strict=True)
@@ -1577,6 +1585,24 @@ def sampled_queries_text(queries: Sequence[Mapping[str, Any]]) -> list[dict[str,
     return [{**row, "change": word(row.get("change"))} for row in queries]
 
 
+def tags_text(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The rows with their sqlcommenter tags as ``from route=/orders controller=orders``, or without the column when none has any.
+
+    The trace context names one run, not the statement, and is left to --json.
+    """
+    if not any(row.get("tags") for row in rows):
+        return [{key: value for key, value in row.items() if key != "tags"} for row in rows]
+    shown: list[dict[str, Any]] = []
+    for row in rows:
+        tags = {k: v for k, v in (row.get("tags") or {}).items() if k not in ("traceparent", "tracestate")}
+        entry = {key: value for key, value in row.items() if key not in ("tags", "query")}
+        entry["from"] = describe_tags(tags)
+        if "query" in row:
+            entry["query"] = row["query"]
+        shown.append(entry)
+    return shown
+
+
 def note_withheld_sample(access: StatisticsAccess, withheld: int, sort_by: str) -> str | None:
     """What ``top-queries --interval`` left out of its ranking, and why."""
     if not withheld:
@@ -1625,6 +1651,7 @@ __all__ = [
     "render_wait_diagnosis",
     "render_wait_profile",
     "sampled_queries_text",
+    "tags_text",
     "to_json",
     "with_wait_diagnosis",
     "withheld_because",

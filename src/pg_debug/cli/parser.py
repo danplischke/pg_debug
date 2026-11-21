@@ -666,6 +666,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="Sample over this many seconds instead of reporting totals since the last statistics reset.",
     )
+    top_queries.add_argument(
+        "--save",
+        metavar="FILE",
+        help="Also save a snapshot of pg_stat_statements' counters to FILE, for a later --compare.",
+    )
+    top_queries.add_argument(
+        "--compare",
+        metavar="FILE",
+        help="Report what ran since the snapshot in FILE (from --save): each statement's counters since, and the statements "
+        "that are new or whose mean time moved. With --save as well, the new snapshot replaces the old for next time.",
+    )
     top_queries.set_defaults(func=cmd_top_queries)
 
     server_rates = subparsers.add_parser("server-rates", help="Measure the server's counters over an interval: commits, I/O, WAL, checkpoints, slots")

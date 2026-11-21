@@ -6,6 +6,7 @@ import logging
 import os
 from collections.abc import Iterable
 from enum import Enum
+from pathlib import Path
 from typing import Any
 from typing import Literal
 
@@ -83,6 +84,7 @@ from .sharding import ShardReadiness
 from .sharding import ShardReadinessAssessor
 from .statistics import StatisticsInspector
 from .top_queries import QuerySample
+from .top_queries import QuerySnapshot
 from .top_queries import TopQueriesCalc
 from .waits import DEFAULT_SAMPLE_INTERVAL
 from .waits import WaitDiagnosis
@@ -1026,6 +1028,55 @@ class PgDebug:
         sample_sort = {"resources": "resources", "mean_time": "mean", "total_time": "total"}[sort_by]
         top_queries_tool = TopQueriesCalc(sql_driver=await self.sql_driver())
         return await top_queries_tool.measure(interval_seconds, sort_by=sample_sort, limit=limit)  # type: ignore[arg-type]
+
+    async def snapshot_top_queries(self) -> QuerySnapshot:
+        """Read pg_stat_statements' counters now, to compare a later moment with.
+
+        :meth:`~pg_debug.top_queries.QuerySnapshot.save` writes it to a file,
+        and :meth:`compare_top_queries` compares it with the counters then:
+        before and after a deploy, or a day apart, with nothing running in
+        between.
+
+        Raises:
+            ExtensionRequiredError: If pg_stat_statements is not installed.
+        """
+        return await TopQueriesCalc(sql_driver=await self.sql_driver()).snapshot()
+
+    async def compare_top_queries(
+        self,
+        snapshot: QuerySnapshot | str | Path,
+        sort_by: SortBy = "resources",
+        limit: int = 10,
+    ) -> QuerySample:
+        """The most expensive queries since a snapshot, ranked as a sample ranks them.
+
+        Each statement's counters since the snapshot, and the statements that
+        are new since or whose mean time moved by a factor of three either
+        way against their mean before it, as candidates. A reset of
+        pg_stat_statements or a server restart since the snapshot is said in
+        ``notes`` rather than mistaken for work.
+
+        Args:
+            snapshot: A :class:`~pg_debug.top_queries.QuerySnapshot`, or the
+                file one was saved to.
+            sort_by: As :meth:`get_top_queries` takes it.
+            limit: Number of queries to return.
+
+        Returns:
+            A :class:`~pg_debug.top_queries.QuerySample` whose ``since`` is
+            when the snapshot was taken.
+
+        Raises:
+            InvalidArgumentError: If ``sort_by`` is not a valid criterion, the
+                file is not a snapshot, or the snapshot was taken in another
+                database.
+            ExtensionRequiredError: If pg_stat_statements is not installed.
+        """
+        _check_sort_by(sort_by)
+        if not isinstance(snapshot, QuerySnapshot):
+            snapshot = QuerySnapshot.load(snapshot)
+        sample_sort = {"resources": "resources", "mean_time": "mean", "total_time": "total"}[sort_by]
+        return await TopQueriesCalc(sql_driver=await self.sql_driver()).compare(snapshot, sort_by=sample_sort, limit=limit)  # type: ignore[arg-type]
 
     async def sample_server_rates(self, interval_seconds: float = DEFAULT_RATES_INTERVAL) -> ServerRates:
         """Measure the server's own counters over an interval, as rates per second.
