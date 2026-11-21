@@ -54,6 +54,7 @@ UNTRIED = (
 AZURE_QUERY_STORE_DOC = "https://learn.microsoft.com/en-us/azure/postgresql/monitor/concepts-query-store"
 AURORA_STAT_STATEMENTS_DOC = "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora_stat_statements.html"
 AURORA_STAT_PLANS_DOC = "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora_stat_plans.html"
+AURORA_SYSTEM_WAITS_DOC = "https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora_stat_system_waits.html"
 CLOUD_SQL_ADVISOR_DOC = "https://docs.cloud.google.com/sql/docs/postgres/use-index-advisor"
 ALLOYDB_ADVISOR_DOC = "https://docs.cloud.google.com/alloydb/docs/use-index-advisor"
 NEON_FILE_CACHE_DOC = "https://neon.com/docs/extensions/neon"
@@ -80,6 +81,9 @@ SELECT
     (SELECT quote_ident(n.nspname) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
       WHERE p.proname = 'aurora_stat_plans' ORDER BY n.nspname <> 'pg_catalog' LIMIT 1) AS aurora_stat_plans,
     current_setting('aurora_compute_plan_id', true) AS aurora_compute_plan_id,
+    (SELECT quote_ident(n.nspname) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE p.proname = 'aurora_stat_system_waits' ORDER BY n.nspname <> 'pg_catalog' LIMIT 1) AS aurora_stat_system_waits,
+    pg_postmaster_start_time() AS server_started,
     (SELECT quote_ident(n.nspname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE c.relname = 'google_db_advisor_recommended_indexes' LIMIT 1) AS google_db_advisor,
     (SELECT quote_ident(n.nspname) FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
@@ -196,6 +200,7 @@ class HistoryReader:
         if platform is Platform.AURORA or found.get("aurora_stat_statements") or found.get("aurora_stat_plans"):
             sources.append(await self._guarded(self._aurora_statements(found, limit)))
             sources.append(await self._guarded(self._aurora_plans(found, limit)))
+            sources.append(await self._guarded(self._aurora_waits(found, limit)))
         if platform in (Platform.CLOUD_SQL, Platform.ALLOYDB) or found.get("google_db_advisor"):
             sources.append(await self._guarded(self._google_db_advisor(found, limit)))
         if platform in (Platform.NEON, Platform.LAKEBASE) or found.get("neon"):
@@ -383,6 +388,57 @@ LIMIT {{}}
             source.status = (
                 f"{len(source.rows)} statements read. storage_blks_read counts the blocks read from Aurora storage and "
                 "orcache_blks_hit those served by the Optimized Reads cache; shared_blks_read counts both as misses."
+            )
+
+        return source, read
+
+    def _aurora_waits(self, found: dict[str, Any], limit: int) -> Reading:
+        # aurora_stat_system_waits(): type_id, event_id, waits and wait_time,
+        # "the total amount of time in microseconds spent waiting for this
+        # event", cumulative for the instance and reset when it restarts
+        # (AURORA_SYSTEM_WAITS_DOC). Named by joining aurora_stat_wait_event()
+        # and aurora_stat_wait_type() on type_id and event_id: the wait-event
+        # page's column list and its example disagree on whether it has a
+        # type_name, so the type's name is taken from the type function. The
+        # per-backend function's page gives milliseconds for the same column,
+        # and is not read.
+        schema = found.get("aurora_stat_system_waits")
+        started = found.get("server_started")
+        source = HistorySource(
+            name="aurora_wait_events",
+            label="Aurora aurora_stat_system_waits()",
+            present=bool(schema),
+            capturing=True if schema else None,
+            retention=f"since the instance last started{f' ({started.isoformat()})' if started else ''}; a restart clears it",
+            status="",
+            evidence={"server_started": started.isoformat() if started else None},
+            doc=AURORA_SYSTEM_WAITS_DOC,
+        )
+
+        async def read(source: HistorySource) -> None:
+            if not schema:
+                source.status = "The function is not in this database: Aurora PostgreSQL has it; RDS for PostgreSQL does not."
+                return
+            system_waits = _function(schema, "aurora_stat_system_waits")
+            events = _function(schema, "aurora_stat_wait_event")
+            types = _function(schema, "aurora_stat_wait_type")
+            source.rows = await self._query(
+                f"""
+SELECT t.type_name AS wait_event_type, e.event_name AS wait_event, w.waits,
+       round(w.wait_time / 1000.0, 1) AS wait_ms,
+       round(100.0 * w.wait_time / NULLIF(sum(w.wait_time) OVER (), 0), 1) AS percent_of_wait_time
+FROM {system_waits}() w
+JOIN {events}() e ON e.type_id = w.type_id AND e.event_id = w.event_id
+JOIN {types}() t ON t.type_id = w.type_id
+WHERE w.waits > 0
+ORDER BY w.wait_time DESC
+LIMIT {{}}
+""",
+                [limit],
+            )
+            source.status = (
+                f"The {len(source.rows)} wait events with the most wait time since the instance started, across every "
+                "backend: what the instance waited on, without sampling it. Time on CPU is not a wait and is not in it."
             )
 
         return source, read

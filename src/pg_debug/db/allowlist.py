@@ -523,6 +523,11 @@ ALLOWED_FUNCTIONS: set[str] = {
     # per tracked plan. Both only read what Aurora has recorded.
     "aurora_stat_statements",
     "aurora_stat_plans",
+    # Aurora's wait counters since the instance started, and the names of
+    # the events and their types: each only reads what Aurora has counted.
+    "aurora_stat_system_waits",
+    "aurora_stat_wait_event",
+    "aurora_stat_wait_type",
     # WAL distance (pg_current_wal_lsn is above), multixact age and collation library versions:
     # each reads a counter or asks the C library or ICU for a version string,
     # and writes nothing
