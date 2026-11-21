@@ -120,8 +120,16 @@ The other commands have their method too, each returning a dataclass with
 - `analyze_query_indexes(queries, max_index_size_mb=10000, method="dta",
   max_regression_factor=0.1)` and `analyze_workload_indexes(...)` → `dict`
   with the recommendations and what was refused.
-- `pg_debug.analyze_logs(paths, prefix=None, log_format=None)` → `LogReport`,
-  a function that needs no client or connection.
+- `pg_debug.analyze_logs(paths, prefix=None, log_format=None, min_ratio=None)`
+  → `LogReport` (`plans`, `slow_statements`, `connections`, deadlocks and the
+  rest), a function that needs no client or connection;
+  `read_server_logs(files=None, latest=1)` → the same, read through `log_fdw`.
+- `compare_queries(queries, values=None, repeat=3)` → `QueryComparison`: each
+  variant with each set of values, its median time, buffers, rows, plan shape
+  and findings, the `fastest`, and `notes`.
+- `snapshot_top_queries()` → `QuerySnapshot` (`.save(path)`,
+  `QuerySnapshot.load(path)`); `compare_top_queries(snapshot_or_path)` →
+  `QuerySample` since it, with `since` and `notes`.
 
 To run the user's queries as their application does, with its role and the
 session variables its row-level security policies read, give the client a

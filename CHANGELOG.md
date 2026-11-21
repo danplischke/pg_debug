@@ -8,6 +8,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `logs` reads what a log says about queries and connections, not only
+  deadlocks, lock waits, spills, vacuums and checkpoints. The plans
+  `auto_explain` logged are grouped by query, with their count, total and
+  slowest run, and the slowest run's plan is diagnosed with `diagnose`'s rules
+  and no database: on RDS, Aurora or anywhere `auto_explain` runs, the plan of
+  the slow run as it ran, with its real values, rather than one `EXPLAIN`
+  chooses later. Statements past `log_min_duration_statement` are grouped the
+  same way. Connections refused, ended or lost are counted by kind and by
+  `user@database`: authentication failures, `pg_hba.conf` refusals, unknown
+  roles and databases, `max_connections` and connection limits, idle and
+  administrator terminations, recovery conflicts, a backend killed by a signal
+  (the OOM killer's 9 restarts every session), TLS failures and clients gone
+  mid-transaction. They carry the rules `logged_plan`, `slow_statement` and
+  `connection_event`, and the library's `LogReport` has `plans`,
+  `slow_statements` and `connections`.
+
+- `logs --from-database` reads the server's own log files over SQL through
+  `log_fdw`, where they cannot be opened, as on RDS and Aurora, without AWS
+  credentials or a download. Each file is made a foreign table, read and
+  rolled back in one call, so nothing is left in the database; that is a
+  write, so restricted mode refuses it. `--latest N` reads more than the
+  latest file. `PgDebug.read_server_logs()` does the same. It follows AWS's
+  documentation and the extension's source, and has not been run on RDS.
+
+- `top-queries --save FILE` saves `pg_stat_statements`' counters to a file,
+  and `--compare FILE` reports what ran since: each statement's counters, and
+  the ones that are new or whose mean time moved by a factor of three. Before,
+  "what got slower since the deploy" needed `--interval` to be running across
+  the deploy, or a monitoring service. A reset of `pg_stat_statements` since
+  the snapshot is read and the comparison measures from it instead of
+  subtracting across it; a restart is said. `PgDebug.snapshot_top_queries()`,
+  `compare_top_queries()` and `QuerySnapshot` are the library's side.
+
+- `pg-debug compare-queries` runs ways of writing a query, or one query with
+  several sets of values (`--values`, a JSON array per set), side by side
+  under `EXPLAIN (ANALYZE, BUFFERS)`, `--repeat` times each: the median time,
+  buffers, rows and plan shape of each, the fastest marked, and what
+  `diagnose` finds in each. Its notes say what the numbers cannot settle:
+  variants that returned different numbers of rows, a plan that changed with
+  the values, a cold first run. Like `diagnose` it is refused in restricted
+  mode. `PgDebug.compare_queries()` returns a `QueryComparison`.
+
+- `activity`, `top-queries` and the plans and statements in `logs` show who
+  sent each statement, from the sqlcommenter tags at the end of its text
+  (route, controller, action, trace) that Django, Rails, Spring and the
+  OpenTelemetry instrumentations write. In `top-queries` they are the tags of
+  the run `pg_stat_statements` kept the text of, since it groups runs with
+  their comments ignored. Rows carry them as `tags`.
+
+- `history` reads Aurora's wait events since the instance started
+  (`aurora_stat_system_waits()`), named and in milliseconds. On Aurora, where
+  `pg_wait_sampling` is not offered, what the instance waited on was only
+  seen by sampling it with `activity --sample` for as long as the command ran.
+
 - The Claude Code skill covers what it was silent on: transaction poolers and
   managed platforms, read replicas and replication slots, sharding, and
   partitions once they exist. A new `platforms.md` says which endpoint to
@@ -478,6 +532,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   neither platform was available.
 
 ### Changed
+
+- `logs` reads RDS's log line prefix, `%t:%r:%u@%d:[%p]:`, without being
+  told it. The prefix puts `user@db` before the process id and between colons,
+  and the detection looked for it only after the process id and between
+  spaces, so the database and the role went unreported.
 
 - pg-debug pins pglast 7.23 instead of 7.11, so installing it no longer holds
   pglast back at the older release. It still parses with PostgreSQL 17's

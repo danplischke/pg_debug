@@ -283,9 +283,14 @@ transaction left by a client can stay open indefinitely.
 ## logs
 
 `pg-debug logs FILE...` reads server logs with no connection: stderr (with
-`--prefix` set to the server's `log_line_prefix`, or detected), csvlog and
-jsonlog, plain or `.gz`; `--format` names the format where detecting it from
-each file is not wanted. Each finding names the `file:line` it was read from.
+`--prefix` set to the server's `log_line_prefix`, or detected, RDS's
+`%t:%r:%u@%d:[%p]:` included), csvlog and jsonlog, plain or `.gz`; `--format`
+names the format where detecting it from each file is not wanted. On RDS and
+Aurora, where the files cannot be opened, `logs --from-database` reads the
+latest file (`--latest N` for more, or files by name) through `log_fdw`, which
+a member of `rds_superuser` installs once with `CREATE EXTENSION log_fdw;
+CREATE SERVER log_server FOREIGN DATA WRAPPER log_fdw;`; each file is made a
+foreign table and rolled back, and restricted mode refuses it. Each finding names the `file:line` it was read from.
 Messages are matched in English (`lc_messages` C or English). When a kind of
 event is absent the report says which setting it depends on, since a quiet
 log is not a healthy server.
@@ -330,3 +335,37 @@ Reads: log. `checkpoints are occurring too frequently (N seconds apart)`: WAL
 filled `max_wal_size` before `checkpoint_timeout`, closer together than
 `checkpoint_warning`. The report also counts the checkpoints logged
 (`log_checkpoints`) by what started them.
+
+### logged_plan
+
+Reads: log. The plans `auto_explain` logged, one entry per query (its
+constants and comments aside, or its query identifier where
+`auto_explain.log_verbose` logged one): how many runs, their total and the
+slowest, and what is wrong with the slowest run's plan, by `diagnose`'s rules
+with no database, so stale statistics and correlated columns say they could
+not be checked. Diagnosed only with `auto_explain.log_format = 'json'` and
+`auto_explain.log_analyze = on`; a text plan, or one with estimates only, says
+why it was not. `callers` holds the distinct sqlcommenter tags its runs
+carried: the route or controller that sent it. On RDS and Aurora,
+`auto_explain` is loaded through the parameter group's
+`shared_preload_libraries`.
+
+### slow_statement
+
+Reads: log. `duration: ... statement:` lines from `log_min_duration_statement`,
+one entry per query, with the count, total and slowest, and the callers'
+tags. No plan; `logged_plan` has the plans where `auto_explain` runs too.
+
+### connection_event
+
+Reads: log. Connections refused, ended or lost, counted by kind and by
+`user@database` (and host, for `pg_hba.conf`): `authentication_failed`,
+`no_hba_entry`, `hba_rejected`, `unknown_role`, `unknown_database`,
+`too_many_clients` (max_connections reached), `connection_limit` (a role's or
+database's), `not_accepting` (starting, stopping, recovering),
+`idle_in_transaction_timeout`, `idle_session_timeout`,
+`terminated_by_administrator`, `recovery_conflict`, `backend_crashed` (a
+server process died by a signal, or exited with a code a clean exit does not
+use; signal 9 is almost always the OOM killer), `terminated_by_crash`,
+`ssl_failed`, `client_vanished_in_transaction` and `client_reset`. A
+background worker exiting with 1 during a fast shutdown is not a crash.

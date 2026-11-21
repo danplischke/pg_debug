@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
 
+from ..rules import DOCS_URL
 from .parse import LogEntry
 
 #: How many ``file:line`` references a kind of event keeps.
@@ -184,6 +185,8 @@ class ConnectionEvents:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "rule": "connection_event",
+            "docs": f"{DOCS_URL}#connection_event",
             "kind": self.kind,
             "meaning": self.meaning,
             "count": self.count,

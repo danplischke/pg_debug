@@ -129,6 +129,26 @@ planner's cost with the index in place, without touching the database. Compare
 `Total Cost` before and after and say what changed rather than asserting an
 index is a good idea.
 
+### Is the rewrite faster? Is it slow for every value?
+
+`compare-queries` runs the ways of writing a query, or one query with each set
+of values, under `EXPLAIN (ANALYZE, BUFFERS)`, three times each by default, and
+lists each with its median time, buffers hit and read, rows and plan shape,
+the fastest marked, and what `diagnose` finds in each:
+
+```bash
+pg-debug compare-queries "SELECT ... WHERE k = $1" "SELECT ... WHERE k + 0 = $1" --values '[1]' --values '[950000]'
+pg-debug compare-queries before.sql after.sql --repeat 5
+```
+
+`--values` is a JSON array for `$1`, `$2`...; a string is written in untyped,
+as a bind parameter is. Relay its notes rather than only the fastest: variants
+that returned different numbers of rows are not the same query, and the faster
+one may do less; a variant whose plan changed with its values is the case the
+next section is about; a first run much slower than the rest paid for a cold
+cache. It runs the statements, so it is refused in restricted mode, and a write
+is rolled back.
+
 ## When the application runs as another role
 
 pg-debug sees the database as the user in the connection URL. When that is the
@@ -232,6 +252,7 @@ for that value. Compare the two:
 ```bash
 pg-debug explain 'SELECT * FROM orders WHERE status = $1'
 pg-debug explain "SELECT * FROM orders WHERE status = 'refunded'"
+pg-debug compare-queries 'SELECT * FROM orders WHERE status = $1' --values '["shipped"]' --values '["refunded"]'
 ```
 
 `diagnose --plan` over `auto_explain` output of a generic plan reports

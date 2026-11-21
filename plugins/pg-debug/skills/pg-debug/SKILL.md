@@ -110,6 +110,8 @@ and answering the question.
 | Is the database healthy? | `pg-debug health` | [health.md](references/health.md) |
 | Could an index or a page be corrupt? (an OS or ICU upgrade, checksum failures) | `pg-debug health --type collation,checksum` | [incidents.md](references/incidents.md) |
 | What is the database spending its time on? | `pg-debug top-queries --interval 10` | [health.md](references/health.md) |
+| What got slower since the deploy? | `pg-debug top-queries --save before.json`, then `top-queries --compare before.json` | [health.md](references/health.md) |
+| Is this rewrite faster? Is the query slow for every value or one? | `pg-debug compare-queries "<A>" "<B>" --values '[1]' --values '[2]'` | [slow-queries.md](references/slow-queries.md) |
 | What is the server doing per second right now? (commits, I/O, temp files, WAL, checkpoints, slot growth) | `pg-debug server-rates --interval 10` | [health.md](references/health.md) |
 | Are clients waiting in PgBouncer? Is the pool too small? | `pg-debug pooler postgresql://user@host:6432/pgbouncer` | [platforms.md](references/platforms.md) |
 | Are the server's settings right? | `pg-debug config` | [health.md](references/health.md) |
@@ -117,7 +119,7 @@ and answering the question.
 | Is this migration safe to run? | `pg-debug check-migration <file>` | [schema.md](references/schema.md) |
 | Can we upgrade to the next major version? Is the server secure? | `pg-debug upgrade-check --to 18`, `pg-debug security` | [schema.md](references/schema.md) |
 | Put a check in CI: gate a build, suppress a rule, `--static` on an empty database, fail when a plan changes | `pg-debug model --static --exit-code`, `health --exit-code --baseline b.json`, `plans --queries q.sql --baseline p.json --exit-code` | [rules.md](references/rules.md) |
-| What happened, from the server log? (deadlocks, lock waits, temp files, skipped or slow autovacuum, checkpoints) | `pg-debug logs postgresql.log` — no connection | [rules.md](references/rules.md) |
+| What happened, from the server log? (slow `auto_explain` plans, refused connections, OOM kills, deadlocks, lock waits, temp files, autovacuum, checkpoints) | `pg-debug logs postgresql.log` — no connection; on RDS/Aurora `logs --from-database` | [rules.md](references/rules.md) |
 | Should this table be partitioned? | `pg-debug partitions` | [schema.md](references/schema.md) |
 | Partition maintenance: pruning, attach and detach, pg_partman | `pg-debug health --type partition`; `diagnose "<query>"` against the partitioned table; `check-migration` for the partition DDL | [schema.md](references/schema.md) |
 | What tables, columns and indexes exist? | `pg-debug schemas`, `objects`, `describe` | below |
@@ -125,7 +127,7 @@ and answering the question.
 | On a managed or serverless platform (Neon, Supabase, RDS/Aurora, Cloud SQL/AlloyDB, Azure) | the connection URL's host and port, to name the platform, then the command for the question | [platforms.md](references/platforms.md) |
 | On a read replica, or about replication slots | `pg-debug health --type replication,vacuum`; the replica's own URL for the queries it runs | [scale-out.md](references/scale-out.md) |
 | Should we shard? (Citus, sharding proxies) | `pg-debug shard-readiness --interval 30` | [scale-out.md](references/scale-out.md) |
-| What history does the platform keep? (Azure Query Store, Aurora plans, the Cloud SQL/AlloyDB index advisor, Neon's file cache, pg_qualstats, pg_wait_sampling) | `pg-debug history` | [platforms.md](references/platforms.md) |
+| What history does the platform keep? (Azure Query Store, Aurora plans and wait events, the Cloud SQL/AlloyDB index advisor, Neon's file cache, pg_qualstats, pg_wait_sampling) | `pg-debug history` | [platforms.md](references/platforms.md) |
 | Writing Python that uses pg_debug | the `pg_debug` package | [python.md](references/python.md) |
 
 An empty result is an answer, not a failure: a plan whose estimates matched, a

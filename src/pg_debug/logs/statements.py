@@ -26,6 +26,7 @@ from typing import Any
 from pglast import parser as pg_parser
 
 from ..errors import PgDebugError
+from ..rules import DOCS_URL
 from ..tags import parse_sql_comment
 from .parse import LogEntry
 
@@ -108,6 +109,8 @@ class LoggedPlan:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "rule": "logged_plan",
+            "docs": f"{DOCS_URL}#logged_plan",
             "query": self.query,
             "key": self.key,
             "runs": self.runs,
@@ -159,6 +162,8 @@ class SlowStatement:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "rule": "slow_statement",
+            "docs": f"{DOCS_URL}#slow_statement",
             "query": self.query,
             "key": self.key,
             "runs": self.runs,
