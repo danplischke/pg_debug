@@ -220,7 +220,9 @@ def role_with_defaults(connection_string):
         conn.execute(sql.SQL("ALTER ROLE {} SET request.jwt.claim.role = 'authenticated'").format(sql.Identifier(DEFAULTS_ROLE)))
         # This database's value stands over the one for every database.
         conn.execute(sql.SQL("ALTER ROLE {} IN DATABASE {} SET work_mem = '24MB'").format(sql.Identifier(DEFAULTS_ROLE), sql.Identifier(database)))
-        conn.execute(sql.SQL("ALTER ROLE {} SET log_statement = 'all'").format(sql.Identifier(DEFAULTS_ROLE)))
+        # Not 'all': the test containers start the server with log_statement=all,
+        # and a value the server already has could not show it was left out.
+        conn.execute(sql.SQL("ALTER ROLE {} SET log_statement = 'ddl'").format(sql.Identifier(DEFAULTS_ROLE)))
         conn.execute(sql.SQL("GRANT {} TO {}").format(sql.Identifier(DEFAULTS_ROLE), sql.Identifier(OUTSIDER)))
     try:
         yield connection_string
@@ -265,4 +267,4 @@ class TestTheRolesOwnSettings:
             (row,) = await pg.execute_sql(SHOW_DEFAULTS)
 
         assert row["statement_timeout"] == "8s"
-        assert row["log_statement"] != "all"
+        assert row["log_statement"] != "ddl"

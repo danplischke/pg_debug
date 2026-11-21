@@ -29,7 +29,8 @@ CREATE TABLE pgd_events_default PARTITION OF pgd_events DEFAULT;
 INSERT INTO pgd_events SELECT g, date_trunc('month', now()) + interval '3 months' + g * interval '1 minute', g FROM generate_series(1, 300) g;
 INSERT INTO pgd_events SELECT g, date_trunc('month', now()) - interval '40 days' + (g % 60) * interval '1 day', g FROM generate_series(1, 6000) g;
 
--- Twenty hash partitions with two indexes each: 63 relations for a query that prunes nothing.
+-- Twenty hash partitions with two indexes each: 63 relations for a query that prunes nothing
+-- (61 before PostgreSQL 16, whose planner leaves the parent's own two indexes unopened).
 CREATE TABLE pgd_hashed (id bigint, k int NOT NULL, v int) PARTITION BY HASH (k);
 CREATE INDEX ON pgd_hashed (id);
 CREATE INDEX ON pgd_hashed (v);
@@ -90,7 +91,12 @@ class TestPartitionHealth:
 
         (locks,) = by_kind["lock_pressure"]
         assert locks["table"] == "pgd_hashed"
-        assert locks["evidence"]["unpruned_locks"] == 63, "measured: 21 tables and 42 indexes"
+        with psycopg.connect(url) as conn:
+            (version,) = conn.execute("SELECT current_setting('server_version_num')::int").fetchone()  # type: ignore[misc]
+        if version >= 160000:
+            assert locks["evidence"]["unpruned_locks"] == 63, "measured: 21 tables and 42 indexes"
+        else:
+            assert locks["evidence"]["unpruned_locks"] == 61, "measured: 21 tables and the leaves' 40 indexes"
         assert locks["evidence"]["fast_path_slots"] == 16
         assert locks["confidence"] == "candidate"
 

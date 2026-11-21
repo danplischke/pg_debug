@@ -183,6 +183,20 @@ async def test_logical_slots_before_17_are_reported_as_dropped():
 
 
 @pytest.mark.asyncio
+async def test_before_13_the_slots_are_read_without_wal_status():
+    """pg_replication_slots has no wal_status before 13; asking for it fails the check."""
+    answers = {
+        "server": server(120022),
+        "slot_type = 'logical'": [{"slot_name": "cdc", "plugin": "pgoutput", "database": "app", "active": True, "wal_status": None}],
+    }
+    report, driver = await check(answers)
+
+    assert [f.subject for f in by_check(report, "logical_replication")] == ["slot cdc"]
+    [slots] = [s for s in driver.statements if "pg_replication_slots" in s]
+    assert "NULL::text AS wal_status" in slots
+
+
+@pytest.mark.asyncio
 async def test_from_17_only_an_invalidated_slot_is_reported():
     answers = {
         "server": server(170002, data_checksums="on"),
@@ -327,6 +341,7 @@ async def test_other_databases_are_named_since_only_this_one_was_read():
         upgrade.SERVER_SQL,
         upgrade.PREPARED_TRANSACTIONS_SQL,
         SafeSqlDriver.param_sql_to_query(upgrade.REG_TYPE_COLUMNS_SQL, [list(upgrade.REFUSED_REG_TYPES)]),
+        upgrade.LOGICAL_SLOTS_12_SQL,
         upgrade.LOGICAL_SLOTS_SQL,
         upgrade.LOGICAL_SLOTS_17_SQL,
         upgrade.SUBSCRIPTIONS_SQL,

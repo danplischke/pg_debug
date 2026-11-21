@@ -270,8 +270,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fast path holds (16 slots before PostgreSQL 18, `max_locks_per_transaction`
   rounded up to a power of two from 18), estimated from what
   `pg_stat_statements` records filtering on the partition key and stated as
-  the worst case otherwise; and more than 1,000 partitions or three levels.
-  The lock estimate and the per-partition unique index are candidates.
+  the worst case otherwise, counting a partitioned table's own indexes only
+  from PostgreSQL 16, the first planner to open them; and more than 1,000
+  partitions or three levels. The lock estimate and the per-partition unique
+  index are candidates.
 
 - `check-migration` reviews `ATTACH PARTITION`, `DETACH PARTITION` and
   `CREATE TABLE ... PARTITION OF`, which it used to pass over in silence.

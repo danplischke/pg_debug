@@ -40,6 +40,7 @@ from ..db import SafeSqlDriver
 from ..db import SqlDriver
 from ..db.extensions import get_postgres_version
 from ..errors import InvalidArgumentError
+from ..health.checks.slots import WAL_STATUS_MIN_VERSION
 from ..platform import PlatformDetection
 from ..severity import Confidence
 from ..severity import Severity
@@ -134,6 +135,14 @@ WHERE NOT a.attisdropped
   AND n.nspname !~ '^pg_toast_temp_'
   AND n.nspname NOT IN ('pg_catalog', 'information_schema')
 ORDER BY 1, 2, 4
+"""
+
+# wal_status arrived in PostgreSQL 13, with max_slot_wal_keep_size.
+LOGICAL_SLOTS_12_SQL = """
+SELECT slot_name, plugin, database, active, NULL::text AS wal_status
+FROM pg_replication_slots
+WHERE slot_type = 'logical' AND NOT temporary
+ORDER BY slot_name
 """
 
 LOGICAL_SLOTS_SQL = """
@@ -343,7 +352,12 @@ class UpgradeChecker:
 
     async def _logical_replication(self, driver: SqlDriver, major: int) -> Checked:
         check = "logical_replication"
-        slots_sql = LOGICAL_SLOTS_17_SQL if major >= 17 else LOGICAL_SLOTS_SQL
+        if major >= 17:
+            slots_sql = LOGICAL_SLOTS_17_SQL
+        elif major >= WAL_STATUS_MIN_VERSION:
+            slots_sql = LOGICAL_SLOTS_SQL
+        else:
+            slots_sql = LOGICAL_SLOTS_12_SQL
         slots = [dict(row.cells) for row in await driver.execute_query(slots_sql) or []]
         subscriptions = [dict(row.cells) for row in await driver.execute_query(SUBSCRIPTIONS_SQL) or []]
         examined = f"{plural(len(slots), 'logical replication slot')} and {plural(len(subscriptions), 'subscription')}"
