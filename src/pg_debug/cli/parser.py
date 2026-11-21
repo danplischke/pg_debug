@@ -32,6 +32,7 @@ from ..waits import DEFAULT_SAMPLE_INTERVAL
 from .commands import cmd_activity
 from .commands import cmd_check_migration
 from .commands import cmd_column_stats
+from .commands import cmd_compare_queries
 from .commands import cmd_config
 from .commands import cmd_describe
 from .commands import cmd_diagnose
@@ -79,6 +80,7 @@ from .render import render_plan
 from .render import render_plan_findings
 from .render import render_plan_shapes
 from .render import render_pooler_report
+from .render import render_query_comparison
 from .render import render_rows
 from .render import render_server_rates
 from .render import render_shard_readiness
@@ -625,6 +627,30 @@ def build_parser() -> argparse.ArgumentParser:
     add_baseline_arguments(plans)
     add_context_arguments(plans)
     plans.set_defaults(func=cmd_plans, render=render_plan_shapes, json_payload=plan_shapes_json)
+
+    compare = subparsers.add_parser("compare-queries", help="Run ways of writing a query, or one query with several sets of values, side by side")
+    compare.add_argument(
+        "queries",
+        nargs="+",
+        metavar="QUERY",
+        help="Each variant: SQL, a file holding it, or - to read it from stdin. They are labelled A, B, C... in order.",
+    )
+    compare.add_argument(
+        "--values",
+        metavar="JSON",
+        action="append",
+        help="Values for $1, $2..., as a JSON array: '[42, \"open\", null]'. Repeatable: every variant runs with each set. "
+        "Without it a $1 is filled from the column statistics, as diagnose fills it.",
+    )
+    compare.add_argument("--repeat", type=int, default=3, help="Runs per combination; the median is reported (default: 3, at most 20).")
+    compare.add_argument(
+        "--min-ratio",
+        type=float,
+        default=DEFAULT_MIN_RATIO,
+        help=f"Report row estimates off by at least this factor (default: {DEFAULT_MIN_RATIO:g}).",
+    )
+    add_context_arguments(compare)
+    compare.set_defaults(func=cmd_compare_queries, render=render_query_comparison)
 
     logs = subparsers.add_parser(
         "logs", help="Read server logs for slow plans and statements, deadlocks, lock waits, temp files, vacuums, checkpoints and refused connections"

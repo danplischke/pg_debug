@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Iterable
+from collections.abc import Sequence
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,8 @@ from .plans import ExplainPlanTool
 from .plans import PlanDiagnoser
 from .plans import PlanFinding
 from .plans import PlanInput
+from .plans import QueryComparison
+from .plans import compare_queries
 from .plans.shape import PlanShape
 from .plans.shape import read_plan_shapes
 from .plans.tree import ExplainPlanArtifact
@@ -504,6 +507,45 @@ class PgDebug:
                 produced without ANALYZE.
         """
         return await PlanDiagnoser(await self.sql_driver(), platform=self._detect_platform).diagnose_plan(plan, min_ratio=min_ratio)
+
+    async def compare_queries(
+        self,
+        queries: Sequence[str],
+        values: Sequence[Sequence[Any]] | None = None,
+        repeat: int = 3,
+        min_ratio: float = DEFAULT_MIN_RATIO,
+    ) -> QueryComparison:
+        """Run several ways of writing a query, or one query with several sets of values, side by side.
+
+        Each variant is run with each set of values under ``EXPLAIN
+        (ANALYZE, BUFFERS)``, ``repeat`` times, and reported with its median
+        time, the buffers it read, the rows it returned, its plan's shape and
+        what :meth:`diagnose_query` finds wrong with its last run. The notes
+        say what the numbers cannot settle: variants that returned different
+        numbers of rows, a variant whose plan changed with its values, a cold
+        first run.
+
+        Like :meth:`diagnose_query` this runs the statements, so it is refused
+        in restricted mode; a write is rolled back.
+
+        Args:
+            queries: The variants, one statement each.
+            values: Values for ``$1``, ``$2``..., one list per run, written
+                into each statement as literals (a string untyped, as a bind
+                parameter is). None runs each as written, any ``$1`` filled
+                from the column statistics.
+            repeat: Runs per combination, 1 to 20; the median is reported.
+            min_ratio: As :meth:`diagnose_query` takes it.
+
+        Returns:
+            A :class:`~pg_debug.plans.QueryComparison`.
+
+        Raises:
+            InvalidArgumentError: In restricted mode, for no queries, or for
+                values that do not fit a query.
+        """
+        diagnoser = PlanDiagnoser(await self.sql_driver(), platform=self._detect_platform)
+        return await compare_queries(diagnoser, queries, value_sets=values, repeat=repeat, min_ratio=min_ratio)
 
     # -- Index use -----------------------------------------------------------
 

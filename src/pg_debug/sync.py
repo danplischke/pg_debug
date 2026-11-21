@@ -13,6 +13,7 @@ import threading
 from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Iterable
+from collections.abc import Sequence
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,7 @@ from .partition import PartitionCandidate
 from .plans import DEFAULT_MIN_RATIO
 from .plans import PlanFinding
 from .plans import PlanInput
+from .plans import QueryComparison
 from .plans.shape import PlanShape
 from .plans.tree import ExplainPlanArtifact
 from .pooler import PoolerReport
@@ -210,6 +212,16 @@ class SyncPgDebug:
     def diagnose_plan(self, plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> list[PlanFinding]:
         """Diagnose a plan that already exists, checking this database's catalog."""
         return self._call(self._client.diagnose_plan, plan, min_ratio=min_ratio)
+
+    def compare_queries(
+        self,
+        queries: Sequence[str],
+        values: Sequence[Sequence[Any]] | None = None,
+        repeat: int = 3,
+        min_ratio: float = DEFAULT_MIN_RATIO,
+    ) -> QueryComparison:
+        """Run several ways of writing a query, or one query with several sets of values, side by side."""
+        return self._call(self._client.compare_queries, queries, values=values, repeat=repeat, min_ratio=min_ratio)
 
     # -- Index use -----------------------------------------------------------
 

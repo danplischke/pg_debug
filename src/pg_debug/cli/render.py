@@ -1222,6 +1222,33 @@ def render_plan_shapes(shapes: Sequence[Any]) -> str:
     return "\n".join(lines).rstrip()
 
 
+def render_query_comparison(comparison: Any) -> str:
+    """Each run on a line with its median time and what it read, the fastest marked, then each plan and its findings."""
+    lines: list[str] = []
+    for run in comparison.runs:
+        if run.error:
+            lines.append(f"{run.label}: could not be run: {run.error}")
+            continue
+        mark = "  <- fastest" if run.label == comparison.fastest and len(comparison.runs) > 1 else ""
+        runs = ", ".join(f"{ms:,.1f}" for ms in run.runs_ms)
+        temp = f", {run.temp_written:,} temp blocks written" if run.temp_written else ""
+        lines.append(
+            f"{run.label}: {run.execution_ms:,.1f} ms median ({runs}), planning {run.planning_ms or 0:,.1f} ms, {run.rows:,} rows, "
+            f"{run.shared_hit:,} buffers hit and {run.shared_read:,} read{temp}{mark}"
+        )
+    for run in comparison.runs:
+        if run.error:
+            continue
+        lines += ["", f"{run.label}: {_one_line(run.query, 140)}", f"  plan {run.fingerprint}"]
+        lines.extend(f"    {line}" for line in run.shape)
+        for finding in run.findings:
+            lines.append(f"  [{finding.severity.value}] {finding.summary}")
+    if comparison.notes:
+        lines += ["", "What the numbers cannot settle:"]
+        lines.extend(f"  {note}" for note in comparison.notes)
+    return "\n".join(lines)
+
+
 def render_log_report(report: Any) -> str:
     """What the logs say happened, a section for each kind of event, then what they cannot show."""
     lines: list[str] = []

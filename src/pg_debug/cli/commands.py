@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Mapping
@@ -63,6 +64,26 @@ async def cmd_diagnose(pg: PgDebug, args: argparse.Namespace) -> Any:
     if args.plan:
         return await pg.diagnose_plan(read_sql_or_file(args.sql), min_ratio=args.min_ratio)
     return await pg.diagnose_query(read_sql_or_file(args.sql), min_ratio=args.min_ratio)
+
+
+async def cmd_compare_queries(pg: PgDebug, args: argparse.Namespace) -> Any:
+    values = [parse_values(text) for text in args.values] if args.values else None
+    return await pg.compare_queries([read_sql_or_file(q) for q in args.queries], values=values, repeat=args.repeat, min_ratio=args.min_ratio)
+
+
+def parse_values(text: str) -> list[Any]:
+    """One --values argument: a JSON array of the values for $1, $2...
+
+    Raises:
+        InvalidArgumentError: If it is not a JSON array.
+    """
+    try:
+        values = json.loads(text)
+    except ValueError as e:
+        raise InvalidArgumentError(f"--values takes a JSON array, such as '[42, \"open\"]'; {text!r} is not JSON ({e}).") from e
+    if not isinstance(values, list):
+        raise InvalidArgumentError(f"--values takes a JSON array, such as '[42, \"open\"]'; {text!r} is not an array.")
+    return values
 
 
 async def cmd_index_use(pg: PgDebug, args: argparse.Namespace) -> Any:
