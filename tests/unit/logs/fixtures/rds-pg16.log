@@ -1,0 +1,682 @@
+2026-11-21 18:15:48 UTC::@:[54]:LOG:  starting PostgreSQL 16.16 (Debian 16.16-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-11-21 18:15:48 UTC::@:[54]:LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-11-21 18:15:48 UTC::@:[58]:LOG:  database system was shut down at 2026-11-21 18:15:48 UTC
+2026-11-21 18:15:48 UTC::@:[54]:LOG:  database system is ready to accept connections
+2026-11-21 18:15:48 UTC::@:[54]:LOG:  received fast shutdown request
+2026-11-21 18:15:48 UTC::@:[54]:LOG:  aborting any active transactions
+2026-11-21 18:15:48 UTC::@:[54]:LOG:  background worker "logical replication launcher" (PID 61) exited with exit code 1
+2026-11-21 18:15:48 UTC::@:[56]:LOG:  shutting down
+2026-11-21 18:15:48 UTC::@:[56]:LOG:  checkpoint starting: shutdown immediate
+2026-11-21 18:15:48 UTC::@:[56]:LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.003 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=0/1504890, redo lsn=0/1504890
+2026-11-21 18:15:48 UTC::@:[54]:LOG:  database system is shut down
+2026-11-21 18:15:49 UTC::@:[1]:LOG:  starting PostgreSQL 16.16 (Debian 16.16-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-11-21 18:15:49 UTC::@:[1]:LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-11-21 18:15:49 UTC::@:[1]:LOG:  could not create IPv6 socket for address "::": Address family not supported by protocol
+2026-11-21 18:15:49 UTC::@:[1]:LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-11-21 18:15:49 UTC::@:[70]:LOG:  database system was shut down at 2026-11-21 18:15:48 UTC
+2026-11-21 18:15:49 UTC::@:[1]:LOG:  database system is ready to accept connections
+2026-11-21 18:15:55 UTC:[local]:root@root:[80]:FATAL:  role "root" does not exist
+2026-11-21 18:16:09 UTC:172.17.0.1(49374):postgres@postgres:[81]:LOG:  duration: 875.937 ms  plan:
+	{
+	  "Query Text": "INSERT INTO orders SELECT g, CASE WHEN g % 10 = 0 THEN 'open' ELSE 'closed' END, g % 1000 FROM generate_series(1, 1000000) g",
+	  "Plan": {
+	    "Node Type": "ModifyTable",
+	    "Operation": "Insert",
+	    "Parallel Aware": false,
+	    "Async Capable": false,
+	    "Relation Name": "orders",
+	    "Alias": "orders",
+	    "Startup Cost": 0.00,
+	    "Total Cost": 20000.00,
+	    "Plan Rows": 0,
+	    "Plan Width": 0,
+	    "Actual Startup Time": 875.934,
+	    "Actual Total Time": 875.935,
+	    "Actual Rows": 0,
+	    "Actual Loops": 1,
+	    "Shared Hit Blocks": 1012735,
+	    "Shared Read Blocks": 0,
+	    "Shared Dirtied Blocks": 6370,
+	    "Shared Written Blocks": 6374,
+	    "Local Hit Blocks": 0,
+	    "Local Read Blocks": 0,
+	    "Local Dirtied Blocks": 0,
+	    "Local Written Blocks": 0,
+	    "Temp Read Blocks": 1709,
+	    "Temp Written Blocks": 1709,
+	    "Plans": [
+	      {
+	        "Node Type": "Function Scan",
+	        "Parent Relationship": "Outer",
+	        "Parallel Aware": false,
+	        "Async Capable": false,
+	        "Function Name": "generate_series",
+	        "Alias": "g",
+	        "Startup Cost": 0.00,
+	        "Total Cost": 20000.00,
+	        "Plan Rows": 1000000,
+	        "Plan Width": 44,
+	        "Actual Startup Time": 65.658,
+	        "Actual Total Time": 198.284,
+	        "Actual Rows": 1000000,
+	        "Actual Loops": 1,
+	        "Shared Hit Blocks": 0,
+	        "Shared Read Blocks": 0,
+	        "Shared Dirtied Blocks": 0,
+	        "Shared Written Blocks": 0,
+	        "Local Hit Blocks": 0,
+	        "Local Read Blocks": 0,
+	        "Local Dirtied Blocks": 0,
+	        "Local Written Blocks": 0,
+	        "Temp Read Blocks": 1709,
+	        "Temp Written Blocks": 1709
+	      }
+	    ]
+	  }
+	}
+2026-11-21 18:16:09 UTC:172.17.0.1(49374):postgres@postgres:[81]:LOG:  duration: 907.582 ms  statement: INSERT INTO orders SELECT g, CASE WHEN g % 10 = 0 THEN 'open' ELSE 'closed' END, g % 1000 FROM generate_series(1, 1000000) g
+2026-11-21 18:16:09 UTC:172.17.0.1(49374):postgres@postgres:[81]:LOG:  duration: 76.051 ms  statement: ANALYZE orders
+2026-11-21 18:16:10 UTC:172.17.0.1(49374):postgres@postgres:[81]:LOG:  duration: 954.657 ms  plan:
+	{
+	  "Query Text": "UPDATE orders SET status = 'open' WHERE id % 10 < 6",
+	  "Plan": {
+	    "Node Type": "ModifyTable",
+	    "Operation": "Update",
+	    "Parallel Aware": false,
+	    "Async Capable": false,
+	    "Relation Name": "orders",
+	    "Alias": "orders",
+	    "Startup Cost": 0.00,
+	    "Total Cost": 21370.00,
+	    "Plan Rows": 0,
+	    "Plan Width": 0,
+	    "Actual Startup Time": 954.636,
+	    "Actual Total Time": 954.655,
+	    "Actual Rows": 0,
+	    "Actual Loops": 1,
+	    "Shared Hit Blocks": 1814014,
+	    "Shared Read Blocks": 0,
+	    "Shared Dirtied Blocks": 3822,
+	    "Shared Written Blocks": 3823,
+	    "Local Hit Blocks": 0,
+	    "Local Read Blocks": 0,
+	    "Local Dirtied Blocks": 0,
+	    "Local Written Blocks": 0,
+	    "Temp Read Blocks": 0,
+	    "Temp Written Blocks": 0,
+	    "Plans": [
+	      {
+	        "Node Type": "Seq Scan",
+	        "Parent Relationship": "Outer",
+	        "Parallel Aware": false,
+	        "Async Capable": false,
+	        "Relation Name": "orders",
+	        "Alias": "orders",
+	        "Startup Cost": 0.00,
+	        "Total Cost": 21370.00,
+	        "Plan Rows": 333333,
+	        "Plan Width": 38,
+	        "Actual Startup Time": 0.010,
+	        "Actual Total Time": 105.983,
+	        "Actual Rows": 600000,
+	        "Actual Loops": 1,
+	        "Filter": "((id % '10'::bigint) < 6)",
+	        "Rows Removed by Filter": 400000,
+	        "Shared Hit Blocks": 6370,
+	        "Shared Read Blocks": 0,
+	        "Shared Dirtied Blocks": 0,
+	        "Shared Written Blocks": 0,
+	        "Local Hit Blocks": 0,
+	        "Local Read Blocks": 0,
+	        "Local Dirtied Blocks": 0,
+	        "Local Written Blocks": 0,
+	        "Temp Read Blocks": 0,
+	        "Temp Written Blocks": 0
+	      }
+	    ]
+	  }
+	}
+2026-11-21 18:16:10 UTC:172.17.0.1(49374):postgres@postgres:[81]:LOG:  duration: 960.123 ms  statement: UPDATE orders SET status = 'open' WHERE id % 10 < 6
+2026-11-21 18:16:10 UTC:172.17.0.1(49374):postgres@postgres:[81]:LOG:  duration: 72.382 ms  plan:
+	{
+	  "Query Text": "SELECT count(*) FROM orders WHERE status = 'open' /*controller='orders',route='%2Forders%2Fopen'*/",
+	  "Plan": {
+	    "Node Type": "Aggregate",
+	    "Strategy": "Plain",
+	    "Partial Mode": "Finalize",
+	    "Parallel Aware": false,
+	    "Async Capable": false,
+	    "Startup Cost": 19691.66,
+	    "Total Cost": 19691.67,
+	    "Plan Rows": 1,
+	    "Plan Width": 8,
+	    "Actual Startup Time": 68.282,
+	    "Actual Total Time": 72.373,
+	    "Actual Rows": 1,
+	    "Actual Loops": 1,
+	    "Shared Hit Blocks": 10192,
+	    "Shared Read Blocks": 0,
+	    "Shared Dirtied Blocks": 0,
+	    "Shared Written Blocks": 0,
+	    "Local Hit Blocks": 0,
+	    "Local Read Blocks": 0,
+	    "Local Dirtied Blocks": 0,
+	    "Local Written Blocks": 0,
+	    "Temp Read Blocks": 0,
+	    "Temp Written Blocks": 0,
+	    "Plans": [
+	      {
+	        "Node Type": "Gather",
+	        "Parent Relationship": "Outer",
+	        "Parallel Aware": false,
+	        "Async Capable": false,
+	        "Startup Cost": 19691.45,
+	        "Total Cost": 19691.66,
+	        "Plan Rows": 2,
+	        "Plan Width": 8,
+	        "Actual Startup Time": 68.063,
+	        "Actual Total Time": 72.365,
+	        "Actual Rows": 3,
+	        "Actual Loops": 1,
+	        "Workers Planned": 2,
+	        "Workers Launched": 2,
+	        "Single Copy": false,
+	        "Shared Hit Blocks": 10192,
+	        "Shared Read Blocks": 0,
+	        "Shared Dirtied Blocks": 0,
+	        "Shared Written Blocks": 0,
+	        "Local Hit Blocks": 0,
+	        "Local Read Blocks": 0,
+	        "Local Dirtied Blocks": 0,
+	        "Local Written Blocks": 0,
+	        "Temp Read Blocks": 0,
+	        "Temp Written Blocks": 0,
+	        "Plans": [
+	          {
+	            "Node Type": "Aggregate",
+	            "Strategy": "Plain",
+	            "Partial Mode": "Partial",
+	            "Parent Relationship": "Outer",
+	            "Parallel Aware": false,
+	            "Async Capable": false,
+	            "Startup Cost": 18691.45,
+	            "Total Cost": 18691.46,
+	            "Plan Rows": 1,
+	            "Plan Width": 8,
+	            "Actual Startup Time": 65.695,
+	            "Actual Total Time": 65.696,
+	            "Actual Rows": 1,
+	            "Actual Loops": 3,
+	            "Shared Hit Blocks": 10192,
+	            "Shared Read Blocks": 0,
+	            "Shared Dirtied Blocks": 0,
+	            "Shared Written Blocks": 0,
+	            "Local Hit Blocks": 0,
+	            "Local Read Blocks": 0,
+	            "Local Dirtied Blocks": 0,
+	            "Local Written Blocks": 0,
+	            "Temp Read Blocks": 0,
+	            "Temp Written Blocks": 0,
+	            "Workers": [
+	            ],
+	            "Plans": [
+	              {
+	                "Node Type": "Seq Scan",
+	                "Parent Relationship": "Outer",
+	                "Parallel Aware": true,
+	                "Async Capable": false,
+	                "Relation Name": "orders",
+	                "Alias": "orders",
+	                "Startup Cost": 0.00,
+	                "Total Cost": 18525.33,
+	                "Plan Rows": 66445,
+	                "Plan Width": 0,
+	                "Actual Startup Time": 25.173,
+	                "Actual Total Time": 53.346,
+	                "Actual Rows": 200000,
+	                "Actual Loops": 3,
+	                "Filter": "(status = 'open'::text)",
+	                "Rows Removed by Filter": 133333,
+	                "Shared Hit Blocks": 10192,
+	                "Shared Read Blocks": 0,
+	                "Shared Dirtied Blocks": 0,
+	                "Shared Written Blocks": 0,
+	                "Local Hit Blocks": 0,
+	                "Local Read Blocks": 0,
+	                "Local Dirtied Blocks": 0,
+	                "Local Written Blocks": 0,
+	                "Temp Read Blocks": 0,
+	                "Temp Written Blocks": 0,
+	                "Workers": [
+	                ]
+	              }
+	            ]
+	          }
+	        ]
+	      }
+	    ]
+	  }
+	}
+2026-11-21 18:16:10 UTC:172.17.0.1(49374):postgres@postgres:[81]:LOG:  duration: 72.925 ms  statement: SELECT count(*) FROM orders WHERE status = 'open' /*controller='orders',route='%2Forders%2Fopen'*/
+2026-11-21 18:16:10 UTC:172.17.0.1(49374):postgres@postgres:[81]:LOG:  duration: 53.018 ms  plan:
+	{
+	  "Query Text": "SELECT count(*) FROM orders WHERE status = 'open' /*controller='orders',route='%2Forders%2Fopen'*/",
+	  "Plan": {
+	    "Node Type": "Aggregate",
+	    "Strategy": "Plain",
+	    "Partial Mode": "Finalize",
+	    "Parallel Aware": false,
+	    "Async Capable": false,
+	    "Startup Cost": 19691.66,
+	    "Total Cost": 19691.67,
+	    "Plan Rows": 1,
+	    "Plan Width": 8,
+	    "Actual Startup Time": 50.083,
+	    "Actual Total Time": 53.012,
+	    "Actual Rows": 1,
+	    "Actual Loops": 1,
+	    "Shared Hit Blocks": 10192,
+	    "Shared Read Blocks": 0,
+	    "Shared Dirtied Blocks": 0,
+	    "Shared Written Blocks": 0,
+	    "Local Hit Blocks": 0,
+	    "Local Read Blocks": 0,
+	    "Local Dirtied Blocks": 0,
+	    "Local Written Blocks": 0,
+	    "Temp Read Blocks": 0,
+	    "Temp Written Blocks": 0,
+	    "Plans": [
+	      {
+	        "Node Type": "Gather",
+	        "Parent Relationship": "Outer",
+	        "Parallel Aware": false,
+	        "Async Capable": false,
+	        "Startup Cost": 19691.45,
+	        "Total Cost": 19691.66,
+	        "Plan Rows": 2,
+	        "Plan Width": 8,
+	        "Actual Startup Time": 49.930,
+	        "Actual Total Time": 53.006,
+	        "Actual Rows": 3,
+	        "Actual Loops": 1,
+	        "Workers Planned": 2,
+	        "Workers Launched": 2,
+	        "Single Copy": false,
+	        "Shared Hit Blocks": 10192,
+	        "Shared Read Blocks": 0,
+	        "Shared Dirtied Blocks": 0,
+	        "Shared Written Blocks": 0,
+	        "Local Hit Blocks": 0,
+	        "Local Read Blocks": 0,
+	        "Local Dirtied Blocks": 0,
+	        "Local Written Blocks": 0,
+	        "Temp Read Blocks": 0,
+	        "Temp Written Blocks": 0,
+	        "Plans": [
+	          {
+	            "Node Type": "Aggregate",
+	            "Strategy": "Plain",
+	            "Partial Mode": "Partial",
+	            "Parent Relationship": "Outer",
+	            "Parallel Aware": false,
+	            "Async Capable": false,
+	            "Startup Cost": 18691.45,
+	            "Total Cost": 18691.46,
+	            "Plan Rows": 1,
+	            "Plan Width": 8,
+	            "Actual Startup Time": 47.766,
+	            "Actual Total Time": 47.767,
+	            "Actual Rows": 1,
+	            "Actual Loops": 3,
+	            "Shared Hit Blocks": 10192,
+	            "Shared Read Blocks": 0,
+	            "Shared Dirtied Blocks": 0,
+	            "Shared Written Blocks": 0,
+	            "Local Hit Blocks": 0,
+	            "Local Read Blocks": 0,
+	            "Local Dirtied Blocks": 0,
+	            "Local Written Blocks": 0,
+	            "Temp Read Blocks": 0,
+	            "Temp Written Blocks": 0,
+	            "Workers": [
+	            ],
+	            "Plans": [
+	              {
+	                "Node Type": "Seq Scan",
+	                "Parent Relationship": "Outer",
+	                "Parallel Aware": true,
+	                "Async Capable": false,
+	                "Relation Name": "orders",
+	                "Alias": "orders",
+	                "Startup Cost": 0.00,
+	                "Total Cost": 18525.33,
+	                "Plan Rows": 66445,
+	                "Plan Width": 0,
+	                "Actual Startup Time": 10.293,
+	                "Actual Total Time": 35.238,
+	                "Actual Rows": 200000,
+	                "Actual Loops": 3,
+	                "Filter": "(status = 'open'::text)",
+	                "Rows Removed by Filter": 133333,
+	                "Shared Hit Blocks": 10192,
+	                "Shared Read Blocks": 0,
+	                "Shared Dirtied Blocks": 0,
+	                "Shared Written Blocks": 0,
+	                "Local Hit Blocks": 0,
+	                "Local Read Blocks": 0,
+	                "Local Dirtied Blocks": 0,
+	                "Local Written Blocks": 0,
+	                "Temp Read Blocks": 0,
+	                "Temp Written Blocks": 0,
+	                "Workers": [
+	                ]
+	              }
+	            ]
+	          }
+	        ]
+	      }
+	    ]
+	  }
+	}
+2026-11-21 18:16:10 UTC:172.17.0.1(49374):postgres@postgres:[81]:LOG:  duration: 53.300 ms  statement: SELECT count(*) FROM orders WHERE status = 'open' /*controller='orders',route='%2Forders%2Fopen'*/
+2026-11-21 18:16:10 UTC:172.17.0.1(49374):postgres@postgres:[81]:LOG:  duration: 101.169 ms  plan:
+	{
+	  "Query Text": "SELECT pg_sleep(0.1) /*action='report',controller='reports'*/",
+	  "Plan": {
+	    "Node Type": "Result",
+	    "Parallel Aware": false,
+	    "Async Capable": false,
+	    "Startup Cost": 0.00,
+	    "Total Cost": 0.01,
+	    "Plan Rows": 1,
+	    "Plan Width": 4,
+	    "Actual Startup Time": 101.156,
+	    "Actual Total Time": 101.157,
+	    "Actual Rows": 1,
+	    "Actual Loops": 1,
+	    "Shared Hit Blocks": 0,
+	    "Shared Read Blocks": 0,
+	    "Shared Dirtied Blocks": 0,
+	    "Shared Written Blocks": 0,
+	    "Local Hit Blocks": 0,
+	    "Local Read Blocks": 0,
+	    "Local Dirtied Blocks": 0,
+	    "Local Written Blocks": 0,
+	    "Temp Read Blocks": 0,
+	    "Temp Written Blocks": 0
+	  }
+	}
+2026-11-21 18:16:10 UTC:172.17.0.1(49374):postgres@postgres:[81]:LOG:  duration: 101.445 ms  statement: SELECT pg_sleep(0.1) /*action='report',controller='reports'*/
+2026-11-21 18:16:10 UTC:172.17.0.1(49374):postgres@postgres:[81]:LOG:  duration: 201.320 ms  plan:
+	{
+	  "Query Text": "SELECT pg_sleep(0.2) /*action='export',controller='reports'*/",
+	  "Plan": {
+	    "Node Type": "Result",
+	    "Parallel Aware": false,
+	    "Async Capable": false,
+	    "Startup Cost": 0.00,
+	    "Total Cost": 0.01,
+	    "Plan Rows": 1,
+	    "Plan Width": 4,
+	    "Actual Startup Time": 201.302,
+	    "Actual Total Time": 201.303,
+	    "Actual Rows": 1,
+	    "Actual Loops": 1,
+	    "Shared Hit Blocks": 0,
+	    "Shared Read Blocks": 0,
+	    "Shared Dirtied Blocks": 0,
+	    "Shared Written Blocks": 0,
+	    "Local Hit Blocks": 0,
+	    "Local Read Blocks": 0,
+	    "Local Dirtied Blocks": 0,
+	    "Local Written Blocks": 0,
+	    "Temp Read Blocks": 0,
+	    "Temp Written Blocks": 0
+	  }
+	}
+2026-11-21 18:16:10 UTC:172.17.0.1(49374):postgres@postgres:[81]:LOG:  duration: 201.559 ms  statement: SELECT pg_sleep(0.2) /*action='export',controller='reports'*/
+2026-11-21 18:16:10 UTC:172.17.0.1(49388):postgres@postgres:[86]:FATAL:  password authentication failed for user "postgres"
+2026-11-21 18:16:10 UTC:172.17.0.1(49388):postgres@postgres:[86]:DETAIL:  Connection matched file "/var/lib/postgresql/data/pg_hba.conf" line 128: "host all all all scram-sha-256"
+2026-11-21 18:16:10 UTC:172.17.0.1(49404):postgres@postgres:[87]:FATAL:  password authentication failed for user "postgres"
+2026-11-21 18:16:10 UTC:172.17.0.1(49404):postgres@postgres:[87]:DETAIL:  Connection matched file "/var/lib/postgresql/data/pg_hba.conf" line 128: "host all all all scram-sha-256"
+2026-11-21 18:16:10 UTC:172.17.0.1(49416):nosuchdb@nosuchdb:[88]:FATAL:  password authentication failed for user "nosuchdb"
+2026-11-21 18:16:10 UTC:172.17.0.1(49416):nosuchdb@nosuchdb:[88]:DETAIL:  Role "nosuchdb" does not exist.
+	Connection matched file "/var/lib/postgresql/data/pg_hba.conf" line 128: "host all all all scram-sha-256"
+2026-11-21 18:16:11 UTC:172.17.0.1(49502):postgres@postgres:[97]:FATAL:  sorry, too many clients already
+2026-11-21 18:16:11 UTC:172.17.0.1(49506):postgres@postgres:[98]:FATAL:  terminating connection due to idle-in-transaction timeout
+2026-11-21 18:16:11 UTC:172.17.0.1(49510):postgres@postgres:[99]:FATAL:  terminating connection due to administrator command
+2026-11-21 18:16:12 UTC:172.17.0.1(49518):postgres@postgres:[101]:LOG:  unexpected EOF on client connection with an open transaction
+2026-11-21 18:16:44 UTC:172.17.0.1(44500):postgres@postgres:[110]:LOG:  duration: 53.610 ms  statement: CREATE TABLE cities (city int, zip int)
+2026-11-21 18:16:46 UTC:172.17.0.1(44500):postgres@postgres:[110]:LOG:  duration: 2086.101 ms  plan:
+	{
+	  "Query Text": "INSERT INTO cities SELECT g % 1000, g % 1000 FROM generate_series(1, 2000000) g",
+	  "Plan": {
+	    "Node Type": "ModifyTable",
+	    "Operation": "Insert",
+	    "Parallel Aware": false,
+	    "Async Capable": false,
+	    "Relation Name": "cities",
+	    "Alias": "cities",
+	    "Startup Cost": 0.00,
+	    "Total Cost": 30000.00,
+	    "Plan Rows": 0,
+	    "Plan Width": 0,
+	    "Actual Startup Time": 2086.097,
+	    "Actual Total Time": 2086.098,
+	    "Actual Rows": 0,
+	    "Actual Loops": 1,
+	    "Shared Hit Blocks": 2017694,
+	    "Shared Read Blocks": 0,
+	    "Shared Dirtied Blocks": 8850,
+	    "Shared Written Blocks": 11483,
+	    "Local Hit Blocks": 0,
+	    "Local Read Blocks": 0,
+	    "Local Dirtied Blocks": 0,
+	    "Local Written Blocks": 0,
+	    "Temp Read Blocks": 3418,
+	    "Temp Written Blocks": 3418,
+	    "Plans": [
+	      {
+	        "Node Type": "Function Scan",
+	        "Parent Relationship": "Outer",
+	        "Parallel Aware": false,
+	        "Async Capable": false,
+	        "Function Name": "generate_series",
+	        "Alias": "g",
+	        "Startup Cost": 0.00,
+	        "Total Cost": 30000.00,
+	        "Plan Rows": 2000000,
+	        "Plan Width": 8,
+	        "Actual Startup Time": 172.630,
+	        "Actual Total Time": 491.705,
+	        "Actual Rows": 2000000,
+	        "Actual Loops": 1,
+	        "Shared Hit Blocks": 0,
+	        "Shared Read Blocks": 0,
+	        "Shared Dirtied Blocks": 0,
+	        "Shared Written Blocks": 0,
+	        "Local Hit Blocks": 0,
+	        "Local Read Blocks": 0,
+	        "Local Dirtied Blocks": 0,
+	        "Local Written Blocks": 0,
+	        "Temp Read Blocks": 3418,
+	        "Temp Written Blocks": 3418
+	      }
+	    ]
+	  }
+	}
+2026-11-21 18:16:46 UTC:172.17.0.1(44500):postgres@postgres:[110]:LOG:  duration: 2094.027 ms  statement: INSERT INTO cities SELECT g % 1000, g % 1000 FROM generate_series(1, 2000000) g
+2026-11-21 18:16:47 UTC:172.17.0.1(44500):postgres@postgres:[110]:LOG:  duration: 100.995 ms  statement: ANALYZE cities
+2026-11-21 18:16:47 UTC:172.17.0.1(44500):postgres@postgres:[110]:LOG:  duration: 86.081 ms  plan:
+	{
+	  "Query Text": "SELECT count(*) FROM cities WHERE city = 7 AND zip = 7 /*controller='geo',action='lookup'*/",
+	  "Plan": {
+	    "Node Type": "Aggregate",
+	    "Strategy": "Plain",
+	    "Partial Mode": "Simple",
+	    "Parallel Aware": false,
+	    "Async Capable": false,
+	    "Startup Cost": 38850.00,
+	    "Total Cost": 38850.01,
+	    "Plan Rows": 1,
+	    "Plan Width": 8,
+	    "Actual Startup Time": 86.069,
+	    "Actual Total Time": 86.070,
+	    "Actual Rows": 1,
+	    "Actual Loops": 1,
+	    "Shared Hit Blocks": 8850,
+	    "Shared Read Blocks": 0,
+	    "Shared Dirtied Blocks": 0,
+	    "Shared Written Blocks": 0,
+	    "Local Hit Blocks": 0,
+	    "Local Read Blocks": 0,
+	    "Local Dirtied Blocks": 0,
+	    "Local Written Blocks": 0,
+	    "Temp Read Blocks": 0,
+	    "Temp Written Blocks": 0,
+	    "Plans": [
+	      {
+	        "Node Type": "Seq Scan",
+	        "Parent Relationship": "Outer",
+	        "Parallel Aware": false,
+	        "Async Capable": false,
+	        "Relation Name": "cities",
+	        "Alias": "cities",
+	        "Startup Cost": 0.00,
+	        "Total Cost": 38850.00,
+	        "Plan Rows": 2,
+	        "Plan Width": 0,
+	        "Actual Startup Time": 0.012,
+	        "Actual Total Time": 85.871,
+	        "Actual Rows": 2000,
+	        "Actual Loops": 1,
+	        "Filter": "((city = 7) AND (zip = 7))",
+	        "Rows Removed by Filter": 1998000,
+	        "Shared Hit Blocks": 8850,
+	        "Shared Read Blocks": 0,
+	        "Shared Dirtied Blocks": 0,
+	        "Shared Written Blocks": 0,
+	        "Local Hit Blocks": 0,
+	        "Local Read Blocks": 0,
+	        "Local Dirtied Blocks": 0,
+	        "Local Written Blocks": 0,
+	        "Temp Read Blocks": 0,
+	        "Temp Written Blocks": 0
+	      }
+	    ]
+	  }
+	}
+2026-11-21 18:16:47 UTC:172.17.0.1(44500):postgres@postgres:[110]:LOG:  duration: 86.647 ms  statement: SELECT count(*) FROM cities WHERE city = 7 AND zip = 7 /*controller='geo',action='lookup'*/
+2026-11-21 18:16:53 UTC:172.17.0.1(44500):postgres@postgres:[110]:LOG:  duration: 1153.331 ms  plan:
+	{
+	  "Query Text": "SELECT * FROM cities ORDER BY zip, city LIMIT 5 OFFSET 500000 /*controller='geo',action='page'*/",
+	  "Plan": {
+	    "Node Type": "Limit",
+	    "Parallel Aware": false,
+	    "Async Capable": false,
+	    "Startup Cost": 348797.69,
+	    "Total Cost": 348797.70,
+	    "Plan Rows": 5,
+	    "Plan Width": 8,
+	    "Actual Startup Time": 1153.312,
+	    "Actual Total Time": 1153.315,
+	    "Actual Rows": 5,
+	    "Actual Loops": 1,
+	    "Shared Hit Blocks": 8850,
+	    "Shared Read Blocks": 0,
+	    "Shared Dirtied Blocks": 0,
+	    "Shared Written Blocks": 0,
+	    "Local Hit Blocks": 0,
+	    "Local Read Blocks": 0,
+	    "Local Dirtied Blocks": 0,
+	    "Local Written Blocks": 0,
+	    "Temp Read Blocks": 18729,
+	    "Temp Written Blocks": 23981,
+	    "Plans": [
+	      {
+	        "Node Type": "Sort",
+	        "Parent Relationship": "Outer",
+	        "Parallel Aware": false,
+	        "Async Capable": false,
+	        "Startup Cost": 347547.69,
+	        "Total Cost": 352547.69,
+	        "Plan Rows": 2000000,
+	        "Plan Width": 8,
+	        "Actual Startup Time": 1012.117,
+	        "Actual Total Time": 1055.330,
+	        "Actual Rows": 500005,
+	        "Actual Loops": 1,
+	        "Sort Key": ["zip", "city"],
+	        "Sort Method": "external merge",
+	        "Sort Space Used": 35304,
+	        "Sort Space Type": "Disk",
+	        "Shared Hit Blocks": 8850,
+	        "Shared Read Blocks": 0,
+	        "Shared Dirtied Blocks": 0,
+	        "Shared Written Blocks": 0,
+	        "Local Hit Blocks": 0,
+	        "Local Read Blocks": 0,
+	        "Local Dirtied Blocks": 0,
+	        "Local Written Blocks": 0,
+	        "Temp Read Blocks": 18729,
+	        "Temp Written Blocks": 23981,
+	        "Plans": [
+	          {
+	            "Node Type": "Seq Scan",
+	            "Parent Relationship": "Outer",
+	            "Parallel Aware": false,
+	            "Async Capable": false,
+	            "Relation Name": "cities",
+	            "Alias": "cities",
+	            "Startup Cost": 0.00,
+	            "Total Cost": 28850.00,
+	            "Plan Rows": 2000000,
+	            "Plan Width": 8,
+	            "Actual Startup Time": 0.016,
+	            "Actual Total Time": 141.975,
+	            "Actual Rows": 2000000,
+	            "Actual Loops": 1,
+	            "Shared Hit Blocks": 8850,
+	            "Shared Read Blocks": 0,
+	            "Shared Dirtied Blocks": 0,
+	            "Shared Written Blocks": 0,
+	            "Local Hit Blocks": 0,
+	            "Local Read Blocks": 0,
+	            "Local Dirtied Blocks": 0,
+	            "Local Written Blocks": 0,
+	            "Temp Read Blocks": 0,
+	            "Temp Written Blocks": 0
+	          }
+	        ]
+	      }
+	    ]
+	  },
+	  "JIT": {
+	    "Functions": 2,
+	    "Options": {
+	      "Inlining": false,
+	      "Optimization": false,
+	      "Expressions": true,
+	      "Deforming": true
+	    },
+	    "Timing": {
+	      "Generation": 0.207,
+	      "Inlining": 0.000,
+	      "Optimization": 3.736,
+	      "Emission": 74.067,
+	      "Total": 78.010
+	    }
+	  }
+	}
+2026-11-21 18:16:53 UTC:172.17.0.1(44500):postgres@postgres:[110]:LOG:  duration: 6228.570 ms  statement: SELECT * FROM cities ORDER BY zip, city LIMIT 5 OFFSET 500000 /*controller='geo',action='page'*/
+2026-11-21 18:16:53 UTC::@:[1]:LOG:  server process (PID 112) was terminated by signal 9: Killed
+2026-11-21 18:16:53 UTC::@:[1]:LOG:  terminating any other active server processes
+2026-11-21 18:16:53 UTC::@:[1]:LOG:  all server processes terminated; reinitializing
+2026-11-21 18:16:53 UTC::@:[119]:LOG:  database system was interrupted; last known up at 2026-11-21 18:15:49 UTC
+2026-11-21 18:16:53 UTC::@:[119]:LOG:  database system was not properly shut down; automatic recovery in progress
+2026-11-21 18:16:53 UTC::@:[119]:LOG:  redo starts at 0/1504908
+2026-11-21 18:16:55 UTC::@:[119]:LOG:  invalid magic number 0000 in WAL segment 000000010000000000000013, LSN 0/13726000, offset 7495680
+2026-11-21 18:16:55 UTC::@:[119]:LOG:  redo done at 0/13725FA8 system usage: CPU: user: 1.57 s, system: 0.18 s, elapsed: 1.76 s
+2026-11-21 18:16:55 UTC::@:[120]:LOG:  checkpoint starting: end-of-recovery immediate wait
+2026-11-21 18:16:55 UTC::@:[120]:LOG:  checkpoint complete: wrote 16386 buffers (100.0%); 0 WAL file(s) added, 0 removed, 18 recycled; write=0.079 s, sync=0.099 s, total=0.184 s; sync files=37, longest=0.076 s, average=0.003 s; distance=297093 kB, estimate=297093 kB; lsn=0/13726048, redo lsn=0/13726048
+2026-11-21 18:16:55 UTC::@:[1]:LOG:  database system is ready to accept connections

@@ -28,13 +28,14 @@ without an MCP client in the loop.
 - **Data model review** — foreign keys with no index behind them, keys whose two sides are different types, tables with no primary key, columns ordered so alignment padding costs bytes on every row, types that do not mean what they look like, `integer` keys running out of range, and indexes whose leading column is mostly NULL. Each finding says whether it is proven from the catalog or inferred from statistics, and carries the DDL that fixes it.
 - **Partition advice** — whether a table is worth partitioning, decided by the share of recorded query time that would still prune rather than by the table's size. It is built to say no: a 400 GB table where a third of the query time filters on a timestamp is a worse table after partitioning, and the verdict comes with the number behind it either way. For tables already partitioned, `health --type partition` reports a range running out of partitions, rows in the DEFAULT partition, unique indexes that are unique per partition only, and pruning turned off.
 - **Shard readiness** — whether to shard, which usually means "not yet": reads that replicas would take, a few statements that tuning would fix, old data that partitioning would drop, a write path that shows no pressure, or no routing key that covers most of the workload, each refusal with the figure behind it. The write path is sampled over an interval; on a Citus coordinator the cluster's own views are read too.
-- **Kept history** — the history a platform keeps beyond `pg_stat_statements`, where it keeps it: Azure's Query Store, Aurora's `aurora_stat_statements()` and `aurora_stat_plans()`, the Cloud SQL and AlloyDB index advisor, Neon's local file cache, and `pg_qualstats` and `pg_wait_sampling` wherever they are installed. Each says how far back it goes and when capture is off. The platform readers follow the platforms' documentation and have not been run on them.
+- **Kept history** — the history a platform keeps beyond `pg_stat_statements`, where it keeps it: Azure's Query Store, Aurora's `aurora_stat_statements()`, `aurora_stat_plans()` and its wait events since the instance started, the Cloud SQL and AlloyDB index advisor, Neon's local file cache, and `pg_qualstats` and `pg_wait_sampling` wherever they are installed. Each says how far back it goes and when capture is off. The platform readers follow the platforms' documentation and have not been run on them.
 - **Health checks** — invalid/duplicate/bloated/unused indexes, table bloat, connection utilization, transaction ID and multixact wraparound risk, autovacuum backlog and what is holding the vacuum horizon (standbys with `hot_standby_feedback` included), sequences near their limit, replication lag, slots and the WAL they retain, buffer cache hit rates, invalid constraints, statistics freshness, tables read sequentially far more than through an index, collations whose library version changed under their indexes, and checksum failures. Every check that reads counters says how long they have been counting, since the last reset or crash, and an index is not called unused until they have counted for a week.
-- **Top queries** — the most expensive queries recorded by `pg_stat_statements`, ranked by resource blend or by execution time, cumulatively or sampled over an interval; a sample marks each statement new, slower or faster than before it.
+- **Top queries** — the most expensive queries recorded by `pg_stat_statements`, ranked by resource blend or by execution time, cumulatively, sampled over an interval, or since a snapshot saved to a file (`--save`, `--compare`: before and after a deploy, with nothing running in between); a sample or a comparison marks each statement new, slower or faster than before it. Statements carry the sqlcommenter tags in their text (route, controller, trace), here and in `activity`.
 - **Index tuning** — recommend indexes for your recorded workload or for a specific set of queries, with before/after planner costs, the size HypoPG measures for each candidate, and what each one will cost to keep up to date. Every query is re-costed against the final set, and an index that makes any query dearer is refused, with the figure.
 - **Server rates** — what the server as a whole is doing now: commits, block reads, temporary files, WAL, checkpoints and I/O by process type, as rates over an interval rather than totals since a reset.
 - **Pooler inspection** — PgBouncer's admin console read for clients waiting on a server connection and how long, and pools that can open more connections than `max_connections` leaves.
-- **Server logs** — deadlocks, lock waits, temporary files, skipped vacuums, autovacuum runs and checkpoints read from stderr, csvlog or jsonlog logs, with no connection.
+- **Server logs** — the plans `auto_explain` logged, each query's slowest run diagnosed as `diagnose` would; statements past `log_min_duration_statement`, grouped by query; connections refused, ended or lost (failed passwords, `max_connections`, idle timeouts, a backend killed by the OOM killer); deadlocks, lock waits, temporary files, skipped vacuums, autovacuum runs and checkpoints. Read from stderr, csvlog or jsonlog files with no connection, RDS's own prefix included, or with `--from-database` from the server's log directory through `log_fdw`, where no file can be reached.
+- **Query comparison** — `compare-queries` runs ways of writing a query, or one query with several sets of values, side by side: median time, buffers, rows and plan shape for each, with what the numbers cannot settle (variants that return different rows, a plan that changes with the values, a cold first run).
 - **Upgrade and security audits** — what stands between the cluster and `pg_upgrade` to a newer major version, and what lets too much in: authentication rules, SSL, MD5 passwords, roles, schema privileges, row-level security, and how far the server is behind its minor releases. A check the role may not read says so rather than passing.
 - **Gating a build** — `--exit-code` on `health`, `model`, `config`, the audits, `check-migration` and `plans`; baselines that fail only on what is new or whose object's definition changed; `--suppress` for a rule a team has decided against; `--static` for the rules a freshly migrated, empty CI database can answer; and `plans`, which fails when a query's plan changes shape. Every finding carries a stable rule id.
 - **Access modes** — run unrestricted, or in a `restricted` mode that parses each statement, rejects anything that is not read-only, and runs it in a read-only transaction with a statement timeout.
@@ -118,6 +119,9 @@ pg-debug --json model | jq '.[] | select(.severity == "high")'
 
 pg-debug top-queries --sort-by mean_time --limit 5
 pg-debug top-queries --interval 10       # measure the next 10 seconds instead, flagging new and changed statements
+pg-debug top-queries --save before.json  # before a deploy; after it:
+pg-debug top-queries --compare before.json   # what ran since, and what got slower
+pg-debug compare-queries "SELECT ... WHERE k = \$1" "SELECT ... WHERE k + 0 = \$1" --values '[1]' --values '[950000]'
 pg-debug server-rates --interval 10      # commits, I/O, temp files, WAL, checkpoints, slots: per second, now
 pg-debug pooler postgresql://admin@pooler:6432/pgbouncer   # are clients waiting in PgBouncer?
 
@@ -165,8 +169,9 @@ These go before the command (`pg-debug --json health`, not `pg-debug health --js
 | `check-migration SQL` | a file path, inline SQL, or `-` for stdin; `--offline`, `--exit-code`; `--role`, `--set`, `--config`, `--no-config` for the role and settings the migration runs with |
 | `model` | `-s, --schema SCHEMA`, `-r, --rule RULES` (comma-separated, default `all`), `--proven-only`, `--min-rows N` (default 1000), `--static`, `--exit-code`, `--baseline FILE`, `--save-baseline FILE`, `--suppress RULE`, `--config FILE`, `--no-config` |
 | `plans` | `-q, --queries FILE` (repeatable; a file, inline SQL or `-`), `--exit-code`, `--baseline FILE`, `--save-baseline FILE` |
-| `logs FILE...` | server logs, stderr, csvlog or jsonlog, plain or `.gz`, `-` for stdin; `--prefix PREFIX` (the server's `log_line_prefix`), `--format {stderr,csvlog,jsonlog}`. Needs no connection |
-| `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10), `-i, --interval SECONDS` |
+| `logs FILE...` | server logs, stderr, csvlog or jsonlog, plain or `.gz`, `-` for stdin; `--prefix PREFIX` (the server's `log_line_prefix`), `--format {stderr,csvlog,jsonlog}`, `--min-ratio N` (default 10) for the `auto_explain` plans it diagnoses. Needs no connection. `--from-database` reads the server's own log directory through `log_fdw` instead (RDS, Aurora): `FILE` names files there, `--latest N` (default 1) without one; refused in restricted mode |
+| `compare-queries QUERY...` | each a file path, inline SQL, or `-` for stdin, labelled A, B, C...; `--values JSON` (repeatable: a JSON array for `$1`, `$2`...; every variant runs with each set), `--repeat N` (default 3, at most 20), `--min-ratio N`; `--role`, `--set`, `--config`, `--no-config`. Runs the statements, so refused in restricted mode |
+| `top-queries` | `-s, --sort-by {resources,mean_time,total_time}` (default `resources`), `-n, --limit N` (default 10), `-i, --interval SECONDS`; `--save FILE` to also save a snapshot, `--compare FILE` to report what ran since one |
 | `server-rates` | `-i, --interval SECONDS` (default 10) |
 | `pooler ADMIN_URL` | PgBouncer's admin console, `postgresql://user@host:6432/pgbouncer`; with `-d` too, the pool sizes are compared with the server's `max_connections` |
 | `tune-workload` | `--max-index-size-mb MB` (default 10000), `--method {dta,llm}` (default `dta`), `--max-regression-factor F` (default 0.1: refuse an index that makes any query cost more than 1.1 times its cost without the set; 0 refuses any rise) |
@@ -238,6 +243,7 @@ workload's counters, the settings, or a log.
 pg-debug model --static --exit-code                      # CI, on the migrated test database
 pg-debug plans -q critical.sql --baseline plans.json --exit-code
 pg-debug logs /var/log/postgresql/postgresql-16-main.log  # deadlocks, lock waits, spills, vacuums, checkpoints
+pg-debug logs --from-database --latest 3                  # RDS, Aurora: the last three files, through log_fdw
 ```
 
 `logs` reads server logs with no connection and reports deadlocks (with the
@@ -248,6 +254,30 @@ skipped for want of a lock, autovacuum and autoanalyze runs per table
 (`log_autovacuum_min_duration`), and "checkpoints are occurring too
 frequently". Every finding names the `file:line` it came from, and when a
 kind of event is absent the report says which setting it depends on.
+
+It also reads what the log says about queries and connections. The plans
+`auto_explain` logged are grouped by query (its constants and comments aside),
+with each one's count, total and slowest run, and the slowest run's plan is
+diagnosed with `diagnose`'s rules and no database; that needs
+`auto_explain.log_format = 'json'` and `auto_explain.log_analyze = on`, and a
+plan without them says so. Statements past `log_min_duration_statement` are
+grouped the same way. Both carry the sqlcommenter tags their runs were sent
+with, so a slow plan names the route that sent it. Connections refused, ended
+or lost are counted by kind and by `user@database`: authentication failures,
+`pg_hba.conf` refusals, unknown roles and databases, `max_connections` and
+connection limits, idle and administrator terminations, recovery conflicts, a
+backend killed by a signal (9 is the OOM killer), TLS failures and clients that
+vanished mid-transaction.
+
+RDS's prefix, `%t:%r:%u@%d:[%p]:`, is read without `--prefix`. Where the
+log directory cannot be reached, as on RDS and Aurora, `--from-database` reads
+it through `log_fdw`: each file is made a foreign table, read and rolled back
+in one call, so nothing is left behind. That needs `log_fdw` and a foreign
+server for it, which a member of `rds_superuser` creates once (`CREATE
+EXTENSION log_fdw; CREATE SERVER log_server FOREIGN DATA WRAPPER log_fdw;`),
+and is refused in restricted mode, since creating the table is a write. It
+follows AWS's documentation and the extension's source, and has not been run
+on RDS.
 
 `scan` reports tables read sequentially far more than through an index, from
 `pg_stat_user_tables` — no extension needed. It argues in bytes rather than
@@ -814,8 +844,9 @@ context = QueryContext.from_file("pg-debug.toml")
 | `execute_sql(sql)` | `list[dict]` — one per row, empty for statements with no result set |
 | `explain_query(sql, analyze=False, hypothetical_indexes=None)` | `ExplainPlanArtifact` |
 | `diagnose_query(sql, min_ratio=10)` | `list[PlanFinding]` — most severe first; each with `evidence`, `remediation`, and where it applies `confidence` and `plan_control` |
+| `compare_queries(queries, values=None, repeat=3, min_ratio=10)` | `QueryComparison` — `runs`, one `QueryRun` per variant and set of values with `execution_ms` (median), `runs_ms`, `planning_ms`, `rows`, `shared_hit`, `shared_read`, `temp_written`, `shape`, `fingerprint`, `findings` or `error`; `fastest`; `notes` |
 | `diagnose_plan(plan, min_ratio=10)` | `list[PlanFinding]` — the same, over `EXPLAIN (ANALYZE, FORMAT JSON)` output; works in restricted mode. `pg_debug.diagnose_plan(plan)` does it with no database at all |
-| `list_activity(include_idle=False, min_duration_seconds=None, blocked_only=False)` | `list[dict]` — one per backend, root blockers first, with `blocked_by`, `blocking_total` and `in_transaction`; to a role without `pg_read_all_stats`, another role's backend in a transaction is listed with `query` `<insufficient privilege>` |
+| `list_activity(include_idle=False, min_duration_seconds=None, blocked_only=False)` | `list[dict]` — one per backend, root blockers first, with `blocked_by`, `blocking_total`, `in_transaction` and `tags` (the query's sqlcommenter tags); to a role without `pg_read_all_stats`, another role's backend in a transaction is listed with `query` `<insufficient privilege>` |
 | `lock_tree()` | `list[dict]` — one per root blocker, waiters nested under `blocking`; each node says `in_transaction` |
 | `classify_waits()` | `WaitDiagnosis` — `classifications` (a lock queue behind DDL, an idle-in-transaction blocker, row lock contention, LWLock pressure; each with `confidence`, `evidence` and any `judgment`), what was `declined` and why, and the lock waits left `unclassified` |
 | `sample_waits(seconds, interval=0.5)` | `WaitProfile` — `timing` (samples taken, interval achieved), `active_sessions`, `waits` and `queries` by share, each a `candidate`; `extension` when pg_wait_sampling or Azure's Query Store is read too |
@@ -830,13 +861,16 @@ context = QueryContext.from_file("pg-debug.toml")
 | `check_upgrade(to=None)` | `AuditReport` — `findings` most severe first, and `checks`: what each check examined, or why it could not tell |
 | `audit_security()` | `AuditReport` — the same, for the security checks |
 | `definition_fingerprints(command, keys)` | `list[str \| None]` — a fingerprint of the definition each finding's key names, for a baseline |
-| `pg_debug.analyze_logs(paths, prefix=None, log_format=None)` | `LogReport` — `deadlocks`, `lock_waits`, `temp_files`, `skipped_vacuums`, `autovacuum`, `checkpoint_warnings`, `checkpoints`, `notes`; a function, with no connection (`pg_debug.logs.analyze_log_lines` takes lines in hand) |
+| `pg_debug.analyze_logs(paths, prefix=None, log_format=None, min_ratio=None)` | `LogReport` — `plans` (each query's `auto_explain` plans, with `findings` for the slowest and its `callers`), `slow_statements`, `connections` (by `kind`), `deadlocks`, `lock_waits`, `temp_files`, `skipped_vacuums`, `autovacuum`, `checkpoint_warnings`, `checkpoints`, `notes`; a function, with no connection (`pg_debug.logs.analyze_log_lines` takes lines in hand) |
+| `read_server_logs(files=None, latest=1, min_ratio=None)` | `LogReport` — the same, from the server's own log directory through `log_fdw`; refused in restricted mode |
 | `plan_shapes(queries)` | `list[PlanShape]` — `name`, `shape` (one line per plan node), `fingerprint`, or `error` |
 | `suggest_partitions(sql=None, min_table_bytes=1GB, min_pruning_share=0.5, limit=200)` | `list[PartitionCandidate]` — recommended first, then by size |
 | `assess_shard_readiness(interval_seconds=10)` | `ShardReadiness` — `verdict` (`not yet` or `worth evaluating`), `refusals` each with its `figures`, `pressure`, `would_change`, `routing_keys`, `measurements`, `citus` (None without the extension) |
 | `read_history(limit=10)` | `HistoryReport` — the `platform` detected, one `HistorySource` per source examined with `present`, `capturing`, `retention`, `status`, `rows` |
-| `get_top_queries(sort_by="resources", limit=10, interval_seconds=None)` | `list[dict]` — one per query; a sample leaves out other roles' statements whose queryid is withheld |
+| `get_top_queries(sort_by="resources", limit=10, interval_seconds=None)` | `list[dict]` — one per query, with `tags` from the text `pg_stat_statements` kept, which is the first caller's; a sample leaves out other roles' statements whose queryid is withheld |
 | `sample_top_queries(interval_seconds, sort_by="resources", limit=10)` | `QuerySample` — `queries`, each with `change` (`new`, `slower` or `faster`, a candidate, with the figures; or None), `withheld`, how many other roles' statements ran and could not be ranked, `statement_window`, and `changes_refused`, why nothing was judged changed |
+| `snapshot_top_queries()` | `QuerySnapshot` — `pg_stat_statements`' counters now; `save(path)` writes it, `QuerySnapshot.load(path)` reads it back |
+| `compare_top_queries(snapshot, sort_by="resources", limit=10)` | `QuerySample` — as `sample_top_queries` returns, since a snapshot or the file one was saved to, with `since` and `notes` (a reset or a restart since the snapshot) |
 | `sample_server_rates(interval_seconds=10)` | `ServerRates` — `groups`, one `RateGroup` per view row (`measures`, `source`, `subject`, `interval_seconds`, `counters` with `delta` and `per_second`, or `refused` with the reason), and `idle_io` |
 | `inspect_pooler(admin_url)` | `PoolerReport` — `pools`, `stats`, `databases`, `config`, `server` (or `server_refused`), and `findings` of saturation, most severe first |
 | `statistics_access()` | `StatisticsAccess` — `role`, `reads_all_stats`, `member`, `remedy` |
@@ -1097,18 +1131,19 @@ is the same for coding agents.
 | `db/` | Talking to PostgreSQL: the driver and pool, restricted mode and its allowlist, extension and version checks, identifiers. |
 | `parsing/` | Reading SQL pg_debug is given to analyse: the pglast visitors and bind-parameter substitution. |
 | `queries/` | SQL that more than one module runs. A feature's own queries live beside the code that reads their rows. |
-| `plans/` | `explain` and `diagnose`: running EXPLAIN, the plan tree, the diagnosis rules, hypothetical indexes. |
+| `plans/` | `explain`, `diagnose` and `compare-queries`: running EXPLAIN, the plan tree, the diagnosis rules, hypothetical indexes. |
 | `health/` | `health`: `tool.py` runs the checks in `checks/`, one module per check. |
 | `index/` | `tune-workload` and `tune-queries`: the search in `base.py`, the `dta` and `llm` methods, and the report. |
 | `index_use/` | `index-use`: the query's predicates, the catalog it compares them with, and the verdict for each index. |
 | `model/`, `migration/`, `partition/`, `sharding/` | `model`, `check-migration`, `partitions` and `shard-readiness`. |
 | `waits/` | `activity --sample`, and what the waits in `activity` and `locks` amount to. |
 | `activity.py`, `configuration.py`, `history.py`, `pooler.py`, `schema.py`, `server_rates.py`, `statistics.py`, `top_queries.py` | Features that fit in one file. |
+| `tags.py` | The sqlcommenter tags at the end of a statement's text, for `activity`, `top-queries` and `logs`. |
 | `baseline.py` | `--baseline` and `--save-baseline`: the identity each finding is known by, and the file that records them; the gate's split into new, known, changed and suppressed. |
 | `audit/` | `upgrade-check` and `security`. |
 | `platform.py` | Which managed platform the server is, from its URL and what it reports. |
 | `rules.py`, `definitions.py` | The public rule ids and what each reads; fingerprints of the definitions findings name. |
-| `logs/` | `logs`: reading stderr, csvlog and jsonlog, and what they say happened. |
+| `logs/` | `logs`: reading stderr, csvlog and jsonlog, or the server's own files through `log_fdw`, and what they say happened: plans, slow statements, connections and the rest. |
 
 A feature is one module until it needs a second file. `tests/unit/` mirrors
 `src/pg_debug/`, and since the test directories have no package files, every

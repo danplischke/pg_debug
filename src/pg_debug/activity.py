@@ -24,6 +24,7 @@ from .db import get_postgres_version
 from .db.privileges import HIDDEN_QUERY_TEXT
 from .db.privileges import IN_TRANSACTION
 from .db.privileges import IN_TRANSACTION_CTE
+from .tags import parse_sql_comment
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +136,9 @@ class ActivityInspector:
             (empty when it is not blocked), ``blocking_total`` how many
             backends wait on it, directly or behind others that do, the
             ``*_seconds`` fields give the age of the current state, query and
-            transaction, and ``in_transaction`` says whether it is in one.
+            transaction, ``in_transaction`` says whether it is in one, and
+            ``tags`` holds the sqlcommenter tags at the end of its query, if
+            any: the route, controller or trace that sent it.
             Culprits come first: the root blockers (blocking others, waiting
             on none), the one blocking the most first, then blockers that
             wait themselves, then the waiters, then the rest, longest in its
@@ -192,7 +195,13 @@ class ActivityInspector:
             """
 
         rows = await SafeSqlDriver.execute_param_query(self.sql_driver, query, params)
-        return culprits_first([row.cells for row in rows] if rows else [])
+        backends = [row.cells for row in rows] if rows else []
+        for backend in backends:
+            # Who sent it, from its sqlcommenter tags. The text is cut at
+            # track_activity_query_size (1 kB by default), and the tags with
+            # it when the statement is longer.
+            backend["tags"] = parse_sql_comment(backend.get("query"))
+        return culprits_first(backends)
 
     async def blocked_backends(self) -> list[dict[str, Any]]:
         """List only the backends waiting on a lock held by another backend.

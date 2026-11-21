@@ -95,10 +95,17 @@ async def run(args: argparse.Namespace) -> int:
         print(format_result(args, diagnose_plan(read_sql_or_file(args.sql), min_ratio=args.min_ratio)))
         return 0
 
-    if args.command == "logs":
+    if args.command == "logs" and not args.from_database:
+        if not args.files:
+            raise InvalidArgumentError("logs needs log files to read, or --from-database to read the server's own through log_fdw.")
         # A log is read as it is; there is nothing to connect to.
-        print(format_result(args, analyze_logs(args.files, prefix=args.prefix, log_format=args.log_format)))
+        print(format_result(args, analyze_logs(args.files, prefix=args.prefix, log_format=args.log_format, min_ratio=args.min_ratio)))
         return 0
+
+    if args.command == "top-queries" and args.interval is not None and args.compare is not None:
+        raise InvalidArgumentError(
+            "top-queries takes --interval or --compare, not both: one measures a few seconds from now, the other since a snapshot."
+        )
 
     if args.command == "plans" and args.exit_code and not args.baseline:
         raise InvalidArgumentError("plans --exit-code needs --baseline FILE: without one there is no accepted shape for a plan to differ from.")

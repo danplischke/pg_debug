@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Mapping
@@ -22,6 +23,7 @@ from .render import note_withheld_sample
 from .render import note_withheld_vacuums
 from .render import note_withheld_waits
 from .render import sampled_queries_text
+from .render import tags_text
 from .streams import read_sql
 from .streams import read_sql_or_file
 from .streams import read_stdin
@@ -62,6 +64,30 @@ async def cmd_diagnose(pg: PgDebug, args: argparse.Namespace) -> Any:
     if args.plan:
         return await pg.diagnose_plan(read_sql_or_file(args.sql), min_ratio=args.min_ratio)
     return await pg.diagnose_query(read_sql_or_file(args.sql), min_ratio=args.min_ratio)
+
+
+async def cmd_compare_queries(pg: PgDebug, args: argparse.Namespace) -> Any:
+    values = [parse_values(text) for text in args.values] if args.values else None
+    return await pg.compare_queries([read_sql_or_file(q) for q in args.queries], values=values, repeat=args.repeat, min_ratio=args.min_ratio)
+
+
+def parse_values(text: str) -> list[Any]:
+    """One --values argument: a JSON array of the values for $1, $2...
+
+    Raises:
+        InvalidArgumentError: If it is not a JSON array.
+    """
+    try:
+        values = json.loads(text)
+    except ValueError as e:
+        raise InvalidArgumentError(f"--values takes a JSON array, such as '[42, \"open\"]'; {text!r} is not JSON ({e}).") from e
+    if not isinstance(values, list):
+        raise InvalidArgumentError(f"--values takes a JSON array, such as '[42, \"open\"]'; {text!r} is not an array.")
+    return values
+
+
+async def cmd_logs(pg: PgDebug, args: argparse.Namespace) -> Any:
+    return await pg.read_server_logs(files=args.files or None, latest=args.latest, min_ratio=args.min_ratio)
 
 
 async def cmd_index_use(pg: PgDebug, args: argparse.Namespace) -> Any:
@@ -220,20 +246,32 @@ async def cmd_model(pg: PgDebug, args: argparse.Namespace) -> Any:
 
 
 async def cmd_top_queries(pg: PgDebug, args: argparse.Namespace) -> Any:
-    if args.interval is None:
+    if args.compare is not None:
+        sample = await pg.compare_top_queries(args.compare, sort_by=args.sort_by, limit=args.limit)
+        notes = [f"Since the snapshot taken at {sample.since}.", *sample.notes, sample.changes_refused]
+        result: Any = Shown(sample.queries, text=tags_text(sampled_queries_text(sample.queries)), note="\n".join(n for n in notes if n))
+    elif args.interval is not None:
+        sample = await pg.sample_top_queries(args.interval, sort_by=args.sort_by, limit=args.limit)
+        # The text says in a word what changed; --json prints the figures.
+        result = Shown(sample.queries, text=tags_text(sampled_queries_text(sample.queries)), note=sample.changes_refused)
+        if sample.withheld:
+            access = await pg.statistics_access()
+            if not access.reads_all_stats:
+                result = _also_noting(result, note_withheld_sample(access, sample.withheld, args.sort_by))
+    else:
         queries = await pg.get_top_queries(sort_by=args.sort_by, limit=args.limit)
-        shown = await _noting(pg, queries, queries, note_withheld_queries)
+        shown = Shown.of(await _noting(pg, queries, queries, note_withheld_queries))
         windows = await pg.counting_windows()
-        return _also_noting(shown, note_statement_window(windows))
-    sample = await pg.sample_top_queries(args.interval, sort_by=args.sort_by, limit=args.limit)
-    # The text says in a word what changed; --json prints the figures.
-    shown = Shown(sample.queries, text=sampled_queries_text(sample.queries), note=sample.changes_refused)
-    if not sample.withheld:
-        return shown
-    access = await pg.statistics_access()
-    if access.reads_all_stats:
-        return shown
-    return _also_noting(shown, note_withheld_sample(access, sample.withheld, args.sort_by))
+        result = _also_noting(
+            Shown(shown.rows, text=tags_text(shown.text if shown.text is not None else queries), note=shown.note), note_statement_window(windows)
+        )
+    if args.save is not None:
+        snapshot = await pg.snapshot_top_queries()
+        snapshot.save(args.save)
+        result = _also_noting(
+            result, f"Saved a snapshot of {len(snapshot.rows):,} statements to {args.save}; top-queries --compare {args.save} reads it back."
+        )
+    return result
 
 
 async def cmd_pooler(pg: PgDebug, args: argparse.Namespace) -> Any:

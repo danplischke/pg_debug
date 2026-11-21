@@ -76,6 +76,7 @@ from .plans import PlanDiagnoser
 from .plans import PlanFinding
 from .plans import PlanIssue
 from .plans import diagnose_plan
+from .plans.compare import QueryComparison
 from .plans.hypothetical import IndexDefinition
 from .plans.shape import PlanShape
 from .plans.tree import ExplainPlanArtifact
@@ -87,6 +88,7 @@ from .severity import Severity
 from .sharding import ShardReadiness
 from .statistics import StatisticsInspector
 from .sync import SyncPgDebug
+from .top_queries import QuerySnapshot
 from .top_queries import TopQueriesCalc
 
 if TYPE_CHECKING:
@@ -153,8 +155,10 @@ __all__ = [
     "PlanIssue",
     "PlanNode",
     "PlanShape",
+    "QueryComparison",
     "QueryContext",
     "QueryError",
+    "QuerySnapshot",
     "RuleId",
     "SafeSqlDriver",
     "SchemaInspector",

@@ -431,7 +431,8 @@ in the catalog. Name them rather than guessing around them:
 | --- | --- | --- |
 | Supabase, compute up to 2XL | the disk IO budget: bursts above baseline draw it down, and once it is spent "response times on requests can increase noticeably" and CPU rises with IO wait | "Disk IO % consumed" on the Database Health page; the Metrics API carries the disk IO series but not the budget |
 | Azure, Burstable tier | CPU credits: once spent the server runs at its baseline, which Microsoft calls "the most commonly misdiagnosed performance problem" | the `cpu_credits_remaining` and `cpu_credits_consumed` metrics |
-| RDS, Aurora | database load by wait event and query over time | CloudWatch Database Insights, which replaced the Performance Insights console |
+| RDS, Aurora | database load by wait event and query over time | CloudWatch Database Insights, which replaced the Performance Insights console; on Aurora, `history` reads the wait counters since the instance started |
+| RDS, Aurora | the server log: `auto_explain` plans, refused connections | `pg-debug logs --from-database` through `log_fdw` (`CREATE EXTENSION log_fdw; CREATE SERVER log_server FOREIGN DATA WRAPPER log_fdw;`, once, as `rds_superuser`), or files from `aws rds download-db-log-file-portion`; `auto_explain` goes in the parameter group's `shared_preload_libraries` |
 | Neon | Postgres logs | only through the Datadog or OpenTelemetry integrations (Scale plan, in beta) or Support; Neon has no `auto_explain`, so there is no logged plan for `diagnose --plan` |
 
 Where the platform keeps history that SQL can read, `pg-debug history` reads
@@ -455,7 +456,7 @@ the documentation says they keep:
 | Platform | What to read | How far back, and when it is there |
 | --- | --- | --- |
 | Azure | Query Store in database `azure_sys`: `query_store.qs_view`, `query_texts_view`, `pgms_wait_sampling_view`, `query_plans_view` | 7 days by default (up to 30), in 15-minute windows; opt-in, since `pg_qs.query_capture_mode` defaults to `none`; plans only with `pg_qs.store_query_plans` on |
-| Aurora | `aurora_stat_statements(true)`: `pg_stat_statements` plus storage and Optimized Reads columns; `aurora_stat_plans(true)`: one row per plan, with its `explain_plan` | the same window as `pg_stat_statements`; plans need `aurora_compute_plan_id` on |
+| Aurora | `aurora_stat_statements(true)`: `pg_stat_statements` plus storage and Optimized Reads columns; `aurora_stat_plans(true)`: one row per plan, with its `explain_plan`; `aurora_stat_system_waits()`: every wait event's count and time, named through `aurora_stat_wait_event()` and `aurora_stat_wait_type()` | statements and plans: the same window as `pg_stat_statements`, plans need `aurora_compute_plan_id` on; waits: since the instance started, not on RDS for PostgreSQL |
 | AlloyDB, Cloud SQL Enterprise Plus | `google_db_advisor_recommended_indexes`, `google_db_advisor_workload_report` | AlloyDB's advisor runs about every 24 hours; Cloud SQL needs `cloudsql.enable_index_advisor`; a non-superuser sees only recommendations from its own queries |
 | Neon | `neon_stat_file_cache` | since the compute started; needs `CREATE EXTENSION neon` in the database, which is a write, so ask first; off on computes of 18 CU and above |
 | any, with the extension | `pg_qualstats_pretty`, `pg_wait_sampling_profile` | in memory since the extension's reset or the server's start; both need their library in `shared_preload_libraries` |

@@ -13,7 +13,9 @@ import threading
 from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Iterable
+from collections.abc import Sequence
 from concurrent.futures import Future
+from pathlib import Path
 from typing import Any
 from typing import TypeVar
 
@@ -32,6 +34,7 @@ from .health.checks.index import MIN_WINDOW_DAYS
 from .history import HistoryReport
 from .index.base import DEFAULT_MAX_REGRESSION_FACTOR
 from .index_use import IndexUse
+from .logs import LogReport
 from .migration import StatementReview
 from .model import DEFAULT_MIN_ROWS
 from .model import ModelFinding
@@ -42,6 +45,7 @@ from .partition import PartitionCandidate
 from .plans import DEFAULT_MIN_RATIO
 from .plans import PlanFinding
 from .plans import PlanInput
+from .plans import QueryComparison
 from .plans.shape import PlanShape
 from .plans.tree import ExplainPlanArtifact
 from .pooler import PoolerReport
@@ -51,6 +55,7 @@ from .server_rates import ServerRates
 from .sharding import DEFAULT_INTERVAL_SECONDS
 from .sharding import ShardReadiness
 from .top_queries import QuerySample
+from .top_queries import QuerySnapshot
 from .waits import DEFAULT_SAMPLE_INTERVAL
 from .waits import WaitDiagnosis
 from .waits import WaitProfile
@@ -209,6 +214,16 @@ class SyncPgDebug:
         """Diagnose a plan that already exists, checking this database's catalog."""
         return self._call(self._client.diagnose_plan, plan, min_ratio=min_ratio)
 
+    def compare_queries(
+        self,
+        queries: Sequence[str],
+        values: Sequence[Sequence[Any]] | None = None,
+        repeat: int = 3,
+        min_ratio: float = DEFAULT_MIN_RATIO,
+    ) -> QueryComparison:
+        """Run several ways of writing a query, or one query with several sets of values, side by side."""
+        return self._call(self._client.compare_queries, queries, values=values, repeat=repeat, min_ratio=min_ratio)
+
     # -- Index use -----------------------------------------------------------
 
     def explain_index_use(self, sql: str, index: str | None = None) -> list[IndexUse]:
@@ -359,6 +374,18 @@ class SyncPgDebug:
     ) -> QuerySample:
         """Measure the most expensive queries over an interval, and say what the ranking left out."""
         return self._call(self._client.sample_top_queries, interval_seconds, sort_by=sort_by, limit=limit)
+
+    def read_server_logs(self, files: list[str] | None = None, latest: int = 1, min_ratio: float | None = None) -> LogReport:
+        """Read the server's own log files over SQL, through log_fdw, and report what they say happened."""
+        return self._call(self._client.read_server_logs, files=files, latest=latest, min_ratio=min_ratio)
+
+    def snapshot_top_queries(self) -> QuerySnapshot:
+        """Read pg_stat_statements' counters now, to compare a later moment with."""
+        return self._call(self._client.snapshot_top_queries)
+
+    def compare_top_queries(self, snapshot: QuerySnapshot | str | Path, sort_by: SortBy = "resources", limit: int = 10) -> QuerySample:
+        """The most expensive queries since a snapshot, ranked as a sample ranks them."""
+        return self._call(self._client.compare_top_queries, snapshot, sort_by=sort_by, limit=limit)
 
     def sample_server_rates(self, interval_seconds: float = DEFAULT_RATES_INTERVAL) -> ServerRates:
         """Measure the server's own counters over an interval, as rates per second."""

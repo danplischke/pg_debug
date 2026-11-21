@@ -305,6 +305,35 @@ class PlanDiagnoser:
             An empty list means the plan is a reasonable one, which is a real
             answer and the one worth trusting most.
         """
+        _check_min_ratio(min_ratio)
+        _, plan = await self.run(sql)
+        return await self._diagnose(plan, min_ratio)
+
+    async def run(self, sql: str) -> tuple[dict[str, Any], ExplainPlanArtifact]:
+        """Run one statement under ``EXPLAIN (ANALYZE, VERBOSE, BUFFERS, FORMAT JSON)``.
+
+        A statement that writes is rolled back. ``$1``-style parameters are
+        replaced with values chosen from the column statistics.
+
+        Returns:
+            The plan document EXPLAIN printed, and the plan read from it.
+
+        Raises:
+            InvalidArgumentError: Without a connection, in restricted mode,
+                or for more than one statement.
+            ExplainPlanError: If the statement could not be run.
+        """
+        self.ensure_can_run()
+        read_only = self._is_read_only(sql)
+        prepared = await self._substitute_bind_variables(sql)
+        return await self._explain(prepared, read_only=read_only)
+
+    def ensure_can_run(self) -> None:
+        """Refuse, with the reason, where statements cannot be run: without a connection, or in restricted mode.
+
+        Raises:
+            InvalidArgumentError: Saying which, and what to do instead.
+        """
         if self.sql_driver is None:
             raise InvalidArgumentError("Running a statement needs a connection. diagnose_plan() reads a plan that already exists without one.")
         if isinstance(self.sql_driver, SafeSqlDriver):
@@ -314,12 +343,10 @@ class PlanDiagnoser:
                 "write is rolled back, but a sequence it consumes is not given back — or hand over a plan you already "
                 "have with --plan, which runs nothing."
             )
+
+    async def findings(self, plan: ExplainPlanArtifact, min_ratio: float = DEFAULT_MIN_RATIO) -> list[PlanFinding]:
+        """What is wrong with a plan :meth:`run` produced, checked against the catalog."""
         _check_min_ratio(min_ratio)
-
-        read_only = self._is_read_only(sql)
-        prepared = await self._substitute_bind_variables(sql)
-
-        plan = await self._explain(prepared, read_only=read_only)
         return await self._diagnose(plan, min_ratio)
 
     async def diagnose_plan(self, plan: PlanInput, min_ratio: float = DEFAULT_MIN_RATIO) -> list[PlanFinding]:
@@ -395,7 +422,7 @@ class PlanDiagnoser:
             return sql
         return await SqlBindParams(self._driver).replace_parameters(sql)
 
-    async def _explain(self, sql: str, read_only: bool) -> ExplainPlanArtifact:
+    async def _explain(self, sql: str, read_only: bool) -> tuple[dict[str, Any], ExplainPlanArtifact]:
         """Run the statement under EXPLAIN and return the parsed plan.
 
         VERBOSE is asked for because it is the only way the plan says which
@@ -420,7 +447,7 @@ class PlanDiagnoser:
             raise ExplainPlanError(f"Expected a plan from EXPLAIN, got {type(payload)}.")
 
         try:
-            return ExplainPlanArtifact.from_json_data(payload[0])
+            return payload[0], ExplainPlanArtifact.from_json_data(payload[0])
         except Exception as e:
             raise ExplainPlanError(f"Could not read the plan EXPLAIN returned: {e}") from e
 

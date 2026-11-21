@@ -138,6 +138,9 @@ _RULES: tuple[Rule, ...] = (
     Rule("skipped_vacuum", "logs", "A vacuum or analyze skipped because a lock was not available", Needs.LOG),
     Rule("autovacuum_run", "logs", "How long autovacuum and autoanalyze took on a table", Needs.LOG),
     Rule("frequent_checkpoints", "logs", "Checkpoints occurring closer together than checkpoint_warning", Needs.LOG),
+    Rule("logged_plan", "logs", "A query's plans auto_explain logged, its slowest run diagnosed", Needs.LOG),
+    Rule("slow_statement", "logs", "A query's runs past log_min_duration_statement", Needs.LOG),
+    Rule("connection_event", "logs", "Connections refused, ended or lost, by kind", Needs.LOG),
 )
 
 #: Every rule, by id.

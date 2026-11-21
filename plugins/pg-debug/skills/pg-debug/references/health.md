@@ -134,6 +134,8 @@ pg-debug top-queries                                  # blended resource cost
 pg-debug top-queries --sort-by mean_time --limit 5    # slowest per call
 pg-debug top-queries --sort-by total_time --limit 5   # biggest total consumer
 pg-debug top-queries --interval 10                    # measure the next 10s only
+pg-debug top-queries --save before.json               # a snapshot, before a deploy
+pg-debug top-queries --compare before.json            # what ran since, and what changed
 ```
 
 `resources` blends execution time, buffer access and WAL volume: it lists the
@@ -156,6 +158,21 @@ every database's. Query text comes back normalized (`$1` for
 literals), which is what you feed to `tune-queries`. As a role without
 `pg_read_all_stats` only its own statements are ranked, since other roles'
 queryid is withheld; the command says on stderr how many ran.
+
+**Since a snapshot, for "what got slower after the deploy".** `--save FILE`
+writes `pg_stat_statements`' counters to a file; `--compare FILE`, an hour or a
+day later, reports each statement's counters since, and marks the ones that are
+new or whose mean time moved, as below, against a record before the snapshot
+at least as long as the time since it. Nothing has to run in between, which is
+what makes it work on RDS. When `pg_stat_statements` was reset after the
+snapshot the figures are since the reset and nothing is judged; a restart is
+said too (stderr has both). `--compare FILE --save FILE` keeps a rolling one.
+
+**Who sent it.** Each statement carries the sqlcommenter tags at the end of its
+text, as a `from` column: `route=/orders controller=orders`. In `top-queries`
+they are the first caller's only, since `pg_stat_statements` groups runs with
+their comments ignored and keeps one text; `activity`, and the plans and
+statements in `logs`, have each run's own.
 
 **Changed, not merely large.** A sample also marks each statement's `change`:
 `new` when it was not in pg_stat_statements before the sample, `slower` or

@@ -37,6 +37,8 @@ NOTHING: dict[str, Any] = {
     "aurora_stat_statements": None,
     "aurora_stat_plans": None,
     "aurora_compute_plan_id": None,
+    "aurora_stat_system_waits": None,
+    "server_started": None,
     "google_db_advisor": None,
     "pg_qualstats": None,
     "pg_wait_sampling": None,
@@ -106,6 +108,30 @@ async def test_a_platforms_object_in_the_catalog_is_read_even_when_the_platform_
     report = await read(server)
 
     assert source(report, "aurora_stat_statements").rows == [{"queryid": 1, "calls": 3}]
+
+
+@pytest.mark.asyncio
+async def test_aurora_s_wait_counters_are_read_named_and_in_milliseconds():
+    waits = [{"wait_event_type": "IO", "wait_event": "DataFileRead", "waits": 120, "wait_ms": 4500.0, "percent_of_wait_time": 75.0}]
+    server = Server({"aurora_stat_system_waits": "pg_catalog", "server_started": NOW}, {"aurora_stat_system_waits()": waits})
+
+    report = await read(server, Platform.AURORA, restricted=True)
+    waits_source = source(report, "aurora_wait_events")
+
+    assert waits_source.rows == waits
+    assert waits_source.error is None, "restricted mode allows the three functions"
+    assert NOW.isoformat() in waits_source.retention
+    [query] = [q for q in server.queries if "aurora_stat_system_waits()" in q]
+    assert "e.type_id = w.type_id AND e.event_id = w.event_id" in query
+    assert "w.wait_time / 1000.0" in query, "the system function counts microseconds"
+
+
+@pytest.mark.asyncio
+async def test_on_aurora_without_the_wait_function_it_says_where_it_exists():
+    report = await read(Server({}), Platform.AURORA)
+    waits_source = source(report, "aurora_wait_events")
+    assert not waits_source.present
+    assert "RDS for PostgreSQL does not" in waits_source.status
 
 
 @pytest.mark.asyncio

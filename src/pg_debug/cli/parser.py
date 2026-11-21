@@ -32,6 +32,7 @@ from ..waits import DEFAULT_SAMPLE_INTERVAL
 from .commands import cmd_activity
 from .commands import cmd_check_migration
 from .commands import cmd_column_stats
+from .commands import cmd_compare_queries
 from .commands import cmd_config
 from .commands import cmd_describe
 from .commands import cmd_diagnose
@@ -41,6 +42,7 @@ from .commands import cmd_health
 from .commands import cmd_history
 from .commands import cmd_index_use
 from .commands import cmd_locks
+from .commands import cmd_logs
 from .commands import cmd_model
 from .commands import cmd_objects
 from .commands import cmd_partitions
@@ -79,6 +81,7 @@ from .render import render_plan
 from .render import render_plan_findings
 from .render import render_plan_shapes
 from .render import render_pooler_report
+from .render import render_query_comparison
 from .render import render_rows
 from .render import render_server_rates
 from .render import render_shard_readiness
@@ -626,8 +629,46 @@ def build_parser() -> argparse.ArgumentParser:
     add_context_arguments(plans)
     plans.set_defaults(func=cmd_plans, render=render_plan_shapes, json_payload=plan_shapes_json)
 
-    logs = subparsers.add_parser("logs", help="Read server logs for deadlocks, lock waits, temp files, vacuums and checkpoints")
-    logs.add_argument("files", nargs="+", metavar="FILE", help="Log files: stderr, csvlog or jsonlog, plain or .gz; - for stdin.")
+    compare = subparsers.add_parser("compare-queries", help="Run ways of writing a query, or one query with several sets of values, side by side")
+    compare.add_argument(
+        "queries",
+        nargs="+",
+        metavar="QUERY",
+        help="Each variant: SQL, a file holding it, or - to read it from stdin. They are labelled A, B, C... in order.",
+    )
+    compare.add_argument(
+        "--values",
+        metavar="JSON",
+        action="append",
+        help="Values for $1, $2..., as a JSON array: '[42, \"open\", null]'. Repeatable: every variant runs with each set. "
+        "Without it a $1 is filled from the column statistics, as diagnose fills it.",
+    )
+    compare.add_argument("--repeat", type=int, default=3, help="Runs per combination; the median is reported (default: 3, at most 20).")
+    compare.add_argument(
+        "--min-ratio",
+        type=float,
+        default=DEFAULT_MIN_RATIO,
+        help=f"Report row estimates off by at least this factor (default: {DEFAULT_MIN_RATIO:g}).",
+    )
+    add_context_arguments(compare)
+    compare.set_defaults(func=cmd_compare_queries, render=render_query_comparison)
+
+    logs = subparsers.add_parser(
+        "logs", help="Read server logs for slow plans and statements, deadlocks, lock waits, temp files, vacuums, checkpoints and refused connections"
+    )
+    logs.add_argument(
+        "files",
+        nargs="*",
+        metavar="FILE",
+        help="Log files: stderr, csvlog or jsonlog, plain or .gz; - for stdin. With --from-database, file names in the server's log directory.",
+    )
+    logs.add_argument(
+        "--from-database",
+        action="store_true",
+        help="Read the server's own log files over SQL through log_fdw (RDS, Aurora), with -d or DATABASE_URL. Each file is "
+        "made a foreign table and rolled back; restricted mode refuses.",
+    )
+    logs.add_argument("--latest", type=int, default=1, help="With --from-database and no FILE, how many of the latest files to read (default: 1).")
     logs.add_argument(
         "--prefix",
         metavar="PREFIX",
@@ -640,7 +681,13 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(LOG_FORMATS),
         help="The log's format, as log_destination names it (default: detected from each file).",
     )
-    logs.set_defaults(render=render_log_report)
+    logs.add_argument(
+        "--min-ratio",
+        type=float,
+        default=DEFAULT_MIN_RATIO,
+        help=f"For auto_explain plans: report row estimates off by at least this factor (default: {DEFAULT_MIN_RATIO:g}).",
+    )
+    logs.set_defaults(func=cmd_logs, render=render_log_report)
 
     top_queries = subparsers.add_parser("top-queries", help="Report the most expensive queries (needs pg_stat_statements)")
     top_queries.add_argument(
@@ -657,6 +704,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         metavar="SECONDS",
         help="Sample over this many seconds instead of reporting totals since the last statistics reset.",
+    )
+    top_queries.add_argument(
+        "--save",
+        metavar="FILE",
+        help="Also save a snapshot of pg_stat_statements' counters to FILE, for a later --compare.",
+    )
+    top_queries.add_argument(
+        "--compare",
+        metavar="FILE",
+        help="Report what ran since the snapshot in FILE (from --save): each statement's counters since, and the statements "
+        "that are new or whose mean time moved. With --save as well, the new snapshot replaces the old for next time.",
     )
     top_queries.set_defaults(func=cmd_top_queries)
 

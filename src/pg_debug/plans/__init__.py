@@ -1,5 +1,8 @@
 """Execution plans: running EXPLAIN, reading the plan, and planning against indexes that do not exist."""
 
+from .compare import QueryComparison
+from .compare import QueryRun
+from .compare import compare_queries
 from .diagnoser import PlanDiagnoser
 from .diagnoser import PlanInput
 from .diagnoser import diagnose_plan
@@ -23,7 +26,10 @@ __all__ = [
     "PlanInput",
     "PlanIssue",
     "PlanNode",
+    "QueryComparison",
+    "QueryRun",
     "RuleContext",
+    "compare_queries",
     "diagnose_plan",
     "parse_plan",
 ]

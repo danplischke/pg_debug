@@ -48,7 +48,8 @@ _AT_SEVERITY = re.compile(rf"^(?P<prefix>.*?)\b(?P<level>{_LEVEL}):  (?P<message
 
 _TIMESTAMP = re.compile(r"\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(?:\.\d+)?(?: ?(?:[A-Z]{2,5}|[+-]\d\d(?::?\d\d)?))?")
 _PID = re.compile(r"\[(\d+)\]")
-_USER_AT_DB = re.compile(r"(?:^|\s)([\w.$-]*)@([\w.$-]*)(?:\s|$)")
+#: ``user@db``, between spaces or, as RDS's ``%t:%r:%u@%d:[%p]:`` puts it, colons.
+_USER_AT_DB = re.compile(r"(?:^|[\s:])([\w.$-]*)@([\w.$-]*)(?=[\s:\[]|$)")
 _KEY_VALUE = re.compile(r"\b(user|db|app|application_name)=([^,\s\]]*)")
 
 #: log_line_prefix escapes, as patterns, with the field each one fills.
@@ -344,8 +345,11 @@ def _split_line(line: str, pattern: re.Pattern[str] | None) -> dict[str, Any] | 
         fields["pid"] = pid.group(1)
     for key, value in _KEY_VALUE.findall(prefix):
         fields[{"user": "user", "db": "database"}.get(key, "application")] = value
-    if "user" not in fields and (at := _USER_AT_DB.search(prefix.split("]", 1)[-1])) is not None:
-        fields["user"], fields["database"] = at.group(1), at.group(2)
+    if "user" not in fields:
+        # After the [pid] where most prefixes put it; before it in RDS's.
+        at = _USER_AT_DB.search(prefix.split("]", 1)[-1]) or _USER_AT_DB.search(prefix)
+        if at is not None:
+            fields["user"], fields["database"] = at.group(1), at.group(2)
     return fields
 
 

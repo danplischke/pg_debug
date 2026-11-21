@@ -30,6 +30,7 @@ from ..baseline import health_finding_key
 from ..baseline import previous_entry
 from ..db.privileges import is_withheld
 from ..rules import health_rule
+from ..tags import describe_tags
 from ..waits import WaitProfile
 
 if TYPE_CHECKING:
@@ -261,6 +262,14 @@ def render_activity(rows: Sequence[Mapping[str, Any]]) -> str:
         }
         for row in rows
     ]
+    if any(row.get("tags") for row in rows):
+        # Who sent each query, ahead of the query, whose width it would
+        # otherwise take; the trace context is in --json.
+        for row, shown in zip(rows, projected, strict=True):
+            tags = {k: v for k, v in (row.get("tags") or {}).items() if k not in ("traceparent", "tracestate")}
+            query = shown.pop("query")
+            shown["from"] = describe_tags(tags)
+            shown["query"] = query
     cells = [
         {column: value if column == "query" and is_withheld(row) else _cell(value, ACTIVITY_CELL_WIDTH) for column, value in shown.items()}
         for row, shown in zip(rows, projected, strict=True)
@@ -1213,6 +1222,33 @@ def render_plan_shapes(shapes: Sequence[Any]) -> str:
     return "\n".join(lines).rstrip()
 
 
+def render_query_comparison(comparison: Any) -> str:
+    """Each run on a line with its median time and what it read, the fastest marked, then each plan and its findings."""
+    lines: list[str] = []
+    for run in comparison.runs:
+        if run.error:
+            lines.append(f"{run.label}: could not be run: {run.error}")
+            continue
+        mark = "  <- fastest" if run.label == comparison.fastest and len(comparison.runs) > 1 else ""
+        runs = ", ".join(f"{ms:,.1f}" for ms in run.runs_ms)
+        temp = f", {run.temp_written:,} temp blocks written" if run.temp_written else ""
+        lines.append(
+            f"{run.label}: {run.execution_ms:,.1f} ms median ({runs}), planning {run.planning_ms or 0:,.1f} ms, {run.rows:,} rows, "
+            f"{run.shared_hit:,} buffers hit and {run.shared_read:,} read{temp}{mark}"
+        )
+    for run in comparison.runs:
+        if run.error:
+            continue
+        lines += ["", f"{run.label}: {_one_line(run.query, 140)}", f"  plan {run.fingerprint}"]
+        lines.extend(f"    {line}" for line in run.shape)
+        for finding in run.findings:
+            lines.append(f"  [{finding.severity.value}] {finding.summary}")
+    if comparison.notes:
+        lines += ["", "What the numbers cannot settle:"]
+        lines.extend(f"  {note}" for note in comparison.notes)
+    return "\n".join(lines)
+
+
 def render_log_report(report: Any) -> str:
     """What the logs say happened, a section for each kind of event, then what they cannot show."""
     lines: list[str] = []
@@ -1281,6 +1317,43 @@ def render_log_report(report: Any) -> str:
     if report.checkpoints:
         counts = ", ".join(f"{count} {reason}" for reason, count in sorted(report.checkpoints.items(), key=lambda item: -item[1]))
         lines.append(f"Checkpoints logged, by what started them: {counts}.")
+
+    if report.plans:
+        lines += ["", "Plans auto_explain logged, by query, most total time first:"]
+        for logged in report.plans:
+            lines.append(
+                f"  {logged.runs} run(s), {logged.total_ms / 1000:.1f}s in all, slowest {logged.slowest_ms:,.0f} ms: "
+                f"{_one_line(logged.query) if logged.query else '(no query text)'} ({logged.sources[0]})"
+            )
+            lines.extend(f"    from {describe_tags(tags)}" for tags in logged.callers)
+            if logged.not_diagnosed:
+                lines.append(f"    not diagnosed: {logged.not_diagnosed}")
+            elif not logged.findings:
+                lines.append("    nothing wrong with the slowest run's plan, as far as the plan alone can tell")
+            for finding in logged.findings:
+                lines.append(f"    [{finding.severity.value}] {finding.summary}")
+
+    if report.slow_statements:
+        lines += ["", "Statements past log_min_duration_statement, by query, most total time first:"]
+        for slow in report.slow_statements:
+            lines.append(
+                f"  {slow.runs} run(s), {slow.total_ms / 1000:.1f}s in all, slowest {slow.slowest_ms:,.0f} ms: {_one_line(slow.query)} "
+                f"({slow.sources[0]})"
+            )
+            lines.extend(f"    from {describe_tags(tags)}" for tags in slow.callers)
+
+    if report.connections:
+        lines += ["", "Connections refused, ended or lost:"]
+        for events in report.connections:
+            when = f"{events.first_time} to {events.last_time}" if events.first_time and events.first_time != events.last_time else events.first_time
+            lines.append(f"  {events.kind}: {events.count}x{f', {when}' if when else ''} ({events.sources[0]})")
+            lines.append(f"    {events.example}")
+            if events.by:
+                top = sorted(events.by.items(), key=lambda item: -item[1])[:5]
+                lines.append(f"    by {', '.join(f'{who} ({count})' for who, count in top)}")
+            if events.details:
+                lines.append(f"    {', '.join(f'{detail}: {count}' for detail, count in events.details.items())}")
+            lines.append(f"    {events.meaning}")
 
     if report.unparsed_examples:
         lines += ["", "Lines not understood, for example:"]
@@ -1539,6 +1612,24 @@ def sampled_queries_text(queries: Sequence[Mapping[str, Any]]) -> list[dict[str,
     return [{**row, "change": word(row.get("change"))} for row in queries]
 
 
+def tags_text(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The rows with their sqlcommenter tags as ``from route=/orders controller=orders``, or without the column when none has any.
+
+    The trace context names one run, not the statement, and is left to --json.
+    """
+    if not any(row.get("tags") for row in rows):
+        return [{key: value for key, value in row.items() if key != "tags"} for row in rows]
+    shown: list[dict[str, Any]] = []
+    for row in rows:
+        tags = {k: v for k, v in (row.get("tags") or {}).items() if k not in ("traceparent", "tracestate")}
+        entry = {key: value for key, value in row.items() if key not in ("tags", "query")}
+        entry["from"] = describe_tags(tags)
+        if "query" in row:
+            entry["query"] = row["query"]
+        shown.append(entry)
+    return shown
+
+
 def note_withheld_sample(access: StatisticsAccess, withheld: int, sort_by: str) -> str | None:
     """What ``top-queries --interval`` left out of its ranking, and why."""
     if not withheld:
@@ -1587,6 +1678,7 @@ __all__ = [
     "render_wait_diagnosis",
     "render_wait_profile",
     "sampled_queries_text",
+    "tags_text",
     "to_json",
     "with_wait_diagnosis",
     "withheld_because",

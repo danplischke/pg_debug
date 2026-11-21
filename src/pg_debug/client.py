@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Iterable
+from collections.abc import Sequence
 from enum import Enum
+from pathlib import Path
 from typing import Any
 from typing import Literal
 
@@ -48,6 +50,8 @@ from .index.heuristic import StatisticsIndexAdvisor
 from .index.presentation import TextPresentation
 from .index_use import IndexUse
 from .index_use import IndexUseAnalyzer
+from .logs import LogReport
+from .logs.server import read_server_logs
 from .migration import MigrationLinter
 from .migration import StatementReview
 from .model import DEFAULT_MIN_ROWS
@@ -63,6 +67,8 @@ from .plans import ExplainPlanTool
 from .plans import PlanDiagnoser
 from .plans import PlanFinding
 from .plans import PlanInput
+from .plans import QueryComparison
+from .plans import compare_queries
 from .plans.shape import PlanShape
 from .plans.shape import read_plan_shapes
 from .plans.tree import ExplainPlanArtifact
@@ -83,6 +89,7 @@ from .sharding import ShardReadiness
 from .sharding import ShardReadinessAssessor
 from .statistics import StatisticsInspector
 from .top_queries import QuerySample
+from .top_queries import QuerySnapshot
 from .top_queries import TopQueriesCalc
 from .waits import DEFAULT_SAMPLE_INTERVAL
 from .waits import WaitDiagnosis
@@ -502,6 +509,45 @@ class PgDebug:
                 produced without ANALYZE.
         """
         return await PlanDiagnoser(await self.sql_driver(), platform=self._detect_platform).diagnose_plan(plan, min_ratio=min_ratio)
+
+    async def compare_queries(
+        self,
+        queries: Sequence[str],
+        values: Sequence[Sequence[Any]] | None = None,
+        repeat: int = 3,
+        min_ratio: float = DEFAULT_MIN_RATIO,
+    ) -> QueryComparison:
+        """Run several ways of writing a query, or one query with several sets of values, side by side.
+
+        Each variant is run with each set of values under ``EXPLAIN
+        (ANALYZE, BUFFERS)``, ``repeat`` times, and reported with its median
+        time, the buffers it read, the rows it returned, its plan's shape and
+        what :meth:`diagnose_query` finds wrong with its last run. The notes
+        say what the numbers cannot settle: variants that returned different
+        numbers of rows, a variant whose plan changed with its values, a cold
+        first run.
+
+        Like :meth:`diagnose_query` this runs the statements, so it is refused
+        in restricted mode; a write is rolled back.
+
+        Args:
+            queries: The variants, one statement each.
+            values: Values for ``$1``, ``$2``..., one list per run, written
+                into each statement as literals (a string untyped, as a bind
+                parameter is). None runs each as written, any ``$1`` filled
+                from the column statistics.
+            repeat: Runs per combination, 1 to 20; the median is reported.
+            min_ratio: As :meth:`diagnose_query` takes it.
+
+        Returns:
+            A :class:`~pg_debug.plans.QueryComparison`.
+
+        Raises:
+            InvalidArgumentError: In restricted mode, for no queries, or for
+                values that do not fit a query.
+        """
+        diagnoser = PlanDiagnoser(await self.sql_driver(), platform=self._detect_platform)
+        return await compare_queries(diagnoser, queries, value_sets=values, repeat=repeat, min_ratio=min_ratio)
 
     # -- Index use -----------------------------------------------------------
 
@@ -1026,6 +1072,82 @@ class PgDebug:
         sample_sort = {"resources": "resources", "mean_time": "mean", "total_time": "total"}[sort_by]
         top_queries_tool = TopQueriesCalc(sql_driver=await self.sql_driver())
         return await top_queries_tool.measure(interval_seconds, sort_by=sample_sort, limit=limit)  # type: ignore[arg-type]
+
+    async def read_server_logs(self, files: list[str] | None = None, latest: int = 1, min_ratio: float | None = None) -> LogReport:
+        """Read the server's own log files over SQL, through ``log_fdw``, and report what they say happened.
+
+        The same report :func:`pg_debug.analyze_logs` makes from files, for a
+        server whose log directory cannot be reached, as on RDS and Aurora:
+        each file is made a foreign table with ``log_fdw``, read, and the
+        transaction rolled back, so nothing is left behind. That is a write,
+        so restricted mode refuses it. Where the server writes both stderr
+        and csvlog, the csv file is read.
+
+        This follows ``log_fdw``'s documentation and source, and has not been
+        run on RDS.
+
+        Args:
+            files: Log files by name, as ``list_postgres_log_files()`` lists
+                them; None reads the latest ``latest``.
+            latest: How many of the latest files to read.
+            min_ratio: As :func:`pg_debug.analyze_logs` takes it.
+
+        Raises:
+            InvalidArgumentError: In restricted mode, without a ``log_fdw``
+                foreign server, or for a file not in the log directory.
+            ExtensionRequiredError: If ``log_fdw`` is not installed; the
+                message has the statements that install it.
+        """
+        return await read_server_logs(await self.sql_driver(), files=files, latest=latest, min_ratio=min_ratio)
+
+    async def snapshot_top_queries(self) -> QuerySnapshot:
+        """Read pg_stat_statements' counters now, to compare a later moment with.
+
+        :meth:`~pg_debug.top_queries.QuerySnapshot.save` writes it to a file,
+        and :meth:`compare_top_queries` compares it with the counters then:
+        before and after a deploy, or a day apart, with nothing running in
+        between.
+
+        Raises:
+            ExtensionRequiredError: If pg_stat_statements is not installed.
+        """
+        return await TopQueriesCalc(sql_driver=await self.sql_driver()).snapshot()
+
+    async def compare_top_queries(
+        self,
+        snapshot: QuerySnapshot | str | Path,
+        sort_by: SortBy = "resources",
+        limit: int = 10,
+    ) -> QuerySample:
+        """The most expensive queries since a snapshot, ranked as a sample ranks them.
+
+        Each statement's counters since the snapshot, and the statements that
+        are new since or whose mean time moved by a factor of three either
+        way against their mean before it, as candidates. A reset of
+        pg_stat_statements or a server restart since the snapshot is said in
+        ``notes`` rather than mistaken for work.
+
+        Args:
+            snapshot: A :class:`~pg_debug.top_queries.QuerySnapshot`, or the
+                file one was saved to.
+            sort_by: As :meth:`get_top_queries` takes it.
+            limit: Number of queries to return.
+
+        Returns:
+            A :class:`~pg_debug.top_queries.QuerySample` whose ``since`` is
+            when the snapshot was taken.
+
+        Raises:
+            InvalidArgumentError: If ``sort_by`` is not a valid criterion, the
+                file is not a snapshot, or the snapshot was taken in another
+                database.
+            ExtensionRequiredError: If pg_stat_statements is not installed.
+        """
+        _check_sort_by(sort_by)
+        if not isinstance(snapshot, QuerySnapshot):
+            snapshot = QuerySnapshot.load(snapshot)
+        sample_sort = {"resources": "resources", "mean_time": "mean", "total_time": "total"}[sort_by]
+        return await TopQueriesCalc(sql_driver=await self.sql_driver()).compare(snapshot, sort_by=sample_sort, limit=limit)  # type: ignore[arg-type]
 
     async def sample_server_rates(self, interval_seconds: float = DEFAULT_RATES_INTERVAL) -> ServerRates:
         """Measure the server's own counters over an interval, as rates per second.

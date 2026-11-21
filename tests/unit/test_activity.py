@@ -80,7 +80,19 @@ async def test_backends_filter_by_duration(pg16):
 async def test_backends_return_rows(pg16):
     driver = make_driver([{"pid": 42, "blocked_by": [41], "state": "active"}])
 
-    assert await ActivityInspector(driver).list_backends() == [{"pid": 42, "blocked_by": [41], "state": "active"}]
+    assert await ActivityInspector(driver).list_backends() == [{"pid": 42, "blocked_by": [41], "state": "active", "tags": {}}]
+
+
+@pytest.mark.asyncio
+async def test_each_backend_carries_the_sqlcommenter_tags_its_query_was_sent_with(pg16):
+    driver = make_driver(
+        [
+            {"pid": 1, "query": "SELECT * FROM orders /*controller='orders',route='%2Forders'*/"},
+            {"pid": 2, "query": "SELECT 1"},
+        ]
+    )
+    rows = await ActivityInspector(driver).list_backends()
+    assert [row["tags"] for row in rows] == [{"controller": "orders", "route": "/orders"}, {}]
 
 
 @pytest.mark.asyncio

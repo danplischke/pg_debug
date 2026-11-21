@@ -1,8 +1,13 @@
 import asyncio
+import json
 import logging
 from collections import Counter
 from dataclasses import asdict
 from dataclasses import dataclass
+from dataclasses import field
+from datetime import datetime
+from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from typing import Literal
 from typing import LiteralString
@@ -22,6 +27,7 @@ from .db.window import statement_window
 from .errors import ExtensionRequiredError
 from .errors import InvalidArgumentError
 from .severity import Confidence
+from .tags import parse_sql_comment
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +73,34 @@ DEFAULT_CHANGE_RATIO = 3.0
 #: counting before it, for its mean before the sample to be a history the
 #: sample can be compared with, and for one missing from it to be new.
 MIN_WINDOW_FACTOR = 10.0
+
+#: For a comparison with a saved snapshot: the period before the snapshot has
+#: to be at least as long as the period since it. A snapshot is taken on
+#: purpose, before a deploy or at the start of a day, and the two periods are
+#: what is being compared; a sample of a few seconds is not, and needs the
+#: longer record above.
+SNAPSHOT_WINDOW_FACTOR = 1.0
+
+#: What a snapshot file says it is, and the version of its layout.
+SNAPSHOT_FORMAT = "pg-debug top-queries snapshot"
+SNAPSHOT_VERSION = 1
+
+#: The counters a snapshot keeps for each statement.
+_SNAPSHOT_COLUMNS = (
+    "queryid",
+    "userid",
+    "dbid",
+    "toplevel",
+    "stats_since",
+    "query",
+    "calls",
+    "total_exec_time",
+    "rows",
+    "shared_blks_hit",
+    "shared_blks_read",
+    "shared_blks_dirtied",
+    "wal_bytes",
+)
 
 
 @dataclass(frozen=True)
@@ -201,9 +235,96 @@ class QuerySample:
     withheld: int = 0
     statement_window: dict[str, Any] | None = None
     changes_refused: str | None = None
+    since: str | None = None
+    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class QuerySnapshot:
+    """pg_stat_statements' counters at one moment, to compare a later moment with.
+
+    Saved to a file with :meth:`save` and read back with :meth:`load`, so the
+    two moments can be a deploy apart, or a day, with nothing running in
+    between: ``top-queries --save`` before, ``top-queries --compare`` after.
+
+    Attributes:
+        taken_at: The server's time when it was read.
+        database: The database it was read in; a snapshot compares only with
+            the same database.
+        server_version: The server's major version.
+        statements_since: When pg_stat_statements last started counting
+            (``pg_stat_statements_info.stats_reset``, PostgreSQL 14+), or
+            None when it does not record it.
+        server_started: When the server last started
+            (``pg_postmaster_start_time()``).
+        rows: Each statement the role is shown the identity of, with its
+            counters. Other roles' statements whose queryid is withheld are
+            not kept: they cannot be matched with anything later.
+        withheld: How many such statements there were.
+    """
+
+    taken_at: datetime
+    database: str
+    server_version: int
+    statements_since: datetime | None
+    server_started: datetime | None
+    rows: list[dict[str, Any]]
+    withheld: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        def when(value: datetime | None) -> str | None:
+            return value.isoformat() if value is not None else None
+
+        return {
+            "format": SNAPSHOT_FORMAT,
+            "version": SNAPSHOT_VERSION,
+            "taken_at": when(self.taken_at),
+            "database": self.database,
+            "server_version": self.server_version,
+            "statements_since": when(self.statements_since),
+            "server_started": when(self.server_started),
+            "withheld": self.withheld,
+            "rows": [{key: _number(value) for key, value in {**row, "stats_since": when(row.get("stats_since"))}.items()} for row in self.rows],
+        }
+
+    def save(self, path: str | Path) -> None:
+        """Write the snapshot to a JSON file."""
+        Path(path).write_text(json.dumps(self.to_dict(), indent=1, default=str) + "\n", encoding="utf-8")
+
+    @classmethod
+    def load(cls, path: str | Path) -> "QuerySnapshot":
+        """Read a snapshot :meth:`save` wrote.
+
+        Raises:
+            InvalidArgumentError: If the file cannot be read or is not a snapshot.
+        """
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except OSError as e:
+            raise InvalidArgumentError(f"Could not read the snapshot {path}: {e.strerror or e}.") from e
+        except ValueError as e:
+            raise InvalidArgumentError(f"{path} is not a top-queries snapshot: it is not JSON ({e}).") from e
+        if not isinstance(data, dict) or data.get("format") != SNAPSHOT_FORMAT:
+            raise InvalidArgumentError(f"{path} is not a top-queries snapshot; top-queries --save FILE writes one.")
+        if data.get("version") != SNAPSHOT_VERSION:
+            raise InvalidArgumentError(f"{path} is a version {data.get('version')} snapshot; this pg-debug reads version {SNAPSHOT_VERSION}.")
+
+        def when(value: Any) -> datetime | None:
+            return datetime.fromisoformat(value) if value else None
+
+        rows = [{**row, "stats_since": when(row.get("stats_since"))} for row in data.get("rows") or []]
+        return cls(
+            taken_at=when(data["taken_at"]) or datetime.now().astimezone(),
+            database=data.get("database") or "",
+            server_version=int(data.get("server_version") or 0),
+            statements_since=when(data.get("statements_since")),
+            server_started=when(data.get("server_started")),
+            rows=rows,
+            withheld=int(data.get("withheld") or 0),
+        )
 
 
 def _wal_bytes(stats: StatementStatistics) -> str:
@@ -305,6 +426,106 @@ class TopQueriesCalc:
             withheld=self._withheld_that_ran(before, after),
             statement_window=window.to_dict(),
             changes_refused=refused,
+        )
+
+    async def snapshot(self) -> QuerySnapshot:
+        """Read pg_stat_statements' counters now, to compare a later moment with.
+
+        Raises:
+            ExtensionRequiredError: If pg_stat_statements is not installed.
+        """
+        stats = await self._require_pg_stat_statements()
+        rows = await self._counter_snapshot(stats)
+        window = await self._statement_window(stats)
+        about = await SafeSqlDriver.execute_param_query(
+            self.sql_driver,
+            "SELECT current_database() AS database, current_setting('server_version_num')::int / 10000 AS version, "
+            "pg_postmaster_start_time() AS started",
+        )
+        cells = about[0].cells if about else {}
+        kept = [{column: row.get(column) for column in _SNAPSHOT_COLUMNS} for row in rows if row.get("queryid") is not None]
+        return QuerySnapshot(
+            taken_at=window.now,
+            database=cells.get("database") or "",
+            server_version=int(cells.get("version") or 0),
+            statements_since=window.since,
+            server_started=cells.get("started"),
+            rows=[row for row in kept if not self._is_own_bookkeeping(row.get("query"))],
+            withheld=sum(1 for row in rows if row.get("queryid") is None),
+        )
+
+    async def compare(
+        self,
+        snapshot: QuerySnapshot,
+        sort_by: Literal["resources", "mean", "total"] = "total",
+        limit: int = 10,
+    ) -> QuerySample:
+        """What ran between a saved snapshot and now, ranked as a sample ranks it.
+
+        The same subtraction :meth:`measure` makes between two snapshots, with
+        the first read from a file: each statement's counters since the
+        snapshot, the statements that are new since, and the ones whose mean
+        time moved by a factor of three either way against their mean before
+        it, as candidates. A comparison asks for a record before the snapshot
+        at least as long as the time since it.
+
+        What moved the counters in between is said rather than mistaken for
+        work: a pg_stat_statements reset since the snapshot means every
+        statement counted again from zero, so each is measured from the reset
+        and none is judged against its past; a server restart may have lost
+        what was recorded since its last clean shutdown.
+
+        Raises:
+            ExtensionRequiredError: If pg_stat_statements is not installed.
+            InvalidArgumentError: If the snapshot was taken in another
+                database, or after now.
+        """
+        later = await self.snapshot()
+        if snapshot.database != later.database:
+            raise InvalidArgumentError(
+                f"The snapshot was taken in database {snapshot.database!r}, and this is {later.database!r}: "
+                "pg_stat_statements' counters only compare within one database."
+            )
+        elapsed = (later.taken_at - snapshot.taken_at).total_seconds()
+        if elapsed <= 0:
+            raise InvalidArgumentError(f"The snapshot was taken at {snapshot.taken_at.isoformat()}, which is not before now.")
+
+        notes: list[str] = []
+        before_rows = snapshot.rows
+        reset_at = later.statements_since
+        reset_after = reset_at is not None and reset_at > snapshot.taken_at
+        if reset_at is not None and reset_after:
+            notes.append(
+                f"pg_stat_statements was reset at {reset_at.isoformat()}, after the snapshot: every statement "
+                "counted again from zero then, so the figures are since the reset, and none is compared with its past."
+            )
+            before_rows = []
+        elif later.statements_since is None:
+            notes.append(
+                "pg_stat_statements before 1.9 does not record when it was reset: a reset since the snapshot shows only as "
+                "counters that went backwards, and a statement that ran more after a reset than before it would be measured short."
+            )
+        if snapshot.server_started and later.server_started and later.server_started > snapshot.server_started:
+            notes.append(
+                f"The server restarted at {later.server_started.isoformat()}, after the snapshot. A clean shutdown keeps "
+                "pg_stat_statements' counters; a crash, an immediate shutdown or a failover loses what was recorded since the last clean one."
+            )
+        if snapshot.server_version and later.server_version and snapshot.server_version != later.server_version:
+            notes.append(f"The server was PostgreSQL {snapshot.server_version} at the snapshot and is {later.server_version} now.")
+
+        window = CountingWindow(
+            since=later.statements_since if not reset_after else None, now=later.taken_at, began_with="reset" if later.statements_since else None
+        )
+        rule = ChangeRule(sample_seconds=elapsed, window=window, min_window_factor=SNAPSHOT_WINDOW_FACTOR)
+        refused = None if reset_after else rule.refusal()
+        deltas = self._diff_snapshots(self._by_statement(before_rows), self._by_statement(later.rows), rule=None if refused or reset_after else rule)
+        return QuerySample(
+            queries=self._rank(deltas, sort_by=sort_by, limit=limit),
+            withheld=0,
+            statement_window=window.to_dict(),
+            changes_refused=refused,
+            since=snapshot.taken_at.isoformat(),
+            notes=notes,
         )
 
     async def _statement_window(self, stats: StatementStatistics) -> CountingWindow:
@@ -417,7 +638,7 @@ class TopQueriesCalc:
                 baseline = None
                 reset = True
 
-            delta = {"query": row["query"], "queryid": row["queryid"]}
+            delta = {"query": row["query"], "queryid": row["queryid"], "tags": parse_sql_comment(row.get("query"))}
             for counter in counters:
                 current = row.get(counter) or 0
                 previous = (baseline or {}).get(counter) or 0
@@ -493,7 +714,7 @@ class TopQueriesCalc:
             query,
             [limit],
         )
-        slow_queries = [row.cells for row in slow_query_rows] if slow_query_rows else []
+        slow_queries = [_tagged(row.cells) for row in slow_query_rows] if slow_query_rows else []
         logger.info("Found %s slow queries", len(slow_queries))
         return slow_queries
 
@@ -591,6 +812,23 @@ class TopQueriesCalc:
             self.sql_driver,
             query,
         )
-        resource_queries = [row.cells for row in slow_query_rows] if slow_query_rows else []
+        resource_queries = [_tagged(row.cells) for row in slow_query_rows] if slow_query_rows else []
         logger.info("Found %s resource-intensive queries", len(resource_queries))
         return resource_queries
+
+
+def _tagged(row: dict[str, Any]) -> dict[str, Any]:
+    """The row with the sqlcommenter tags of its text.
+
+    pg_stat_statements groups a statement's runs with their comments ignored,
+    and keeps the text of the run it recorded first: the tags are that
+    caller's, not every caller's.
+    """
+    return {**row, "tags": parse_sql_comment(row.get("query"))}
+
+
+def _number(value: Any) -> Any:
+    """A numeric counter as JSON holds it: wal_bytes is numeric, which psycopg reads as a Decimal."""
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    return value

@@ -8,9 +8,14 @@ When it already happened and is over, the server log holds what the views
 no longer show: `pg-debug logs postgresql.log` (no connection) lists the
 deadlocks with both processes and their queries, the lock waits past
 `deadlock_timeout` with their holders and how each ended, temporary files per
-statement, vacuums skipped for a lock and slow autovacuum runs. Relay its
-notes too: a lock wait is only logged with `log_lock_waits = on`, so a log
-without any says nothing unless that was on. The `logs` section of
+statement, vacuums skipped for a lock and slow autovacuum runs, the plans
+`auto_explain` logged (the slowest run of each query diagnosed), and the
+connections refused or lost: failed passwords, `max_connections` reached, idle
+timeouts, and a backend killed by signal 9, which is the OOM killer and
+restarts every session. Relay its notes too: a lock wait is only logged with
+`log_lock_waits = on`, so a log without any says nothing unless that was on.
+On RDS and Aurora, `pg-debug logs --from-database` reads the server's own
+files through `log_fdw` (unrestricted mode). The `logs` section of
 [rules.md](rules.md) has the detail.
 
 ## Something is wrong right now
